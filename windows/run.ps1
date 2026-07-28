@@ -10,7 +10,7 @@ if ($args.Count -ge 1) {
     $Command = [string]$args[0]
 }
 if (@("validate", "live", "start") -notcontains $Command) {
-    throw "未知命令：$Command（可用：validate、live、start）"
+    throw "Unknown command: $Command (supported: validate, live, start)"
 }
 if ($args.Count -gt 1) {
     for ($Index = 1; $Index -lt $args.Count; $Index++) {
@@ -32,7 +32,7 @@ elseif ($Command -eq "validate" -and $ForwardArgs.Count -eq 1 -and $ForwardArgs[
 }
 
 if (-not (Test-Path $Python)) {
-    throw "尚未安装运行环境，请先在 windows 目录执行 .\setup.ps1"
+    throw "Python environment is missing. Run .\setup.ps1 from the windows directory first."
 }
 
 $env:PYTHONPATH = $WindowsDir
