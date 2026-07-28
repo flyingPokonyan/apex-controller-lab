@@ -1,0 +1,25 @@
+Apex Controller Lab 0.4.0
+=========================
+
+解压后应看到：
+
+  apex-controller-lab\
+    windows\
+    calibration\
+    docs\
+    START-HERE.txt
+
+Windows 第一次使用：
+
+1. 进入 apex-controller-lab\windows
+2. 如果没有 .venv，运行：
+   powershell -NoProfile -ExecutionPolicy Bypass -File .\setup.ps1
+3. 发布压缩包包含完整样本，可双击 validate-tutorial.cmd 做离线验证
+   GitHub 源码为保护隐私不包含原始全屏样本，可直接进入下一步
+4. 打开 Apex 后，双击 start-tutorial.cmd；再切回 Apex
+5. GitHub 克隆版本以后可双击 update.cmd 更新
+
+运行中 Apex 不在前台时只会暂停。F8 紧急停止。
+本地状态页：http://127.0.0.1:8765
+
+不要把录像文件复制进项目目录；运行器不需要原始 MP4。

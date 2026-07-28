@@ -1,0 +1,79 @@
+{
+  "schemaVersion": 1,
+  "language": "zh-CN",
+  "defaultMinConfidence": 0.65,
+  "probeRegions": ["titleCenter", "bottomCenter", "bottomRight"],
+  "regions": {
+    "titleCenter": [320, 80, 2240, 760],
+    "bottomCenter": [480, 820, 2080, 1440],
+    "bottomRight": [1360, 760, 2560, 1440]
+  },
+  "rules": [
+    {
+      "id": "level-up-continue",
+      "enabled": true,
+      "state": "LEVEL_UP_VIDEO",
+      "safePage": true,
+      "requirements": [
+        {
+          "region": "titleCenter",
+          "any": ["等级提升", "等级升级", "升级"]
+        },
+        {
+          "region": "bottomCenter",
+          "any": ["继续", "跳过"]
+        }
+      ],
+      "action": {
+        "name": "enterScanCode",
+        "kind": "key",
+        "maxAttempts": 2,
+        "confirmMs": 2500
+      }
+    },
+    {
+      "id": "reward-continue",
+      "enabled": true,
+      "state": "REWARD",
+      "safePage": true,
+      "requirements": [
+        {
+          "region": "titleCenter",
+          "any": ["奖励", "已解锁", "获得奖励"]
+        },
+        {
+          "region": "bottomCenter",
+          "any": ["继续", "领取"]
+        }
+      ],
+      "action": {
+        "name": "enterScanCode",
+        "kind": "key",
+        "maxAttempts": 2,
+        "confirmMs": 2500
+      }
+    },
+    {
+      "id": "announcement-close",
+      "enabled": true,
+      "state": "GENERIC_MODAL",
+      "safePage": true,
+      "requirements": [
+        {
+          "region": "titleCenter",
+          "any": ["公告", "新闻", "活动"]
+        },
+        {
+          "region": "bottomRight",
+          "any": ["关闭", "返回"]
+        }
+      ],
+      "action": {
+        "name": "escapeScanCode",
+        "kind": "key",
+        "maxAttempts": 1,
+        "confirmMs": 2000
+      }
+    }
+  ]
+}

@@ -1,0 +1,144 @@
+{
+  "profile": "first-match-2560x1440.zh-CN",
+  "environment": {
+    "width": 2560,
+    "height": 1440,
+    "language": "zh-CN",
+    "displayMode": "fullscreen",
+    "captureBackend": "dxgi",
+    "outputIndex": 0,
+    "foregroundExecutables": ["r5apex.exe", "r5apex_dx12.exe"]
+  },
+  "timing": {
+    "pollMs": 300,
+    "foregroundPollMs": 500,
+    "resumeStabilizeMs": 700,
+    "unknownGraceMs": 5000,
+    "unknownPollMs": 2000,
+    "groundPollMs": 1500,
+    "continueTimeoutMs": 300000,
+    "lobbyTimeoutMs": 120000,
+    "dropshipTimeoutMs": 900000,
+    "launchReadyTimeoutMs": 10000,
+    "freefallTimeoutMs": 15000,
+    "landingTimeoutMs": 120000,
+    "finalStabilizeMs": 1000,
+    "keyTapMs": 80,
+    "readyClickAttempts": 3,
+    "readyClickConfirmDelayMs": 1500,
+    "ocrScanIntervalMs": 2000
+  },
+  "actions": {
+    "continueClick": [1280, 865],
+    "readyClick": [1280, 1295],
+    "detachScanCode": 29,
+    "launchScanCode": 18,
+    "escapeScanCode": 1,
+    "enterScanCode": 28,
+    "spaceScanCode": 57
+  },
+  "ocr": {
+    "enabled": true,
+    "rules": "windows/config/obstacle-rules.zh-CN.json",
+    "stableObservations": 2
+  },
+  "controlApi": {
+    "enabled": true,
+    "bind": "127.0.0.1",
+    "port": 8765
+  },
+  "states": {
+    "CONTINUE": {
+      "stableFrames": 2,
+      "anchors": [
+        {
+          "template": "calibration/templates/continue.png",
+          "roi": [1085, 805, 1475, 930],
+          "threshold": 0.72,
+          "searchPx": 4
+        }
+      ]
+    },
+    "LOBBY_READY": {
+      "stableFrames": 2,
+      "anchors": [
+        {
+          "template": "calibration/templates/lobby-ready.png",
+          "roi": [1030, 1205, 1530, 1370],
+          "threshold": 0.72,
+          "searchPx": 4
+        }
+      ]
+    },
+    "LEGEND_SELECT": {
+      "stableFrames": 2,
+      "anchors": [
+        {
+          "template": "calibration/templates/legend-select.png",
+          "roi": [40, 20, 250, 120],
+          "threshold": 0.72,
+          "searchPx": 4
+        }
+      ]
+    },
+    "DROPSHIP_JUMPMASTER_WAIT": {
+      "stableFrames": 2,
+      "anchors": [
+        {
+          "template": "calibration/templates/following-detach.png",
+          "roi": [1125, 1180, 1450, 1330],
+          "threshold": 0.72,
+          "searchPx": 4
+        }
+      ]
+    },
+    "LAUNCH_READY": {
+      "stableFrames": 2,
+      "anchors": [
+        {
+          "template": "calibration/templates/launch-ready.png",
+          "roi": [1125, 1130, 1460, 1330],
+          "threshold": 0.72,
+          "searchPx": 4
+        }
+      ]
+    },
+    "FREEFALL": {
+      "stableFrames": 2,
+      "anchors": [
+        {
+          "template": "calibration/templates/freefall-speed.png",
+          "roi": [610, 430, 840, 540],
+          "threshold": 0.62,
+          "searchPx": 4
+        }
+      ]
+    },
+    "LANDED": {
+      "stableFrames": 3,
+      "anchors": [
+        {
+          "template": "calibration/templates/landed-ability.png",
+          "roi": [1200, 1210, 1390, 1385],
+          "threshold": 0.62,
+          "searchPx": 4
+        },
+        {
+          "template": "calibration/templates/landed-weapons.png",
+          "roi": [1740, 1275, 2500, 1395],
+          "threshold": 0.62,
+          "searchPx": 4
+        }
+      ]
+    }
+  },
+  "offlineCases": [
+    ["calibration/raw/01-continue.png", "CONTINUE"],
+    ["calibration/raw/02-onboarding-lobby-ready.png", "LOBBY_READY"],
+    ["calibration/raw/03-legend-select-auto.png", "LEGEND_SELECT"],
+    ["calibration/raw/04-dropship-following.png", "DROPSHIP_JUMPMASTER_WAIT"],
+    ["calibration/raw/05-solo-launch-ready.png", "LAUNCH_READY"],
+    ["calibration/raw/06-freefall.png", "FREEFALL"],
+    ["calibration/raw/07-landed.png", "LANDED"]
+  ]
+}

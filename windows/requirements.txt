@@ -1,0 +1,5 @@
+dxcam==0.3.0
+numpy>=2.0,<3
+opencv-python>=4.12,<5
+onnxruntime==1.27.0
+rapidocr==3.9.2

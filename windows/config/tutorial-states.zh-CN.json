@@ -1,0 +1,118 @@
+{
+  "schemaVersion": 1,
+  "language": "zh-CN",
+  "defaultMinConfidence": 0.58,
+  "regions": {
+    "fullFrame": [0, 0, 2560, 1440]
+  },
+  "rules": [
+    {
+      "id": "auth-two-factor-manual",
+      "state": "AUTH_REQUIRED",
+      "requirements": [
+        {"region": "fullFrame", "any": ["双重身份登录", "双里身份登录"]},
+        {"region": "fullFrame", "all": ["输入您的代码", "输入6位数代码"]}
+      ]
+    },
+    {
+      "id": "news-welcome-safe-close",
+      "state": "NEWS_WELCOME",
+      "requirements": [{"region": "fullFrame", "all": ["欢迎传奇", "ESC返回"]}]
+    },
+    {
+      "id": "memorial-safe-close",
+      "state": "NEWS_MEMORIAL",
+      "requirements": [{"region": "fullFrame", "all": ["纪念泰坦", "ESC返回"]}]
+    },
+    {
+      "id": "guide-account",
+      "state": "GUIDE_ACCOUNT",
+      "requirements": [{"region": "fullFrame", "all": ["账户", "账号经验值", "奖励进度", "继续"]}]
+    },
+    {
+      "id": "guide-friends",
+      "state": "GUIDE_FRIENDS",
+      "requirements": [{"region": "fullFrame", "all": ["好友", "好友列表", "组队", "继续"]}]
+    },
+    {
+      "id": "guide-settings",
+      "state": "GUIDE_SETTINGS",
+      "requirements": [{"region": "fullFrame", "all": ["设置", "游戏设置", "继续"]}]
+    },
+    {
+      "id": "guide-progress",
+      "state": "GUIDE_PROGRESS",
+      "requirements": [{"region": "fullFrame", "all": ["进度", "通行证", "挑战进度", "继续"]}]
+    },
+    {
+      "id": "tutorial-weapon-info",
+      "state": "TUTORIAL_WEAPON_INFO",
+      "requirements": [{"region": "fullFrame", "all": ["教学", "武器和弹药类型", "ESC返回"]}]
+    },
+    {
+      "id": "tutorial-health-info",
+      "state": "TUTORIAL_HEALTH_INFO",
+      "requirements": [{"region": "fullFrame", "all": ["教学", "生命值和护盾", "ESC返回"]}]
+    },
+    {
+      "id": "tutorial-movement",
+      "state": "TUTORIAL_MOVEMENT",
+      "requirements": [{"region": "fullFrame", "all": ["移动", "疾跑", "跳跃", "下蹲"]}]
+    },
+    {
+      "id": "tutorial-travel",
+      "state": "TUTORIAL_TRAVEL",
+      "requirements": [{"region": "fullFrame", "all": ["奔跑时获得滑行加速"]}]
+    },
+    {
+      "id": "tutorial-open-bin",
+      "state": "TUTORIAL_OPEN_BIN",
+      "requirements": [{"region": "fullFrame", "all": ["打开补给箱"]}]
+    },
+    {
+      "id": "tutorial-pickup-weapon",
+      "state": "TUTORIAL_PICKUP_WEAPON",
+      "requirements": [{"region": "fullFrame", "all": ["捡起武器", "捡起弹药"]}]
+    },
+    {
+      "id": "tutorial-shoot",
+      "state": "TUTORIAL_SHOOT",
+      "requirements": [{"region": "fullFrame", "all": ["射击训练仿生人", "使用所有子弹"]}]
+    },
+    {
+      "id": "tutorial-reload",
+      "state": "TUTORIAL_RELOAD",
+      "requirements": [{"region": "fullFrame", "all": ["再装填"]}]
+    },
+    {
+      "id": "tutorial-light-ammo",
+      "state": "TUTORIAL_LIGHT_AMMO",
+      "requirements": [{"region": "fullFrame", "all": ["捡起轻型弹药"]}]
+    },
+    {
+      "id": "tutorial-secondary",
+      "state": "TUTORIAL_SECONDARY",
+      "requirements": [{"region": "fullFrame", "all": ["捡起一把副武器", "切换武器"]}]
+    },
+    {
+      "id": "tutorial-heals-pickup",
+      "state": "TUTORIAL_HEALS_PICKUP",
+      "requirements": [{"region": "fullFrame", "all": ["捡起注射器", "捡起小型护盾电池"]}]
+    },
+    {
+      "id": "tutorial-heals-use",
+      "state": "TUTORIAL_HEALS_USE",
+      "requirements": [{"region": "fullFrame", "all": ["使用注射器", "使用小型护盾电池", "打开治疗物品菜单"]}]
+    },
+    {
+      "id": "tutorial-ping",
+      "state": "TUTORIAL_PING",
+      "requirements": [{"region": "fullFrame", "all": ["标记位置", "标记敌方位置", "标记武器", "标记弹药", "使用标记菜单"]}]
+    },
+    {
+      "id": "lobby-mode-select",
+      "state": "LOBBY_MODE_SELECT",
+      "requirements": [{"region": "fullFrame", "all": ["选择", "训练", "射击场"]}]
+    }
+  ]
+}
