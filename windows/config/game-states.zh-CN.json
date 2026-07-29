@@ -4,16 +4,114 @@
   "defaultMinConfidence": 0.8,
   "_note": "每个区域都紧到只含一行字，所以可以跳过文字检测直接识别。检测占了 OCR 的绝大部分开销且与输入尺寸基本无关，全屏一次 2100-6800ms，这里每个区域 4-16ms。所有 ROI 与置信度均取自 2026-07-29 目标机器的实时 DXGI 帧。",
   "regions": {
-    "lobbyModeName": {"roi": [60, 1060, 420, 1140], "singleLine": true},
-    "lobbyPrimaryButton": {"roi": [1200, 1240, 1360, 1340], "singleLine": true},
-    "postMatchHints": {"roi": [1820, 1362, 2500, 1425], "singleLine": true},
-    "postMatchTabs": {"roi": [800, 115, 1745, 175], "singleLine": true},
-    "spectateTabs": {"roi": [1090, 115, 1460, 175], "singleLine": true},
-    "squadCountAlive": {"roi": [2150, 58, 2420, 112], "singleLine": true},
-    "modalTitle": {"roi": [1080, 445, 1480, 540], "singleLine": true},
-    "titleContinue": {"roi": [1240, 820, 1380, 900], "singleLine": true},
-    "modePanelTargetCard": {"roi": [400, 990, 640, 1080], "singleLine": true},
-    "modePanelConfirm": {"roi": [440, 1110, 740, 1180], "singleLine": true}
+    "lobbyModeName": {
+      "roi": [
+        60,
+        1060,
+        420,
+        1140
+      ],
+      "singleLine": true
+    },
+    "lobbyPrimaryButton": {
+      "roi": [
+        1200,
+        1240,
+        1360,
+        1340
+      ],
+      "singleLine": true
+    },
+    "postMatchHints": {
+      "roi": [
+        1820,
+        1362,
+        2500,
+        1425
+      ],
+      "singleLine": true
+    },
+    "postMatchTabs": {
+      "roi": [
+        800,
+        115,
+        1745,
+        175
+      ],
+      "singleLine": true
+    },
+    "spectateTabs": {
+      "roi": [
+        1090,
+        115,
+        1460,
+        175
+      ],
+      "singleLine": true
+    },
+    "squadCountAlive": {
+      "roi": [
+        2150,
+        58,
+        2420,
+        112
+      ],
+      "singleLine": true
+    },
+    "modalTitle": {
+      "roi": [
+        1080,
+        445,
+        1480,
+        540
+      ],
+      "singleLine": true
+    },
+    "titleContinue": {
+      "roi": [
+        1240,
+        820,
+        1380,
+        900
+      ],
+      "singleLine": true
+    },
+    "dropshipPrompt": {
+      "roi": [
+        1140,
+        1258,
+        1425,
+        1318
+      ],
+      "singleLine": true
+    },
+    "freefallSpeedLabel": {
+      "roi": [
+        615,
+        438,
+        715,
+        495
+      ],
+      "singleLine": true
+    },
+    "modePanelTargetCard": {
+      "roi": [
+        400,
+        990,
+        640,
+        1080
+      ],
+      "singleLine": true
+    },
+    "modePanelConfirm": {
+      "roi": [
+        440,
+        1110,
+        740,
+        1180
+      ],
+      "singleLine": true
+    }
   },
   "rules": [
     {
@@ -21,7 +119,12 @@
       "state": "CLIMB_SETTINGS_MODAL",
       "_note": "计划外的首次设置提示，出现在对局结束回大厅的路上。放在最前是因为弹窗盖住底下的一切，底层画面的读数在它出现时不可信。",
       "requirements": [
-        {"region": "modalTitle", "all": ["攀爬加速设置"]}
+        {
+          "region": "modalTitle",
+          "all": [
+            "攀爬加速设置"
+          ]
+        }
       ]
     },
     {
@@ -29,7 +132,12 @@
       "state": "POST_MATCH_SUMMARY",
       "_note": "结算页。底部提示行是唯一可操作的证据；顶部页签会随所选分页变化，所以只作为佐证不作为判据。",
       "requirements": [
-        {"region": "postMatchHints", "all": ["返回大厅"]}
+        {
+          "region": "postMatchHints",
+          "all": [
+            "返回大厅"
+          ]
+        }
       ]
     },
     {
@@ -37,7 +145,51 @@
       "state": "SPECTATING",
       "_note": "死亡回放与观战队友共用这套页签。存活帧在同一区域读到的是罗盘数字，不会误命中。",
       "requirements": [
-        {"region": "spectateTabs", "all": ["观战"]}
+        {
+          "region": "spectateTabs",
+          "all": [
+            "观战"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "dropship-following",
+      "state": "DROPSHIP_FOLLOWING",
+      "_note": "还跟着小队，可以按 LCTRL 脱离。同一区域在脱离后读到的是「重新加入小队」，所以两态用一个区域就能分开。上方那行「XXX是跳伞指挥官」含玩家名，不能作为判据。",
+      "requirements": [
+        {
+          "region": "dropshipPrompt",
+          "all": [
+            "单独发射"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "dropship-launch-ready",
+      "state": "LAUNCH_READY",
+      "_note": "已脱离小队，可以按 E 发射。判据用「重新加入小队」而不是「发射」：E 的按键图标会被识别成「日」，不可靠。",
+      "requirements": [
+        {
+          "region": "dropshipPrompt",
+          "all": [
+            "重新加入小队"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "freefall",
+      "state": "FREEFALL",
+      "_note": "自由落体。原模板 freefall-speed.png 裁的是速度读数本身，那个数字每帧都变，实测最高 0.587 从未越过 0.62 阈值；这里用它旁边的固定标签。",
+      "requirements": [
+        {
+          "region": "freefallSpeedLabel",
+          "all": [
+            "速度"
+          ]
+        }
       ]
     },
     {
@@ -45,7 +197,12 @@
       "state": "IN_MATCH_ALIVE",
       "_note": "观战时同样的文字会下移到 y=154 之外，落在本区域外，所以这条只在存活时成立。原来的 LANDED 模板实测余量只有 0.002、separation 0.004，不能用。",
       "requirements": [
-        {"region": "squadCountAlive", "all": ["剩余小队数量"]}
+        {
+          "region": "squadCountAlive",
+          "all": [
+            "剩余小队数量"
+          ]
+        }
       ]
     },
     {
@@ -53,7 +210,12 @@
       "state": "CONTINUE",
       "_note": "标题页。断连之后也回到这里，所以断连恢复不需要单独的能力。季节名（「超频」）就在上方但会随赛季变，不能作为判据。",
       "requirements": [
-        {"region": "titleContinue", "all": ["继续"]}
+        {
+          "region": "titleContinue",
+          "all": [
+            "继续"
+          ]
+        }
       ]
     },
     {
@@ -61,7 +223,12 @@
       "state": "MODE_PANEL_TARGET_HOVERED",
       "_note": "鼠标悬停在卡片上时它展开成描述加「选择模式」按钮，单击即完成选择并回大厅。这个状态因此通常一闪而过；它存在是为了让「点了但还停在面板上」有兜底，而不是因为选择需要两步。放在未悬停那条之前，因为悬停后卡片标题不再出现在原位。",
       "requirements": [
-        {"region": "modePanelConfirm", "all": ["选择模式"]}
+        {
+          "region": "modePanelConfirm",
+          "all": [
+            "选择模式"
+          ]
+        }
       ]
     },
     {
@@ -69,7 +236,12 @@
       "state": "MODE_PANEL_TARGET_VISIBLE",
       "_note": "未上榜卡片在面板上可见但尚未选中。同一区域在未选中时读到的是地图名和倒计时，不会误命中。",
       "requirements": [
-        {"region": "modePanelTargetCard", "all": ["未上榜"]}
+        {
+          "region": "modePanelTargetCard",
+          "all": [
+            "未上榜"
+          ]
+        }
       ]
     },
     {
@@ -77,7 +249,12 @@
       "state": "LOBBY_SELECT_REQUIRED",
       "_note": "主按钮显示「选择」而不是「准备」，说明当前没有已选定的模式，需要先打开模式面板。",
       "requirements": [
-        {"region": "lobbyPrimaryButton", "all": ["选择"]}
+        {
+          "region": "lobbyPrimaryButton",
+          "all": [
+            "选择"
+          ]
+        }
       ]
     },
     {
@@ -85,8 +262,18 @@
       "state": "LOBBY_READY_TRAINING",
       "_note": "大厅停在训练模式。此时按「准备」会进训练场，正是有序模型下大厅与训练场来回空转的起点。",
       "requirements": [
-        {"region": "lobbyPrimaryButton", "all": ["准备"]},
-        {"region": "lobbyModeName", "all": ["训练"]}
+        {
+          "region": "lobbyPrimaryButton",
+          "all": [
+            "准备"
+          ]
+        },
+        {
+          "region": "lobbyModeName",
+          "all": [
+            "训练"
+          ]
+        }
       ]
     },
     {
@@ -94,9 +281,20 @@
       "state": "LOBBY_READY_UNRANKED",
       "_note": "大厅停在未上榜，可以直接开始匹配。模板 LOBBY_READY 实测余量只有 0.038，且与 LOBBY_TRAINING_READY 在同一帧上同时匹配过；文字判据没有这个问题。",
       "requirements": [
-        {"region": "lobbyPrimaryButton", "all": ["准备"]},
-        {"region": "lobbyModeName", "all": ["未上榜"]}
+        {
+          "region": "lobbyPrimaryButton",
+          "all": [
+            "准备"
+          ]
+        },
+        {
+          "region": "lobbyModeName",
+          "all": [
+            "未上榜"
+          ]
+        }
       ]
     }
-  ]
+  ],
+  "_ruleOrder": "更具体的画面排在前面：自由落体和跳伞机上「剩余小队数量」同样可见，所以它们必须先于 in-match-alive 判定。"
 }

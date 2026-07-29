@@ -48,6 +48,21 @@ LIVE_READINGS: dict[str, dict[str, tuple[str, float]]] = {
     "CLIMB_SETTINGS_MODAL": {
         "modalTitle": ("攀爬加速设置", 1.000),
     },
+    "CONTINUE": {
+        "titleContinue": ("继续", 1.000),
+    },
+    "DROPSHIP_FOLLOWING": {
+        "dropshipPrompt": ("LCTRL单独发射", 0.913),
+    },
+    "LAUNCH_READY": {
+        "dropshipPrompt": ("LCTRL重新加入小队", 1.000),
+    },
+    # The squad count is on screen during freefall too, so this reading only
+    # routes correctly if the more specific rule is evaluated first.
+    "FREEFALL": {
+        "freefallSpeedLabel": ("速度", 1.000),
+        "squadCountAlive": ("18 剩余小队数量", 0.98),
+    },
 }
 
 

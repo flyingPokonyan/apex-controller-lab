@@ -9,7 +9,9 @@
     "unrankedCardClick": [493, 1035],
     "unrankedConfirmClick": [522, 1143],
     "returnLobbyScanCode": 15,
-    "meleeScanCode": 47
+    "meleeScanCode": 47,
+    "detachScanCode": 29,
+    "launchScanCode": 18
   },
   "capabilities": [
     {
@@ -86,6 +88,30 @@
       "maxAttempts": 2,
       "allowedNextStates": ["LOBBY_READY_UNRANKED"],
       "_note": "兜底：单击通常已经完成选择并回到大厅，这条只在还停在面板上时才轮到。它真正改变游戏模式，所以要求正向后置确认且不盲重试。"
+    },
+    {
+      "id": "dropship-detach",
+      "priority": 40,
+      "states": ["DROPSHIP_FOLLOWING"],
+      "action": "detachScanCode",
+      "kind": "key",
+      "actionClass": "toggle",
+      "confirmMs": 3000,
+      "maxAttempts": 1,
+      "allowedNextStates": ["LAUNCH_READY", "FREEFALL"],
+      "_note": "LCTRL 在脱离和归队之间切换，按第二下会把自己送回小队，所以只允许一次且必须拿到正向证据。跟队时不按它就永远等不到可发射画面。"
+    },
+    {
+      "id": "dropship-launch",
+      "priority": 40,
+      "states": ["LAUNCH_READY"],
+      "action": "launchScanCode",
+      "kind": "key",
+      "actionClass": "commit",
+      "confirmMs": 3000,
+      "maxAttempts": 2,
+      "allowedNextStates": ["FREEFALL", "IN_MATCH_ALIVE"],
+      "_note": "E 发射。跳出去之后重复按无害，但它决定了落点，所以按 commit 处理并要求后置确认。"
     },
     {
       "id": "in-match-melee",
