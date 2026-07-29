@@ -1,0 +1,75 @@
+{
+  "schemaVersion": 1,
+  "language": "zh-CN",
+  "defaultMinConfidence": 0.8,
+  "_note": "每个区域都紧到只含一行字，所以可以跳过文字检测直接识别。检测占了 OCR 的绝大部分开销且与输入尺寸基本无关，全屏一次 2100-6800ms，这里每个区域 4-16ms。所有 ROI 与置信度均取自 2026-07-29 目标机器的实时 DXGI 帧。",
+  "regions": {
+    "lobbyModeName": {"roi": [60, 1060, 420, 1140], "singleLine": true},
+    "lobbyPrimaryButton": {"roi": [1200, 1240, 1360, 1340], "singleLine": true},
+    "postMatchHints": {"roi": [1820, 1362, 2500, 1425], "singleLine": true},
+    "postMatchTabs": {"roi": [800, 115, 1745, 175], "singleLine": true},
+    "spectateTabs": {"roi": [1090, 115, 1460, 175], "singleLine": true},
+    "squadCountAlive": {"roi": [2150, 58, 2420, 112], "singleLine": true},
+    "modalTitle": {"roi": [1080, 445, 1480, 540], "singleLine": true}
+  },
+  "rules": [
+    {
+      "id": "climb-settings-modal",
+      "state": "CLIMB_SETTINGS_MODAL",
+      "_note": "计划外的首次设置提示，出现在对局结束回大厅的路上。放在最前是因为弹窗盖住底下的一切，底层画面的读数在它出现时不可信。",
+      "requirements": [
+        {"region": "modalTitle", "all": ["攀爬加速设置"]}
+      ]
+    },
+    {
+      "id": "post-match-summary",
+      "state": "POST_MATCH_SUMMARY",
+      "_note": "结算页。底部提示行是唯一可操作的证据；顶部页签会随所选分页变化，所以只作为佐证不作为判据。",
+      "requirements": [
+        {"region": "postMatchHints", "all": ["返回大厅"]}
+      ]
+    },
+    {
+      "id": "spectating",
+      "state": "SPECTATING",
+      "_note": "死亡回放与观战队友共用这套页签。存活帧在同一区域读到的是罗盘数字，不会误命中。",
+      "requirements": [
+        {"region": "spectateTabs", "all": ["观战"]}
+      ]
+    },
+    {
+      "id": "in-match-alive",
+      "state": "IN_MATCH_ALIVE",
+      "_note": "观战时同样的文字会下移到 y=154 之外，落在本区域外，所以这条只在存活时成立。原来的 LANDED 模板实测余量只有 0.002、separation 0.004，不能用。",
+      "requirements": [
+        {"region": "squadCountAlive", "all": ["剩余小队数量"]}
+      ]
+    },
+    {
+      "id": "lobby-select-required",
+      "state": "LOBBY_SELECT_REQUIRED",
+      "_note": "主按钮显示「选择」而不是「准备」，说明当前没有已选定的模式，需要先打开模式面板。",
+      "requirements": [
+        {"region": "lobbyPrimaryButton", "all": ["选择"]}
+      ]
+    },
+    {
+      "id": "lobby-ready-training",
+      "state": "LOBBY_READY_TRAINING",
+      "_note": "大厅停在训练模式。此时按「准备」会进训练场，正是有序模型下大厅与训练场来回空转的起点。",
+      "requirements": [
+        {"region": "lobbyPrimaryButton", "all": ["准备"]},
+        {"region": "lobbyModeName", "all": ["训练"]}
+      ]
+    },
+    {
+      "id": "lobby-ready-unranked",
+      "state": "LOBBY_READY_UNRANKED",
+      "_note": "大厅停在未上榜，可以直接开始匹配。模板 LOBBY_READY 实测余量只有 0.038，且与 LOBBY_TRAINING_READY 在同一帧上同时匹配过；文字判据没有这个问题。",
+      "requirements": [
+        {"region": "lobbyPrimaryButton", "all": ["准备"]},
+        {"region": "lobbyModeName", "all": ["未上榜"]}
+      ]
+    }
+  ]
+}
