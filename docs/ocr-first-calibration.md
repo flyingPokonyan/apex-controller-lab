@@ -53,6 +53,33 @@
 }
 ```
 
+## 3.1 区域必须是"紧致单行"，否则省不下时间
+
+在 macOS/arm64 上用同一张大厅帧实测（PP-OCRv6 small，onnxruntime CPU）：
+
+| 输入 | 方式 | 耗时 | 读出 |
+|---|---|---|---|
+| fullFrame 2560×1440 | det+cls+rec | 425.4 ms | 23 个文本块 |
+| lobbyModeName 360×80 | det+cls+rec | 233.7 ms | `未上榜` |
+| lobbyModeName 360×80 | **rec only** | **4.7 ms** | `未上榜` |
+| lobbyPrimaryButton 160×100 | det+cls+rec | 86.5 ms | `准备` |
+| lobbyPrimaryButton 160×100 | **rec only** | **5.0 ms** | `准备` |
+| modePanelCore 280×540 | det+cls+rec | 173.4 ms | 7 个文本块 |
+| modePanelCore 280×540 | rec only | 4.4 ms | `新`（错） |
+
+**只裁小区域几乎不省时间**：检测模型会把输入缩放到自己的固定工作分辨率，
+所以检测开销和原始尺寸基本无关。真正的差别在于**能不能跳过检测**。
+
+- ROI 紧到只含一行字 → `use_det=False, use_cls=False` → 约 5ms
+- ROI 含多行 → 必须走检测 → 约 175ms（rec only 会读出垃圾）
+
+一轮大厅判断（模式名 + 主按钮两个单行 ROI，rec only）合计 **9.2ms**，
+相比现在 `fullFrame` 的 425ms 快约 46 倍。1s 扫描间隔绰绰有余，
+300ms 也没问题。
+
+这要求 `RapidOcrProvider` 支持按区域声明单行模式；区域字典需要加
+`"singleLine": true`。绝对数字取决于 CPU，但比例同源同代码路径，实测复核。
+
 ## 4. 离线测出来的三个问题
 
 ### 4.1 `unrankedMatchClick` 点在了已锁定的排位赛卡片上

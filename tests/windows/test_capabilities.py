@@ -1,0 +1,217 @@
+from __future__ import annotations
+
+from pathlib import Path
+import sys
+import unittest
+
+
+REPOSITORY_ROOT = Path(__file__).resolve().parents[2]
+sys.path.insert(0, str(REPOSITORY_ROOT / "windows"))
+
+from apex_automation.capabilities import (
+    Capability,
+    CapabilityDispatcher,
+    CapabilitySet,
+)
+
+
+def click(cap_id: str, state: str, **kwargs) -> Capability:
+    payload = {
+        "id": cap_id,
+        "priority": 50,
+        "states": (state,),
+        "action": f"{cap_id}Click",
+        "kind": "click",
+        "action_class": "idempotent",
+    }
+    payload.update(kwargs)
+    return Capability(**payload)  # type: ignore[arg-type]
+
+
+class CapabilityValidationTest(unittest.TestCase):
+    def test_toggle_may_never_be_retried(self) -> None:
+        with self.assertRaisesRegex(ValueError, "toggle 动作只允许一次尝试"):
+            click("detach", "DROPSHIP_FOLLOWING", action_class="toggle", max_attempts=2,
+                  allowed_next_states=("LAUNCH_READY",))
+
+    def test_toggle_requires_positive_postcondition(self) -> None:
+        with self.assertRaisesRegex(ValueError, "toggle 动作必须声明正向后置画面"):
+            click("detach", "DROPSHIP_FOLLOWING", action_class="toggle")
+
+    def test_commit_requires_postcondition_and_a_tight_budget(self) -> None:
+        with self.assertRaisesRegex(ValueError, "commit 动作必须声明正向后置画面"):
+            click("ready", "LOBBY_READY", action_class="commit")
+        with self.assertRaisesRegex(ValueError, "尝试上限必须为 1 或 2"):
+            click("ready", "LOBBY_READY", action_class="commit", max_attempts=3,
+                  allowed_next_states=("LEGEND_SELECT",))
+
+    def test_periodic_must_be_idempotent(self) -> None:
+        with self.assertRaisesRegex(ValueError, "周期触发只允许 idempotent 动作"):
+            Capability(
+                id="melee", priority=10, states=("IN_MATCH",), action="meleeKey",
+                kind="key", action_class="commit", trigger="periodic",
+                min_interval_ms=1000, max_interval_ms=5000,
+                allowed_next_states=("IN_MATCH",),
+            )
+
+    def test_periodic_requires_a_sane_interval_range(self) -> None:
+        with self.assertRaisesRegex(ValueError, "间隔区间非法"):
+            Capability(
+                id="melee", priority=10, states=("IN_MATCH",), action="meleeKey",
+                kind="key", action_class="idempotent", trigger="periodic",
+                min_interval_ms=5000, max_interval_ms=1000,
+            )
+
+    def test_on_state_capability_rejects_interval_fields(self) -> None:
+        with self.assertRaisesRegex(ValueError, "状态触发不应声明周期间隔"):
+            click("continue", "CONTINUE", min_interval_ms=1000, max_interval_ms=2000)
+
+    def test_duplicate_ids_are_rejected(self) -> None:
+        with self.assertRaisesRegex(ValueError, "能力 id 重复"):
+            CapabilitySet([click("a", "CONTINUE"), click("a", "LOBBY_READY")])
+
+
+class DispatcherTest(unittest.TestCase):
+    def setUp(self) -> None:
+        self.now = 0.0
+
+    def _dispatcher(self, *capabilities: Capability, **kwargs) -> CapabilityDispatcher:
+        kwargs.setdefault("jitter", lambda low, high: (low + high) // 2)
+        return CapabilityDispatcher(CapabilitySet(capabilities), **kwargs)
+
+    def test_highest_priority_capability_wins_within_one_frame(self) -> None:
+        low = click("mode", "LOBBY", priority=10)
+        high = click("popup", "LOBBY", priority=90)
+        dispatcher = self._dispatcher(low, high)
+
+        decision = dispatcher.decide("LOBBY", 1, self.now)
+        self.assertEqual(decision.kind, "fire")
+        self.assertEqual(decision.capability.id, "popup")
+
+    def test_unknown_state_never_fires_anything(self) -> None:
+        dispatcher = self._dispatcher(click("continue", "CONTINUE"))
+        self.assertEqual(dispatcher.decide(None, 1, self.now).kind, "wait")
+        self.assertEqual(dispatcher.decide("SOMETHING_NEW", 1, self.now).reason, "NO_CAPABILITY")
+
+    def test_pending_action_blocks_a_second_fire_until_the_window_expires(self) -> None:
+        dispatcher = self._dispatcher(click("continue", "CONTINUE", confirm_ms=2000, max_attempts=2))
+
+        self.assertEqual(dispatcher.decide("CONTINUE", 1, 0.0).kind, "fire")
+        self.assertEqual(dispatcher.decide("CONTINUE", 1, 1.0).reason, "AWAITING_POSTCONDITION")
+        self.assertEqual(dispatcher.decide("CONTINUE", 1, 2.5).kind, "fire")
+
+    def test_wrong_postcondition_is_rejected_not_counted_as_success(self) -> None:
+        capability = click(
+            "exit", "TUTORIAL_EXIT_MENU", action_class="commit",
+            allowed_next_states=("TUTORIAL_EXIT_CONFIRM",),
+        )
+        dispatcher = self._dispatcher(capability)
+        dispatcher.decide("TUTORIAL_EXIT_MENU", 1, 0.0)
+
+        confirmed, pending = dispatcher.confirm_pending("LOBBY_READY")
+        self.assertFalse(confirmed)
+        self.assertEqual(pending.capability.id, "exit")
+
+        dispatcher.decide("TUTORIAL_EXIT_MENU", 2, 1.0)
+        confirmed, pending = dispatcher.confirm_pending("TUTORIAL_EXIT_CONFIRM")
+        self.assertTrue(confirmed)
+
+    def test_attempts_are_exhausted_then_the_frame_is_blocked(self) -> None:
+        dispatcher = self._dispatcher(click("ready", "LOBBY", confirm_ms=1000, max_attempts=2))
+
+        self.assertEqual(dispatcher.decide("LOBBY", 1, 0.0).kind, "fire")
+        self.assertEqual(dispatcher.decide("LOBBY", 1, 1.5).kind, "fire")
+        paused = dispatcher.decide("LOBBY", 1, 3.0)
+        self.assertEqual(paused.kind, "pause")
+        self.assertEqual(paused.reason, "ATTEMPTS_EXHAUSTED")
+        self.assertEqual(dispatcher.decide("LOBBY", 1, 4.0).reason, "OBSERVATION_BLOCKED")
+
+    def test_leaving_a_screen_restores_its_attempt_budget(self) -> None:
+        dispatcher = self._dispatcher(click("news", "NEWS", confirm_ms=1000, max_attempts=1))
+
+        dispatcher.note_state("NEWS", 0.0)
+        self.assertEqual(dispatcher.decide("NEWS", 1, 0.0).kind, "fire")
+        dispatcher.confirm_pending("LOBBY")
+        dispatcher.note_state("LOBBY", 1.0)
+        dispatcher.note_state("NEWS", 2.0)
+
+        # A news page that comes back later is a fresh visit, not a retry. The
+        # ordered model could not express this and got stuck here.
+        self.assertEqual(dispatcher.decide("NEWS", 2, 2.0).kind, "fire")
+
+    def test_a_four_step_loop_is_caught_even_though_each_step_succeeds(self) -> None:
+        ready = click("ready", "LOBBY", action_class="commit",
+                      allowed_next_states=("TUTORIAL",), max_attempts=2)
+        escape = click("escape", "TUTORIAL", allowed_next_states=("LOBBY",))
+        dispatcher = self._dispatcher(ready, escape, cycle_window_s=180.0, cycle_threshold=4)
+
+        decisions = []
+        for index in range(6):
+            moment = index * 10.0
+            dispatcher.note_state("LOBBY", moment)
+            decisions.append(dispatcher.decide("LOBBY", index * 2, moment))
+            dispatcher.confirm_pending("TUTORIAL")
+            dispatcher.note_state("TUTORIAL", moment + 5)
+            dispatcher.decide("TUTORIAL", index * 2 + 1, moment + 5)
+            dispatcher.confirm_pending("LOBBY")
+
+        self.assertEqual(decisions[0].kind, "fire")
+        detected = [item for item in decisions if item.reason == "CYCLE_DETECTED"]
+        # Reported once for the session, not once per alternation.
+        self.assertEqual(len(detected), 1)
+        self.assertEqual(detected[0].kind, "pause")
+        self.assertEqual(decisions[-1].reason, "CYCLE_PAUSED")
+
+    def test_periodic_capability_fires_repeatedly_on_an_unchanged_screen(self) -> None:
+        melee = Capability(
+            id="melee", priority=10, states=("IN_MATCH",), action="meleeKey",
+            kind="key", action_class="idempotent", trigger="periodic",
+            min_interval_ms=1000, max_interval_ms=5000,
+        )
+        dispatcher = self._dispatcher(melee)
+
+        first = dispatcher.decide("IN_MATCH", 1, 0.0)
+        self.assertEqual(first.kind, "fire")
+        self.assertEqual(first.detail["intervalMs"], 3000)
+        # Same observation version, same screen: an onState capability would be
+        # done here, a periodic one is only waiting out its interval.
+        self.assertEqual(dispatcher.decide("IN_MATCH", 1, 1.0).reason, "PERIODIC_COOLDOWN")
+        self.assertEqual(dispatcher.decide("IN_MATCH", 1, 3.5).kind, "fire")
+
+    def test_periodic_never_blocks_a_state_capability_on_the_same_screen(self) -> None:
+        melee = Capability(
+            id="melee", priority=10, states=("IN_MATCH",), action="meleeKey",
+            kind="key", action_class="idempotent", trigger="periodic",
+            min_interval_ms=1000, max_interval_ms=1000,
+        )
+        respawn = click("respawn", "IN_MATCH", priority=90, action_class="commit",
+                        allowed_next_states=("IN_MATCH",))
+        dispatcher = self._dispatcher(melee, respawn)
+
+        self.assertEqual(dispatcher.decide("IN_MATCH", 1, 0.0).capability.id, "respawn")
+        dispatcher.confirm_pending("IN_MATCH")
+        self.assertEqual(dispatcher.decide("IN_MATCH", 1, 0.5).capability.id, "melee")
+
+    def test_capability_set_loads_from_payload(self) -> None:
+        payload = {
+            "schemaVersion": 1,
+            "capabilities": [
+                {
+                    "id": "continue", "priority": 80, "states": ["CONTINUE"],
+                    "action": "continueClick", "kind": "click",
+                    "actionClass": "idempotent", "confirmMs": 2000, "maxAttempts": 3,
+                    "allowedNextStates": ["LOBBY_READY"],
+                }
+            ],
+        }
+        capabilities = CapabilitySet.from_payload(payload)
+        self.assertEqual(capabilities.for_state("CONTINUE")[0].action, "continueClick")
+        self.assertEqual(capabilities.for_state("LOBBY_READY"), ())
+
+    def test_payload_schema_version_is_enforced(self) -> None:
+        with self.assertRaisesRegex(ValueError, "schemaVersion 必须为 1"):
+            CapabilitySet.from_payload({"schemaVersion": 2, "capabilities": []})
+
+
+if __name__ == "__main__":
+    unittest.main()
