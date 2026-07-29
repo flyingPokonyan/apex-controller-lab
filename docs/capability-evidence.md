@@ -21,7 +21,8 @@
 | 90 | dismiss-climb-settings | CLIMB_SETTINGS_MODAL | 点「保持原样」 | idempotent | — |
 | 80 | title-continue | CONTINUE | 点「继续」 | idempotent | — |
 | 70 | post-match-return-lobby | POST_MATCH_SUMMARY | `TAB` | idempotent | 三种大厅态 / 攀爬弹窗 |
-| 60 | lobby-open-mode-panel | LOBBY_SELECT_REQUIRED、LOBBY_READY_TRAINING | 点主按钮 | idempotent | 模式面板两态 |
+| 60 | lobby-open-mode-panel | LOBBY_SELECT_REQUIRED | 点主按钮（写着「选择」） | idempotent | 模式面板两态 |
+| 60 | lobby-change-mode | LOBBY_READY_TRAINING、LOBBY_READY_OTHER | 点左下模式卡片 | idempotent | 模式面板两态 |
 | 55 | mode-panel-focus-target | MODE_PANEL_TARGET_VISIBLE | 点未上榜卡片 | idempotent | 悬停态 / 大厅 |
 | 55 | mode-panel-confirm-hovered | MODE_PANEL_TARGET_HOVERED | 点「选择模式」 | commit | LOBBY_READY_UNRANKED |
 | 50 | lobby-start-match | LOBBY_READY_UNRANKED | 点「准备」 | commit | LOBBY_QUEUEING |
@@ -86,6 +87,41 @@
 > 跳伞机之间隔着传奇选择和读条——实测将近一分钟没有任何规则认识的画面——那次迟到的
 > 重试会把大厅按钮的坐标点在对局里（鼠标左键＝开枪）。现在只有当前画面仍属于该能力
 > 时才算重试，否则丢弃。
+
+## 大厅主按钮：一个坐标，三个按钮
+
+`[1280, 1295]` 那一格上写的字会变，写什么就干什么：
+
+| 按钮读到 | 点下去发生什么 |
+|---|---|
+| 选择 | 打开模式面板 |
+| **准备** | **排进当前卡片上那个模式** |
+| 取消 | 退出队列 |
+
+第一次真跑 `play` 就栽在这里：`lobby-open-mode-panel` 同时挂着
+`LOBBY_SELECT_REQUIRED` 和 `LOBBY_READY_TRAINING`，两个状态点同一个坐标。前者
+按钮写「选择」，开面板；后者写「准备」，**直接进训练场**。这条能力的注释里原本就
+写着「训练模式按准备会进训练场」，然后干的正是这件事。
+
+2026-07-28 的日志逐字记着这个后果：
+
+```
+66271ms  ACTION_SENT modeSelectClick x=1280 y=1295   （训练大厅）
+79807ms  STATE_UNKNOWN                                （读条）
+93777ms  TUTORIAL_MOVEMENT                            （已经在训练场里）
+```
+
+现在拆成两条：写「选择」时才点主按钮，其余一律点左下角模式卡片
+（`[308, 1215]`，卡片实测占 `x 62-555`、`y 1065-1365`）。有测试盯着这条不变式：
+**任何点主按钮的能力，只能绑在规则本身钉死了按钮字样的状态上，且「准备」只有
+`LOBBY_READY_UNRANKED` 能点**——因为只有它同时钉死了模式名。
+
+顺带补上一个会让闭环原地卡死的洞。原来只有模式名读到「训练」或「未上榜」时大厅才
+被认识；2026-07-29 那帧读到的是「控制」+「准备」，**整个大厅识别为 None**，一局
+打完回来运行器就在那儿站着不动了。新增的 `LOBBY_READY_OTHER` 只看按钮读到「准备」，
+靠**排在其他大厅规则之后**来表达「非训练也非未上榜」——先匹配先赢是这套规则里唯一
+能表达「非」的手段，所以它必须永远是最后一条，这一点也有测试盯着。它同样只会去点
+模式卡片换模式，绝不碰主按钮。
 
 ## 闭环怎么跑起来的
 
@@ -171,6 +207,7 @@
 
 | 缺什么 | 挡住什么 |
 |---|---|
+| **点模式卡片之后的那一帧** | 不挡运行，但 `lobby-change-mode` 的坐标目前只有量出来的位置，没有「点了确实开面板」的证据帧 |
 | **控制模式死亡 / 重生选点帧** | 控制模式里的「还活着」闸门，也就是 `in-match-melee` |
 | **登录后那串页面**（公告、纪念、欢迎、导览、奖励、升级） | 冷启动闭环。三次采集全是从大厅开始录的，这串页面一次都没进过样本 |
 | 模式面板「自由式」栏的实时帧 | 选择娱乐模式 |

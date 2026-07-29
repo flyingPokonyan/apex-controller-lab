@@ -132,6 +132,25 @@ class GameStateRoutingTest(unittest.TestCase):
         analysis = self._detector(covered).analyze(np.zeros((4, 4, 3), np.uint8))
         self.assertEqual(analysis.decision.state, "CLIMB_SETTINGS_MODAL")
 
+    def test_a_lobby_on_any_other_mode_is_still_a_lobby(self) -> None:
+        # Verbatim from the 2026-07-29 session at 592.3s, which this table did
+        # not recognise at all: a whole lobby that reads as nothing means the
+        # runner sits there forever once a match ends on that mode.
+        analysis = self._detector(
+            {"lobbyModeName": ("控制", 0.999), "lobbyPrimaryButton": ("准备", 1.000)}
+        ).analyze(np.zeros((4, 4, 3), np.uint8))
+        self.assertEqual(analysis.decision.state, "LOBBY_READY_OTHER")
+
+    def test_the_catch_all_lobby_rule_never_shadows_a_named_mode(self) -> None:
+        # It matches on the button alone, so it only means "some other mode"
+        # while it stays last. Ordering is the only thing expressing that.
+        detector = self._detector({})
+        enabled = [rule.state for rule in detector.rules if rule.enabled]
+        self.assertEqual(enabled[-1], "LOBBY_READY_OTHER")
+        for named in ("LOBBY_READY_TRAINING", "LOBBY_READY_UNRANKED"):
+            with self.subTest(state=named):
+                self.assertLess(enabled.index(named), enabled.index("LOBBY_READY_OTHER"))
+
     def test_queueing_outranks_the_mode_it_queued_into(self) -> None:
         # Whichever mode is on the card, and whether matchmaking is still
         # searching or already connecting, the screen means "wait".

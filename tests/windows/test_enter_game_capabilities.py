@@ -25,6 +25,21 @@ class EnterGameCapabilityTest(unittest.TestCase):
     def _dispatcher(self) -> CapabilityDispatcher:
         return CapabilityDispatcher(self.capabilities, jitter=lambda low, high: (low + high) // 2)
 
+    @staticmethod
+    def _button_terms(state: str) -> tuple[str, ...]:
+        """What a state's own rule says the lobby primary button reads."""
+        states = json.loads(STATES.read_text(encoding="utf-8"))
+        for rule in states["rules"]:
+            if rule["state"] != state:
+                continue
+            return tuple(
+                term
+                for requirement in rule["requirements"]
+                if requirement["region"] == "lobbyPrimaryButton"
+                for term in requirement.get("all", ())
+            )
+        return ()
+
     def test_every_action_referenced_by_a_capability_exists(self) -> None:
         actions = self.payload["actions"]
         for capability in self.capabilities.capabilities:
@@ -45,12 +60,18 @@ class EnterGameCapabilityTest(unittest.TestCase):
         decision = dispatcher.decide("CLIMB_SETTINGS_MODAL", 1, 0.0)
         self.assertEqual(decision.capability.id, "dismiss-climb-settings")
 
-    def test_a_training_lobby_changes_mode_instead_of_pressing_ready(self) -> None:
-        # Pressing ready here starts the tutorial, which is the first step of
-        # the lobby/tutorial loop that the ordered model ran forever.
+    def test_a_training_lobby_never_touches_the_primary_button(self) -> None:
+        # The 2026-07-28 log records this exactly: a click at the primary
+        # button on a training lobby put the runner in the firing range 28
+        # seconds later. That button reads 准备 there, not 选择, so the mode
+        # panel has to be opened from the card instead.
         dispatcher = self._dispatcher()
         decision = dispatcher.decide("LOBBY_READY_TRAINING", 1, 0.0)
-        self.assertEqual(decision.capability.id, "lobby-open-mode-panel")
+        self.assertEqual(decision.capability.id, "lobby-change-mode")
+        primary_button = self.payload["actions"]["startMatchClick"]
+        for capability in self.capabilities.for_state("LOBBY_READY_TRAINING"):
+            with self.subTest(capability=capability.id):
+                self.assertNotEqual(self.payload["actions"][capability.action], primary_button)
 
     def test_mode_selection_takes_the_card_then_the_confirm_button(self) -> None:
         dispatcher = self._dispatcher()
@@ -61,14 +82,25 @@ class EnterGameCapabilityTest(unittest.TestCase):
         second = dispatcher.decide("MODE_PANEL_TARGET_HOVERED", 2, 1.0)
         self.assertEqual(second.capability.action, "unrankedConfirmClick")
 
-    def test_an_unranked_lobby_presses_ready_and_a_training_lobby_never_does(self) -> None:
+    def test_only_the_unranked_lobby_may_press_the_primary_button(self) -> None:
         dispatcher = self._dispatcher()
         decision = dispatcher.decide("LOBBY_READY_UNRANKED", 1, 0.0)
         self.assertEqual(decision.capability.id, "lobby-start-match")
-        self.assertEqual(
-            [c.id for c in self.capabilities.for_state("LOBBY_READY_TRAINING")],
-            ["lobby-open-mode-panel"],
-        )
+
+        # One box, three different buttons depending on what it reads. 选择
+        # opens the mode panel and 准备 commits to whatever mode the card is
+        # showing, so pressing it is only safe where the rule also pins the
+        # mode. Everything allowed to click that box is listed here, and a
+        # new entry has to justify itself against the label.
+        safe_to_click = {"LOBBY_SELECT_REQUIRED": "选择", "LOBBY_READY_UNRANKED": "准备"}
+        primary_button = self.payload["actions"]["startMatchClick"]
+        for capability in self.capabilities.capabilities:
+            if self.payload["actions"].get(capability.action) != primary_button:
+                continue
+            for state in capability.states:
+                with self.subTest(capability=capability.id, state=state):
+                    self.assertIn(state, safe_to_click)
+                    self.assertIn(safe_to_click[state], self._button_terms(state))
 
     def test_starting_a_match_is_a_commit_confirmed_by_the_queue_screen(self) -> None:
         start = next(c for c in self.capabilities.capabilities if c.id == "lobby-start-match")

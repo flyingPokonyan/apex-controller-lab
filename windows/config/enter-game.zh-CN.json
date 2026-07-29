@@ -6,6 +6,7 @@
     "continueClick": [1280, 865],
     "keepAsIsClick": [1425, 956],
     "modeSelectClick": [1280, 1295],
+    "modeCardClick": [308, 1215],
     "startMatchClick": [1280, 1295],
     "unrankedCardClick": [493, 1035],
     "unrankedConfirmClick": [522, 1143],
@@ -57,14 +58,26 @@
     {
       "id": "lobby-open-mode-panel",
       "priority": 60,
-      "states": ["LOBBY_SELECT_REQUIRED", "LOBBY_READY_TRAINING"],
+      "states": ["LOBBY_SELECT_REQUIRED"],
       "action": "modeSelectClick",
       "kind": "click",
       "actionClass": "idempotent",
       "confirmMs": 2500,
       "maxAttempts": 3,
       "allowedNextStates": ["MODE_PANEL_TARGET_VISIBLE", "MODE_PANEL_TARGET_HOVERED"],
-      "_note": "大厅停在训练模式时按「准备」会进训练场，所以这两个状态都要先去改模式。"
+      "_note": "主按钮写着「选择」时点它，打开模式面板。只留这一个状态：这条原先还挂着 LOBBY_READY_TRAINING，而训练大厅上同一个按钮写的是「准备」——2026-07-28 的日志逐字记着这一点击之后 13 秒进读条、28 秒后到训练场移动教学。同一个坐标在两个画面上是两件完全不同的事，不能共用一条能力。"
+    },
+    {
+      "id": "lobby-change-mode",
+      "priority": 60,
+      "states": ["LOBBY_READY_TRAINING", "LOBBY_READY_OTHER"],
+      "action": "modeCardClick",
+      "kind": "click",
+      "actionClass": "idempotent",
+      "confirmMs": 2500,
+      "maxAttempts": 3,
+      "allowedNextStates": ["MODE_PANEL_TARGET_VISIBLE", "MODE_PANEL_TARGET_HOVERED"],
+      "_note": "大厅停在训练或任何其他模式上时，换模式只能点左下角那张模式卡片，绝不能碰主按钮——那上面写的是「准备」，点下去就排进当前这个模式。坐标是 2026-07-29 实时帧上量的卡片中心（卡片占 x 62-555、y 1065-1365）。这一击本身还没有采到证据帧，但失败是良性的：点空了面板不开，后置确认拿不到面板态，重试两次后暂停等人，而不是像原来那样一头扎进训练场。"
     },
     {
       "id": "mode-panel-focus-target",
