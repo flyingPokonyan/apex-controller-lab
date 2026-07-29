@@ -74,6 +74,7 @@ class ObservationSession:
         ocr_interval_ms: int = 1500,
         snapshot_interval_ms: int = 15000,
         max_screenshots: int = 400,
+        snapshot_min_change: float = 0.01,
     ) -> None:
         self.config = config
         self.detector = detector
@@ -89,6 +90,7 @@ class ObservationSession:
         self.ocr_interval_ms = ocr_interval_ms
         self.snapshot_interval_ms = snapshot_interval_ms
         self.max_screenshots = max_screenshots
+        self.snapshot_min_change = snapshot_min_change
 
         self.observations_path = Path(recorder.run_dir) / "observations.jsonl"
         self.summary_path = Path(recorder.run_dir) / "observations-summary.json"
@@ -97,6 +99,7 @@ class ObservationSession:
         self.observation_count = 0
         self.screenshot_count = 0
         self._previous_frame: np.ndarray | None = None
+        self._last_saved_frame: np.ndarray | None = None
         self._classification: str | None = None
         self._next_ocr_at = 0.0
         self._next_snapshot_at = 0.0
@@ -254,10 +257,21 @@ class ObservationSession:
         record["wouldFire"] = self._would_fire(classification, obstacle_rule)
 
         changed = classification != self._classification
-        due = now >= self._next_snapshot_at
+        # An unrecognised screen never triggers a change, so a whole match
+        # would otherwise be captured on the timer alone: a few hundred
+        # near-identical gameplay frames that are large to transfer and carry
+        # nothing. Timed snapshots therefore require visible change since the
+        # last saved one; a new classification is always kept.
+        change_since_saved = (
+            1.0
+            if self._last_saved_frame is None
+            else frame_motion(self._last_saved_frame, frame)
+        )
+        due = now >= self._next_snapshot_at and change_since_saved >= self.snapshot_min_change
         if (changed or due) and self.screenshot_count < self.max_screenshots:
             self.screenshot_count += 1
             self._next_snapshot_at = now + self.snapshot_interval_ms / 1000
+            self._last_saved_frame = frame
             stage = classification or (record["hint"] or "unmatched")
             record["screenshot"] = str(self.recorder.screenshot(stage, frame))
         if changed:

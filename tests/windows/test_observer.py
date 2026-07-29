@@ -165,6 +165,19 @@ class ObserverTest(unittest.TestCase):
 
         self.assertEqual(session.screenshot_count, 1)
 
+    def test_timed_snapshots_skip_frames_that_have_not_changed(self) -> None:
+        still = _blank(90)
+        session = self._session(
+            [still, still, still, _blank(200)],
+            snapshot_interval_ms=0,
+            max_screenshots=50,
+        )
+        session.run(max_iterations=4)
+
+        # One for the first unmatched frame, one for the frame that changed;
+        # the two identical frames in between are not worth transferring.
+        self.assertEqual(session.screenshot_count, 2)
+
     def test_observer_never_exposes_an_input_sender(self) -> None:
         session = self._session([_blank(90)])
         for name in ("sender", "input", "send"):
