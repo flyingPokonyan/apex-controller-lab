@@ -4,6 +4,7 @@ import argparse
 from pathlib import Path
 import sys
 import time
+from typing import Callable
 
 import json
 
@@ -258,6 +259,80 @@ def run_observe(
     return 0
 
 
+def run_probe_input(config_path: Path, *, countdown: int) -> int:
+    """Ask the one question no screenshot can answer: does the game take input?
+
+    Every capability failure so far looks the same from the outside — the
+    action is sent, the screen does not change. That has two very different
+    causes: the key is not the one the game listens for, or the game does not
+    accept synthetic input at all during play. Menu input is known to work
+    (a click queues a match, ESC closed the memorial page), and nothing has
+    ever been confirmed inside a match. These steps separate the two, and
+    only a human watching the screen can read the answer.
+    """
+    if sys.platform != "win32":
+        print("probe-input 只能在 Windows 上运行。", file=sys.stderr)
+        return 2
+
+    if config_path.expanduser().resolve() == DEFAULT_CONFIG_PATH.resolve():
+        config_path = PLAY_CONFIG_PATH
+    config = load_config(config_path)
+    guard = Win32SafetyGuard(config.environment["foregroundExecutables"])
+    sender = Win32InputSender(
+        guard,
+        int(config.environment["width"]),
+        int(config.environment["height"]),
+    )
+
+    print("输入探针：会向 Apex 发送几个明显可见的动作，你只需要盯着屏幕看有没有反应。")
+    print("请先站在训练场里（空地上、不要对着墙），然后切回 Apex。")
+    print("按 F8 可以随时中止。")
+    for remaining in range(max(0, countdown), 0, -1):
+        print(f"{remaining}...")
+        time.sleep(1)
+
+    # Movement first: it is the least ambiguous thing on screen. If the
+    # character does not move, no keyboard question below it matters.
+    steps: list[tuple[str, str, Callable[[], None]]] = [
+        ("W 前进 1 秒", "角色应该向前走一段", lambda: sender.hold_scan_codes([17], 1000)),
+        ("A 左移 1 秒", "角色应该向左横移", lambda: sender.hold_scan_codes([30], 1000)),
+        ("V 近战 ×3", "角色应该挥手 / 挥近战武器 3 次", lambda: _tap_times(sender, 47, 3)),
+        ("LCTRL ×1", "角色应该蹲下或站起", lambda: _tap_times(sender, 29, 1)),
+        ("鼠标右转", "视角应该明显向右转", lambda: sender.move_mouse(600, 0)),
+        ("鼠标左键 ×1", "应该开一枪或挥一下", lambda: sender.hold_mouse_button("left", 120)),
+    ]
+
+    try:
+        for index, (label, expected, action) in enumerate(steps, start=1):
+            guard.ensure_not_aborted()
+            guard.ensure_target_foreground()
+            print(f"\n[{index}/{len(steps)}] {label} —— {expected}")
+            action()
+            time.sleep(1.5)
+    except EmergencyStop as error:
+        sender.release_all()
+        print(f"\n已中止：{error}")
+        return 0
+    except KeyboardInterrupt:
+        sender.release_all()
+        print("\n已中止。")
+        return 0
+    finally:
+        sender.release_all()
+
+    print("\n请回答：上面 6 步里，哪几步在游戏里真的发生了？")
+    print("  全都没有  → 这个进程发出的输入根本没进游戏")
+    print("  只有鼠标有 → 键盘被挡住了，或者按键绑定不是默认的")
+    print("  W/A 有、V 没有 → 键盘通的，是近战没绑在 V 上")
+    return 0
+
+
+def _tap_times(sender: Win32InputSender, scan_code: int, times: int) -> None:
+    for _ in range(times):
+        sender.tap_scan_code(scan_code, 80)
+        time.sleep(0.35)
+
+
 def run_play(config_path: Path, *, countdown: int, duration_s: float | None) -> int:
     if sys.platform != "win32":
         print("play 模式只能在 Windows 上运行。", file=sys.stderr)
@@ -495,6 +570,11 @@ def build_parser() -> argparse.ArgumentParser:
     )
     play.add_argument("--countdown", type=int, default=5)
     play.add_argument("--duration-s", type=float, help="到时自动停止，默认一直跑")
+    probe = subparsers.add_parser(
+        "probe-input",
+        help="向游戏发几个明显动作，用来确认 SendInput 到底进不进得去",
+    )
+    probe.add_argument("--countdown", type=int, default=5)
     start = subparsers.add_parser("start", help="启动可恢复的常驻任务监督器")
     start.add_argument("--mode", choices=("match", "tutorial"), default="match")
     start.add_argument(
@@ -523,6 +603,8 @@ def main(argv: list[str] | None = None) -> int:
             duration_s=args.duration_s,
             with_ocr=args.with_ocr,
         )
+    if command == "probe-input":
+        return run_probe_input(args.config, countdown=max(0, args.countdown))
     if command == "play":
         return run_play(
             args.config,
