@@ -81,7 +81,7 @@
         }
       ]
     },
-    "DROPSHIP_JUMPMASTER_WAIT": {
+    "DROPSHIP_FOLLOWING": {
       "stableFrames": 2,
       "anchors": [
         {
@@ -136,7 +136,7 @@
     ["calibration/raw/01-continue.png", "CONTINUE"],
     ["calibration/raw/02-onboarding-lobby-ready.png", "LOBBY_READY"],
     ["calibration/raw/03-legend-select-auto.png", "LEGEND_SELECT"],
-    ["calibration/raw/04-dropship-following.png", "DROPSHIP_JUMPMASTER_WAIT"],
+    ["calibration/raw/04-dropship-following.png", "DROPSHIP_FOLLOWING"],
     ["calibration/raw/05-solo-launch-ready.png", "LAUNCH_READY"],
     ["calibration/raw/06-freefall.png", "FREEFALL"],
     ["calibration/raw/07-landed.png", "LANDED"]

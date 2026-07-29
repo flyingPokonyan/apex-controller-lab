@@ -76,12 +76,8 @@ class FakeOcrProvider:
     def __init__(self, values: dict[tuple[int, int, int, int], tuple[OcrToken, ...]]):
         self.values = values
 
-    def read(
-        self,
-        frame: np.ndarray,
-        roi: tuple[int, int, int, int],
-    ) -> tuple[OcrToken, ...]:
-        return self.values.get(roi, ())
+    def read(self, frame: np.ndarray, region) -> tuple[OcrToken, ...]:
+        return self.values.get(region.roi, ())
 
 
 class FakeRecorder:
@@ -322,16 +318,23 @@ class SupervisorTest(unittest.TestCase):
         self.assertEqual(supervisor.observed_state, "LOBBY_READY")
         self.assertEqual(supervisor.goal_progress_version, first_goal_version)
 
-    def test_jumpmaster_wait_never_presses_detach(self) -> None:
+    def test_following_detaches_once_and_never_retries(self) -> None:
+        # `following-detach.png` carries the "LCTRL 单独发射" prompt, which only
+        # an attached squad member sees. Waiting on it, as the old jumpmaster
+        # mapping did, waits for a LAUNCH_READY that never arrives.
         supervisor, clock, _, sender, recorder = self.make_supervisor(
-            [self.frames["DROPSHIP_JUMPMASTER_WAIT"]]
+            [self.frames["DROPSHIP_FOLLOWING"]]
         )
-        self.acquire_and_detect(supervisor, clock, "DROPSHIP_JUMPMASTER_WAIT")
-        clock.advance(11)
-        supervisor.step()
+        self.acquire_and_detect(supervisor, clock, "DROPSHIP_FOLLOWING")
 
-        self.assertFalse(any(action[0] == "key" for action in sender.actions))
-        self.assertIn("NO_INPUT", [event for event, _ in recorder.events])
+        self.assertEqual([item for item in sender.actions if item[0] == "key"], [("key", 29, 80)])
+
+        # LCTRL toggles detach and rejoin, so an unconfirmed press is never
+        # retried: a second press would put the squad back together.
+        for _ in range(3):
+            clock.advance(11)
+            supervisor.step()
+        self.assertEqual([item for item in sender.actions if item[0] == "key"], [("key", 29, 80)])
 
     def test_progress_regression_never_sends_old_menu_action(self) -> None:
         frames = [

@@ -9,8 +9,10 @@ import numpy as np
 from .ocr_obstacles import (
     OcrProvider,
     OcrToken,
+    Region,
     RegionRequirement,
     normalize_ocr_text,
+    parse_regions,
 )
 
 
@@ -64,7 +66,7 @@ class OcrStateDetector:
     def __init__(
         self,
         provider: OcrProvider,
-        regions: dict[str, Roi],
+        regions: dict[str, Region],
         rules: tuple[OcrStateRule, ...],
     ) -> None:
         self.provider = provider
@@ -81,13 +83,7 @@ class OcrStateDetector:
         if not 0 <= default_confidence <= 1:
             raise ValueError("OCR 状态默认置信度必须在 0 到 1 之间")
 
-        regions = {
-            name: tuple(int(value) for value in roi)
-            for name, roi in payload["regions"].items()
-        }
-        for name, roi in regions.items():
-            if len(roi) != 4 or roi[0] >= roi[2] or roi[1] >= roi[3]:
-                raise ValueError(f"OCR 状态区域无效：{name}={roi}")
+        regions = parse_regions(payload["regions"])
 
         rules: list[OcrStateRule] = []
         states: set[str] = set()

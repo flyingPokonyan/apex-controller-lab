@@ -185,20 +185,22 @@ class ScenarioRunner:
             self._click_until_state_changes("readyClick", "LOBBY_READY")
 
             dropship_state, _ = self._poll_any(
-                ["LEGEND_SELECT", "DROPSHIP_JUMPMASTER_WAIT", "LAUNCH_READY"],
+                ["LEGEND_SELECT", "DROPSHIP_FOLLOWING", "LAUNCH_READY"],
                 self.config.timing["dropshipTimeoutMs"],
             )
             if dropship_state.state == "LEGEND_SELECT":
                 self.recorder.log("NO_INPUT", state="LEGEND_SELECT", reason="等待游戏自动选择英雄")
                 self.notify("[分支] 英雄选择不操作，等待自动选择")
                 dropship_state, _ = self._poll_any(
-                    ["DROPSHIP_JUMPMASTER_WAIT", "LAUNCH_READY"],
+                    ["DROPSHIP_FOLLOWING", "LAUNCH_READY"],
                     self.config.timing["dropshipTimeoutMs"],
                 )
 
-            if dropship_state.state == "DROPSHIP_JUMPMASTER_WAIT":
-                self.recorder.log("NO_INPUT", state=dropship_state.state, reason="JUMPMASTER_WAIT")
-                self.notify("[分支] 当前是跳伞指挥官，不按 LCTRL，等待 E 发射")
+            if dropship_state.state == "DROPSHIP_FOLLOWING":
+                # LCTRL toggles detach and rejoin, so it is sent once and then
+                # verified; a blind retry would put the squad back together.
+                self._input_key("detachScanCode")
+                self.notify("[分支] 跟随小队中，已按 LCTRL 脱离，等待可发射")
                 self._poll_any(["LAUNCH_READY"], self.config.timing["launchReadyTimeoutMs"])
             else:
                 self.recorder.log("BRANCH", branch="ALREADY_LAUNCH_READY", action="SKIP_LCTRL")

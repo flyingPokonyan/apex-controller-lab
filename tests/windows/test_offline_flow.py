@@ -143,12 +143,12 @@ class OfflineFlowTest(unittest.TestCase):
         self.assertEqual(recorder.events[-1][1]["status"], "PASS")
         return sender
 
-    def test_jumpmaster_path_waits_then_launches(self) -> None:
+    def test_following_path_detaches_then_launches(self) -> None:
         sender = self._run([
             "CONTINUE",
             "LOBBY_READY",
             "LEGEND_SELECT",
-            "DROPSHIP_JUMPMASTER_WAIT",
+            "DROPSHIP_FOLLOWING",
             "LAUNCH_READY",
             "FREEFALL",
             "LANDED",
@@ -158,6 +158,7 @@ class OfflineFlowTest(unittest.TestCase):
             [
                 ("click", 1280, 865),
                 ("click", 1280, 1295),
+                ("key", 29, 80),
                 ("key", 18, 80),
                 ("release",),
             ],

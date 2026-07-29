@@ -58,9 +58,15 @@ class TaskSupervisor:
         "CONTINUE": (0, "ENTER_GAME"),
         "LOBBY_READY": (1, "QUEUE_MATCH"),
         "LEGEND_SELECT": (2, "WAIT_LEGEND_SELECT"),
-        "DROPSHIP_JUMPMASTER_WAIT": (3, "WAIT_LAUNCH_READY"),
-        # Reserved for a future non-jumpmaster screenshot calibration.
+        # `following-detach.png` shows "LCTRL 单独发射", which only a squad
+        # member who is still attached can act on, so it is the following
+        # state. It was previously registered as the jumpmaster screen, whose
+        # policy is to send nothing -- leaving a real follower waiting for a
+        # LAUNCH_READY that only appears after LCTRL.
         "DROPSHIP_FOLLOWING": (3, "DETACH_FROM_SQUAD"),
+        # The true jumpmaster screen still has no calibration frame, so it
+        # stays unreachable rather than guessed at.
+        "DROPSHIP_JUMPMASTER_WAIT": (3, "WAIT_LAUNCH_READY"),
         "LAUNCH_READY": (4, "LAUNCH"),
         "FREEFALL": (5, "WAIT_LANDING"),
         "LANDED": (6, "IN_MATCH"),

@@ -20,6 +20,7 @@ from apex_automation.ocr_obstacles import (
     OcrObstacleDetector,
     OcrToken,
     normalize_ocr_text,
+    parse_regions,
 )
 from apex_automation.recorder import RunRecorder
 
@@ -28,12 +29,28 @@ class FakeProvider:
     def __init__(self, values: dict[tuple[int, int, int, int], tuple[OcrToken, ...]]):
         self.values = values
 
-    def read(
-        self,
-        frame: np.ndarray,
-        roi: tuple[int, int, int, int],
-    ) -> tuple[OcrToken, ...]:
-        return self.values.get(roi, ())
+    def read(self, frame: np.ndarray, region) -> tuple[OcrToken, ...]:
+        return self.values.get(region.roi, ())
+
+
+class RegionParsingTest(unittest.TestCase):
+    def test_bare_array_still_loads_as_a_multi_line_region(self) -> None:
+        regions = parse_regions({"titleCenter": [320, 80, 2240, 760]})
+        self.assertEqual(regions["titleCenter"].roi, (320, 80, 2240, 760))
+        self.assertFalse(regions["titleCenter"].single_line)
+
+    def test_object_form_carries_the_single_line_promise(self) -> None:
+        regions = parse_regions(
+            {"lobbyModeName": {"roi": [60, 1060, 420, 1140], "singleLine": True}}
+        )
+        self.assertEqual(regions["lobbyModeName"].roi, (60, 1060, 420, 1140))
+        self.assertTrue(regions["lobbyModeName"].single_line)
+
+    def test_inverted_or_short_regions_are_rejected(self) -> None:
+        for bad in ([420, 1060, 60, 1140], [60, 1140, 420, 1060], [60, 1060, 420]):
+            with self.subTest(roi=bad):
+                with self.assertRaisesRegex(ValueError, "OCR 区域无效"):
+                    parse_regions({"bad": bad})
 
 
 class OcrRulesTest(unittest.TestCase):

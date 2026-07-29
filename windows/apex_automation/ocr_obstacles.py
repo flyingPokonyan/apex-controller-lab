@@ -33,8 +33,37 @@ class OcrToken:
         return normalize_ocr_text(self.text)
 
 
+@dataclass(frozen=True)
+class Region:
+    """A named crop, and whether it is tight enough to skip text detection.
+
+    `single_line` is a promise about the crop, not a hint: recognition runs
+    directly on the whole region, so a region that actually holds several
+    lines returns garbage rather than an error.
+    """
+
+    name: str
+    roi: Roi
+    single_line: bool = False
+
+
+def parse_regions(payload: dict[str, Any]) -> dict[str, Region]:
+    regions: dict[str, Region] = {}
+    for name, item in payload.items():
+        if isinstance(item, dict):
+            roi = tuple(int(value) for value in item["roi"])
+            single_line = bool(item.get("singleLine", False))
+        else:
+            roi = tuple(int(value) for value in item)
+            single_line = False
+        if len(roi) != 4 or roi[0] >= roi[2] or roi[1] >= roi[3]:
+            raise ValueError(f"OCR 区域无效：{name}={roi}")
+        regions[str(name)] = Region(name=str(name), roi=roi, single_line=single_line)
+    return regions
+
+
 class OcrProvider(Protocol):
-    def read(self, frame: np.ndarray, roi: Roi) -> tuple[OcrToken, ...]: ...
+    def read(self, frame: np.ndarray, region: Region) -> tuple[OcrToken, ...]: ...
 
 
 class RapidOcrProvider:
@@ -52,12 +81,19 @@ class RapidOcrProvider:
                 self._engine = RapidOCR()
             return self._engine
 
-    def read(self, frame: np.ndarray, roi: Roi) -> tuple[OcrToken, ...]:
-        x1, y1, x2, y2 = roi
+    def read(self, frame: np.ndarray, region: Region) -> tuple[OcrToken, ...]:
+        x1, y1, x2, y2 = region.roi
         crop = frame[y1:y2, x1:x2]
         if crop.size == 0:
             return ()
-        result = self._get_engine()(crop)
+        if region.single_line:
+            # Detection dominates a RapidOCR pass and its cost barely depends
+            # on the input size, so cropping alone saves little. Reading a
+            # tight single-line region directly measured 4.7ms against 234ms
+            # for the same crop with detection enabled.
+            result = self._get_engine()(crop, use_det=False, use_cls=False, use_rec=True)
+        else:
+            result = self._get_engine()(crop)
         texts = tuple(getattr(result, "txts", ()) or ())
         scores = tuple(getattr(result, "scores", ()) or ())
         return tuple(
@@ -125,7 +161,7 @@ class OcrObstacleDetector:
     def __init__(
         self,
         provider: OcrProvider,
-        regions: dict[str, Roi],
+        regions: dict[str, Region],
         probe_regions: tuple[str, ...],
         rules: tuple[ObstacleRule, ...],
     ) -> None:
@@ -143,13 +179,7 @@ class OcrObstacleDetector:
         default_confidence = float(payload.get("defaultMinConfidence", 0.65))
         if not 0 <= default_confidence <= 1:
             raise ValueError("OCR 默认置信度必须在 0 到 1 之间")
-        regions = {
-            name: tuple(int(value) for value in roi)
-            for name, roi in payload["regions"].items()
-        }
-        for name, roi in regions.items():
-            if len(roi) != 4 or roi[0] >= roi[2] or roi[1] >= roi[3]:
-                raise ValueError(f"OCR 区域无效：{name}={roi}")
+        regions = parse_regions(payload["regions"])
 
         rules: list[ObstacleRule] = []
         for item in payload.get("rules", []):
