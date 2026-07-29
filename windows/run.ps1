@@ -35,6 +35,11 @@ elseif (@("validate", "observe") -contains $Command -and $ForwardArgs.Count -ge 
         $ForwardArgs = @()
     }
 }
+elseif ($Command -eq "observe") {
+    # Neither task profile covers every screen, and a sampling session that
+    # cannot score the in-match states is missing the ones with no data at all.
+    $PrefixArgs = @("--config", (Join-Path $WindowsDir "config\observe-2560x1440.zh-CN.json"))
+}
 
 if (-not (Test-Path $Python)) {
     throw "Python environment is missing. Run .\setup.ps1 from the windows directory first."

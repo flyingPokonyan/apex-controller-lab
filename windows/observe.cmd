@@ -1,3 +1,3 @@
 @echo off
-powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0run.ps1" observe tutorial
+powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0run.ps1" observe
 pause

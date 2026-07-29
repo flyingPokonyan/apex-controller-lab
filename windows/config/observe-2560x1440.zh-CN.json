@@ -1,0 +1,1041 @@
+{
+  "profile": "observe-2560x1440.zh-CN",
+  "environment": {
+    "width": 2560,
+    "height": 1440,
+    "language": "zh-CN",
+    "displayMode": "fullscreen",
+    "captureBackend": "dxgi",
+    "outputIndex": 0,
+    "foregroundExecutables": [
+      "r5apex.exe",
+      "r5apex_dx12.exe"
+    ]
+  },
+  "timing": {
+    "pollMs": 300,
+    "foregroundPollMs": 500,
+    "resumeStabilizeMs": 700,
+    "unknownGraceMs": 5000,
+    "unknownPollMs": 1500,
+    "groundPollMs": 1500,
+    "continueTimeoutMs": 300000,
+    "lobbyTimeoutMs": 120000,
+    "dropshipTimeoutMs": 900000,
+    "launchReadyTimeoutMs": 10000,
+    "freefallTimeoutMs": 15000,
+    "landingTimeoutMs": 120000,
+    "finalStabilizeMs": 1000,
+    "keyTapMs": 80,
+    "readyClickAttempts": 3,
+    "readyClickConfirmDelayMs": 1500,
+    "ocrScanIntervalMs": 1800
+  },
+  "actions": {
+    "continueClick": [
+      1280,
+      865
+    ],
+    "readyClick": [
+      1280,
+      1295
+    ],
+    "detachScanCode": 29,
+    "launchScanCode": 18,
+    "escapeScanCode": 1,
+    "enterScanCode": 28,
+    "spaceScanCode": 57,
+    "trainingReadyClick": [
+      1280,
+      1295
+    ],
+    "movementBasics": [
+      {
+        "type": "holdKeys",
+        "scanCodes": [
+          17
+        ],
+        "durationMs": 800
+      },
+      {
+        "type": "holdKeys",
+        "scanCodes": [
+          17,
+          42
+        ],
+        "durationMs": 900
+      },
+      {
+        "type": "holdKeys",
+        "scanCodes": [
+          17,
+          57
+        ],
+        "durationMs": 180
+      },
+      {
+        "type": "tapKey",
+        "scanCode": 29,
+        "durationMs": 100
+      }
+    ],
+    "travelBurst": [
+      {
+        "type": "holdKeys",
+        "scanCodes": [
+          17,
+          42
+        ],
+        "durationMs": 1200
+      }
+    ],
+    "openBin": [
+      {
+        "type": "tapKey",
+        "scanCode": 18,
+        "durationMs": 100
+      }
+    ],
+    "pickupWeaponAmmo": [
+      {
+        "type": "tapKey",
+        "scanCode": 18,
+        "durationMs": 100
+      },
+      {
+        "type": "wait",
+        "durationMs": 350
+      },
+      {
+        "type": "tapKey",
+        "scanCode": 18,
+        "durationMs": 100
+      }
+    ],
+    "closeTutorialCard": [
+      {
+        "type": "tapKey",
+        "scanCode": 1,
+        "durationMs": 100
+      }
+    ],
+    "shootDummy": [
+      {
+        "type": "holdMouse",
+        "button": "right",
+        "durationMs": 350
+      },
+      {
+        "type": "holdMouse",
+        "button": "left",
+        "durationMs": 2100
+      }
+    ],
+    "pickupLightAmmo": [
+      {
+        "type": "tapKey",
+        "scanCode": 18,
+        "durationMs": 100
+      }
+    ],
+    "reloadWeapon": [
+      {
+        "type": "tapKey",
+        "scanCode": 19,
+        "durationMs": 100
+      }
+    ],
+    "pickupSecondary": [
+      {
+        "type": "tapKey",
+        "scanCode": 18,
+        "durationMs": 100
+      },
+      {
+        "type": "wait",
+        "durationMs": 350
+      },
+      {
+        "type": "tapKey",
+        "scanCode": 3,
+        "durationMs": 100
+      }
+    ],
+    "pickupHeals": [
+      {
+        "type": "tapKey",
+        "scanCode": 18,
+        "durationMs": 100
+      },
+      {
+        "type": "wait",
+        "durationMs": 350
+      },
+      {
+        "type": "tapKey",
+        "scanCode": 18,
+        "durationMs": 100
+      }
+    ],
+    "useHeals": [
+      {
+        "type": "tapKey",
+        "scanCode": 5,
+        "durationMs": 100
+      },
+      {
+        "type": "wait",
+        "durationMs": 4800
+      },
+      {
+        "type": "tapKey",
+        "scanCode": 5,
+        "durationMs": 100
+      },
+      {
+        "type": "wait",
+        "durationMs": 3300
+      },
+      {
+        "type": "holdKeys",
+        "scanCodes": [
+          5
+        ],
+        "durationMs": 900
+      }
+    ],
+    "completePings": [
+      {
+        "type": "holdMouse",
+        "button": "middle",
+        "durationMs": 90
+      },
+      {
+        "type": "moveMouse",
+        "dx": 90,
+        "dy": -10
+      },
+      {
+        "type": "holdMouse",
+        "button": "middle",
+        "durationMs": 70
+      },
+      {
+        "type": "wait",
+        "durationMs": 120
+      },
+      {
+        "type": "holdMouse",
+        "button": "middle",
+        "durationMs": 70
+      },
+      {
+        "type": "moveMouse",
+        "dx": 120,
+        "dy": 55
+      },
+      {
+        "type": "holdMouse",
+        "button": "middle",
+        "durationMs": 90
+      },
+      {
+        "type": "moveMouse",
+        "dx": 0,
+        "dy": 75
+      },
+      {
+        "type": "holdMouse",
+        "button": "middle",
+        "durationMs": 90
+      },
+      {
+        "type": "holdMouse",
+        "button": "middle",
+        "durationMs": 900
+      }
+    ],
+    "finishTutorial": [
+      {
+        "type": "tapKey",
+        "scanCode": 1,
+        "durationMs": 100
+      }
+    ],
+    "returnLobbyClick": [
+      1280,
+      835
+    ],
+    "confirmReturnClick": [
+      1130,
+      958
+    ],
+    "guideAccountContinue": [
+      610,
+      150
+    ],
+    "guideFriendsContinue": [
+      480,
+      252
+    ],
+    "guideSettingsContinue": [
+      1730,
+      155
+    ],
+    "guideProgressContinue": [
+      1560,
+      290
+    ],
+    "modeSelectClick": [
+      1280,
+      1295
+    ],
+    "unrankedMatchClick": [
+      540,
+      835
+    ]
+  },
+  "ocr": {
+    "enabled": true,
+    "rules": "windows/config/obstacle-rules.zh-CN.json",
+    "stableObservations": 2,
+    "autoArm": false
+  },
+  "guidedOcr": {
+    "enabled": true,
+    "rules": "windows/config/tutorial-states.zh-CN.json",
+    "stableObservations": 2,
+    "scanIntervalMs": 900
+  },
+  "controlApi": {
+    "enabled": false
+  },
+  "states": {
+    "CONTINUE": {
+      "stableFrames": 2,
+      "anchors": [
+        {
+          "template": "calibration/templates/continue.png",
+          "roi": [
+            1085,
+            805,
+            1475,
+            930
+          ],
+          "threshold": 0.72,
+          "searchPx": 4
+        }
+      ]
+    },
+    "LOBBY_TRAINING_READY": {
+      "stableFrames": 2,
+      "anchors": [
+        {
+          "template": "calibration/tutorial/templates/lobby-training-card.png",
+          "roi": [
+            0,
+            1000,
+            600,
+            1400
+          ],
+          "threshold": 0.68,
+          "searchPx": 4
+        },
+        {
+          "template": "calibration/tutorial/templates/lobby-training-ready.png",
+          "roi": [
+            1000,
+            1200,
+            1550,
+            1390
+          ],
+          "threshold": 0.84,
+          "searchPx": 4
+        }
+      ]
+    },
+    "TUTORIAL_COMPLETE": {
+      "stableFrames": 2,
+      "anchors": [
+        {
+          "template": "calibration/tutorial/templates/tutorial-complete.png",
+          "roi": [
+            1900,
+            250,
+            2520,
+            710
+          ],
+          "threshold": 0.58,
+          "searchPx": 6
+        }
+      ]
+    },
+    "TUTORIAL_EXIT_MENU": {
+      "stableFrames": 2,
+      "anchors": [
+        {
+          "template": "calibration/tutorial/templates/exit-menu.png",
+          "roi": [
+            960,
+            680,
+            1600,
+            980
+          ],
+          "threshold": 0.76,
+          "searchPx": 4
+        }
+      ]
+    },
+    "TUTORIAL_EXIT_CONFIRM": {
+      "stableFrames": 2,
+      "anchors": [
+        {
+          "template": "calibration/tutorial/templates/exit-confirm.png",
+          "roi": [
+            830,
+            420,
+            1730,
+            940
+          ],
+          "threshold": 0.8,
+          "searchPx": 4
+        }
+      ]
+    },
+    "MODE_PANEL_MATCH": {
+      "stableFrames": 2,
+      "anchors": [
+        {
+          "template": "calibration/tutorial/templates/mode-panel-match.png",
+          "roi": [
+            290,
+            150,
+            790,
+            970
+          ],
+          "threshold": 0.68,
+          "searchPx": 4
+        }
+      ]
+    },
+    "LOBBY_READY": {
+      "stableFrames": 2,
+      "anchors": [
+        {
+          "template": "calibration/templates/lobby-ready.png",
+          "roi": [
+            1030,
+            1205,
+            1530,
+            1370
+          ],
+          "threshold": 0.72,
+          "searchPx": 4
+        }
+      ]
+    },
+    "LEGEND_SELECT": {
+      "stableFrames": 2,
+      "anchors": [
+        {
+          "template": "calibration/templates/legend-select.png",
+          "roi": [
+            40,
+            20,
+            250,
+            120
+          ],
+          "threshold": 0.72,
+          "searchPx": 4
+        }
+      ]
+    },
+    "DROPSHIP_FOLLOWING": {
+      "stableFrames": 2,
+      "anchors": [
+        {
+          "template": "calibration/templates/following-detach.png",
+          "roi": [
+            1125,
+            1180,
+            1450,
+            1330
+          ],
+          "threshold": 0.72,
+          "searchPx": 4
+        }
+      ]
+    },
+    "LAUNCH_READY": {
+      "stableFrames": 2,
+      "anchors": [
+        {
+          "template": "calibration/templates/launch-ready.png",
+          "roi": [
+            1125,
+            1130,
+            1460,
+            1330
+          ],
+          "threshold": 0.72,
+          "searchPx": 4
+        }
+      ]
+    },
+    "FREEFALL": {
+      "stableFrames": 2,
+      "anchors": [
+        {
+          "template": "calibration/templates/freefall-speed.png",
+          "roi": [
+            610,
+            430,
+            840,
+            540
+          ],
+          "threshold": 0.62,
+          "searchPx": 4
+        }
+      ]
+    },
+    "LANDED": {
+      "stableFrames": 3,
+      "anchors": [
+        {
+          "template": "calibration/templates/landed-ability.png",
+          "roi": [
+            1200,
+            1210,
+            1390,
+            1385
+          ],
+          "threshold": 0.62,
+          "searchPx": 4
+        },
+        {
+          "template": "calibration/templates/landed-weapons.png",
+          "roi": [
+            1740,
+            1275,
+            2500,
+            1395
+          ],
+          "threshold": 0.62,
+          "searchPx": 4
+        }
+      ]
+    }
+  },
+  "offlineCases": [
+    [
+      "calibration/tutorial/raw/01-lobby-training-ready.png",
+      "LOBBY_TRAINING_READY"
+    ],
+    [
+      "calibration/tutorial/raw/12-complete.png",
+      "TUTORIAL_COMPLETE"
+    ],
+    [
+      "calibration/tutorial/raw/13-exit-menu.png",
+      "TUTORIAL_EXIT_MENU"
+    ],
+    [
+      "calibration/tutorial/raw/14-exit-confirm.png",
+      "TUTORIAL_EXIT_CONFIRM"
+    ],
+    [
+      "calibration/tutorial/raw/20-mode-panel.png",
+      "MODE_PANEL_MATCH"
+    ],
+    [
+      "calibration/raw/02-onboarding-lobby-ready.png",
+      "LOBBY_READY"
+    ],
+    [
+      "calibration/raw/01-continue.png",
+      "CONTINUE"
+    ],
+    [
+      "calibration/raw/02-onboarding-lobby-ready.png",
+      "LOBBY_READY"
+    ],
+    [
+      "calibration/raw/03-legend-select-auto.png",
+      "LEGEND_SELECT"
+    ],
+    [
+      "calibration/raw/04-dropship-following.png",
+      "DROPSHIP_FOLLOWING"
+    ],
+    [
+      "calibration/raw/05-solo-launch-ready.png",
+      "LAUNCH_READY"
+    ],
+    [
+      "calibration/raw/06-freefall.png",
+      "FREEFALL"
+    ],
+    [
+      "calibration/raw/07-landed.png",
+      "LANDED"
+    ]
+  ],
+  "guidedOfflineCases": [
+    [
+      "calibration/tutorial/raw/00-auth-required.jpg",
+      "AUTH_REQUIRED"
+    ],
+    [
+      "calibration/tutorial/raw/00-news-welcome.jpg",
+      "NEWS_WELCOME"
+    ],
+    [
+      "calibration/tutorial/raw/00-news-memorial.jpg",
+      "NEWS_MEMORIAL"
+    ],
+    [
+      "calibration/tutorial/raw/02-movement.jpg",
+      "TUTORIAL_MOVEMENT"
+    ],
+    [
+      "calibration/tutorial/raw/02-travel.png",
+      "TUTORIAL_TRAVEL"
+    ],
+    [
+      "calibration/tutorial/raw/03-open-bin.jpg",
+      "TUTORIAL_OPEN_BIN"
+    ],
+    [
+      "calibration/tutorial/raw/03-pickup-weapon.png",
+      "TUTORIAL_PICKUP_WEAPON"
+    ],
+    [
+      "calibration/tutorial/raw/04-weapon-info.png",
+      "TUTORIAL_WEAPON_INFO"
+    ],
+    [
+      "calibration/tutorial/raw/05-shoot.jpg",
+      "TUTORIAL_SHOOT"
+    ],
+    [
+      "calibration/tutorial/raw/06-light-ammo.jpg",
+      "TUTORIAL_LIGHT_AMMO"
+    ],
+    [
+      "calibration/tutorial/raw/06-reload.png",
+      "TUTORIAL_RELOAD"
+    ],
+    [
+      "calibration/tutorial/raw/07-secondary.jpg",
+      "TUTORIAL_SECONDARY"
+    ],
+    [
+      "calibration/tutorial/raw/08-heals-pickup.jpg",
+      "TUTORIAL_HEALS_PICKUP"
+    ],
+    [
+      "calibration/tutorial/raw/09-health-info.png",
+      "TUTORIAL_HEALTH_INFO"
+    ],
+    [
+      "calibration/tutorial/raw/10-heals-use.jpg",
+      "TUTORIAL_HEALS_USE"
+    ],
+    [
+      "calibration/tutorial/raw/11-ping.jpg",
+      "TUTORIAL_PING"
+    ],
+    [
+      "calibration/tutorial/raw/15-guide-account.png",
+      "GUIDE_ACCOUNT"
+    ],
+    [
+      "calibration/tutorial/raw/16-guide-friends.png",
+      "GUIDE_FRIENDS"
+    ],
+    [
+      "calibration/tutorial/raw/17-guide-settings.png",
+      "GUIDE_SETTINGS"
+    ],
+    [
+      "calibration/tutorial/raw/18-guide-progress.png",
+      "GUIDE_PROGRESS"
+    ],
+    [
+      "calibration/tutorial/raw/19-lobby-mode-select.png",
+      "LOBBY_MODE_SELECT"
+    ]
+  ],
+  "task": {
+    "manualStates": [
+      "AUTH_REQUIRED"
+    ],
+    "terminalStates": [
+      "LOBBY_READY"
+    ],
+    "stateStages": {
+      "CONTINUE": {
+        "index": 0,
+        "goal": "ENTER_GAME"
+      },
+      "AUTH_REQUIRED": {
+        "index": 1,
+        "goal": "WAIT_MANUAL_AUTH"
+      },
+      "NEWS_WELCOME": {
+        "index": 2,
+        "goal": "CLEAR_KNOWN_NEWS"
+      },
+      "NEWS_MEMORIAL": {
+        "index": 3,
+        "goal": "CLEAR_KNOWN_NEWS"
+      },
+      "LOBBY_TRAINING_READY": {
+        "index": 4,
+        "goal": "QUEUE_TUTORIAL"
+      },
+      "TUTORIAL_MOVEMENT": {
+        "index": 5,
+        "goal": "BASIC_MOVEMENT"
+      },
+      "TUTORIAL_TRAVEL": {
+        "index": 6,
+        "goal": "REACH_SUPPLY_BIN"
+      },
+      "TUTORIAL_OPEN_BIN": {
+        "index": 7,
+        "goal": "OPEN_SUPPLY_BIN"
+      },
+      "TUTORIAL_PICKUP_WEAPON": {
+        "index": 8,
+        "goal": "PICKUP_WEAPON_AMMO"
+      },
+      "TUTORIAL_WEAPON_INFO": {
+        "index": 9,
+        "goal": "CLOSE_WEAPON_INFO"
+      },
+      "TUTORIAL_SHOOT": {
+        "index": 10,
+        "goal": "SHOOT_DUMMY"
+      },
+      "TUTORIAL_LIGHT_AMMO": {
+        "index": 11,
+        "goal": "PICKUP_LIGHT_AMMO"
+      },
+      "TUTORIAL_RELOAD": {
+        "index": 12,
+        "goal": "RELOAD_WEAPON"
+      },
+      "TUTORIAL_SECONDARY": {
+        "index": 13,
+        "goal": "EQUIP_SECONDARY"
+      },
+      "TUTORIAL_HEALS_PICKUP": {
+        "index": 14,
+        "goal": "PICKUP_HEALS"
+      },
+      "TUTORIAL_HEALTH_INFO": {
+        "index": 15,
+        "goal": "CLOSE_HEALTH_INFO"
+      },
+      "TUTORIAL_HEALS_USE": {
+        "index": 16,
+        "goal": "USE_HEALS"
+      },
+      "TUTORIAL_PING": {
+        "index": 17,
+        "goal": "COMPLETE_PINGS"
+      },
+      "TUTORIAL_COMPLETE": {
+        "index": 18,
+        "goal": "EXIT_TUTORIAL"
+      },
+      "TUTORIAL_EXIT_MENU": {
+        "index": 19,
+        "goal": "RETURN_TO_LOBBY"
+      },
+      "TUTORIAL_EXIT_CONFIRM": {
+        "index": 20,
+        "goal": "CONFIRM_RETURN"
+      },
+      "GUIDE_ACCOUNT": {
+        "index": 21,
+        "goal": "CLEAR_POST_TUTORIAL_GUIDE"
+      },
+      "GUIDE_FRIENDS": {
+        "index": 22,
+        "goal": "CLEAR_POST_TUTORIAL_GUIDE"
+      },
+      "GUIDE_SETTINGS": {
+        "index": 23,
+        "goal": "CLEAR_POST_TUTORIAL_GUIDE"
+      },
+      "GUIDE_PROGRESS": {
+        "index": 24,
+        "goal": "CLEAR_POST_TUTORIAL_GUIDE"
+      },
+      "LOBBY_MODE_SELECT": {
+        "index": 25,
+        "goal": "OPEN_MODE_PANEL"
+      },
+      "MODE_PANEL_MATCH": {
+        "index": 26,
+        "goal": "SELECT_UNRANKED_MATCH"
+      },
+      "LOBBY_READY": {
+        "index": 27,
+        "goal": "MATCH_READY"
+      }
+    },
+    "stallTimeoutMs": {
+      "CONTINUE": 300000,
+      "AUTH_REQUIRED": 0,
+      "LOBBY_TRAINING_READY": 120000,
+      "TUTORIAL_TRAVEL": 45000,
+      "TUTORIAL_PING": 90000,
+      "LOBBY_READY": 0
+    },
+    "actions": {
+      "CONTINUE": {
+        "name": "continueClick",
+        "kind": "click",
+        "confirmMs": 2000,
+        "maxAttempts": 3,
+        "allowedNextStates": [
+          "AUTH_REQUIRED",
+          "NEWS_WELCOME",
+          "NEWS_MEMORIAL",
+          "LOBBY_TRAINING_READY"
+        ]
+      },
+      "NEWS_WELCOME": {
+        "name": "escapeScanCode",
+        "kind": "key",
+        "confirmMs": 1500,
+        "maxAttempts": 2,
+        "allowedNextStates": [
+          "NEWS_MEMORIAL",
+          "LOBBY_TRAINING_READY"
+        ]
+      },
+      "NEWS_MEMORIAL": {
+        "name": "escapeScanCode",
+        "kind": "key",
+        "confirmMs": 1500,
+        "maxAttempts": 2,
+        "allowedNextStates": [
+          "LOBBY_TRAINING_READY"
+        ]
+      },
+      "LOBBY_TRAINING_READY": {
+        "name": "trainingReadyClick",
+        "kind": "click",
+        "confirmMs": 2500,
+        "maxAttempts": 3,
+        "allowedNextStates": [
+          "TUTORIAL_MOVEMENT"
+        ]
+      },
+      "TUTORIAL_MOVEMENT": {
+        "name": "movementBasics",
+        "kind": "sequence",
+        "confirmMs": 1800,
+        "maxAttempts": 3,
+        "allowedNextStates": [
+          "TUTORIAL_TRAVEL"
+        ]
+      },
+      "TUTORIAL_TRAVEL": {
+        "name": "travelBurst",
+        "kind": "sequence",
+        "confirmMs": 1400,
+        "maxAttempts": 8,
+        "allowedNextStates": [
+          "TUTORIAL_OPEN_BIN"
+        ]
+      },
+      "TUTORIAL_OPEN_BIN": {
+        "name": "openBin",
+        "kind": "sequence",
+        "confirmMs": 1200,
+        "maxAttempts": 3,
+        "allowedNextStates": [
+          "TUTORIAL_PICKUP_WEAPON"
+        ]
+      },
+      "TUTORIAL_PICKUP_WEAPON": {
+        "name": "pickupWeaponAmmo",
+        "kind": "sequence",
+        "confirmMs": 1500,
+        "maxAttempts": 3,
+        "allowedNextStates": [
+          "TUTORIAL_WEAPON_INFO"
+        ]
+      },
+      "TUTORIAL_WEAPON_INFO": {
+        "name": "closeTutorialCard",
+        "kind": "sequence",
+        "confirmMs": 1200,
+        "maxAttempts": 2,
+        "allowedNextStates": [
+          "TUTORIAL_SHOOT"
+        ]
+      },
+      "TUTORIAL_SHOOT": {
+        "name": "shootDummy",
+        "kind": "sequence",
+        "confirmMs": 1600,
+        "maxAttempts": 2,
+        "allowedNextStates": [
+          "TUTORIAL_LIGHT_AMMO"
+        ]
+      },
+      "TUTORIAL_LIGHT_AMMO": {
+        "name": "pickupLightAmmo",
+        "kind": "sequence",
+        "confirmMs": 1200,
+        "maxAttempts": 3,
+        "allowedNextStates": [
+          "TUTORIAL_RELOAD"
+        ]
+      },
+      "TUTORIAL_RELOAD": {
+        "name": "reloadWeapon",
+        "kind": "sequence",
+        "confirmMs": 1200,
+        "maxAttempts": 2,
+        "allowedNextStates": [
+          "TUTORIAL_SECONDARY"
+        ]
+      },
+      "TUTORIAL_SECONDARY": {
+        "name": "pickupSecondary",
+        "kind": "sequence",
+        "confirmMs": 1600,
+        "maxAttempts": 3,
+        "allowedNextStates": [
+          "TUTORIAL_HEALS_PICKUP"
+        ]
+      },
+      "TUTORIAL_HEALS_PICKUP": {
+        "name": "pickupHeals",
+        "kind": "sequence",
+        "confirmMs": 1500,
+        "maxAttempts": 3,
+        "allowedNextStates": [
+          "TUTORIAL_HEALTH_INFO"
+        ]
+      },
+      "TUTORIAL_HEALTH_INFO": {
+        "name": "closeTutorialCard",
+        "kind": "sequence",
+        "confirmMs": 1200,
+        "maxAttempts": 2,
+        "allowedNextStates": [
+          "TUTORIAL_HEALS_USE"
+        ]
+      },
+      "TUTORIAL_HEALS_USE": {
+        "name": "useHeals",
+        "kind": "sequence",
+        "confirmMs": 1800,
+        "maxAttempts": 2,
+        "allowedNextStates": [
+          "TUTORIAL_PING"
+        ]
+      },
+      "TUTORIAL_PING": {
+        "name": "completePings",
+        "kind": "sequence",
+        "confirmMs": 1800,
+        "maxAttempts": 2,
+        "allowedNextStates": [
+          "TUTORIAL_COMPLETE"
+        ]
+      },
+      "TUTORIAL_COMPLETE": {
+        "name": "finishTutorial",
+        "kind": "sequence",
+        "confirmMs": 1200,
+        "maxAttempts": 2,
+        "allowedNextStates": [
+          "TUTORIAL_EXIT_MENU"
+        ]
+      },
+      "TUTORIAL_EXIT_MENU": {
+        "name": "returnLobbyClick",
+        "kind": "click",
+        "confirmMs": 1200,
+        "maxAttempts": 2,
+        "allowedNextStates": [
+          "TUTORIAL_EXIT_CONFIRM"
+        ]
+      },
+      "TUTORIAL_EXIT_CONFIRM": {
+        "name": "confirmReturnClick",
+        "kind": "click",
+        "confirmMs": 3000,
+        "maxAttempts": 2,
+        "allowedNextStates": [
+          "GUIDE_ACCOUNT",
+          "LOBBY_MODE_SELECT",
+          "LOBBY_READY"
+        ]
+      },
+      "GUIDE_ACCOUNT": {
+        "name": "guideAccountContinue",
+        "kind": "click",
+        "confirmMs": 1200,
+        "maxAttempts": 2,
+        "allowedNextStates": [
+          "GUIDE_FRIENDS"
+        ]
+      },
+      "GUIDE_FRIENDS": {
+        "name": "guideFriendsContinue",
+        "kind": "click",
+        "confirmMs": 1200,
+        "maxAttempts": 2,
+        "allowedNextStates": [
+          "GUIDE_SETTINGS"
+        ]
+      },
+      "GUIDE_SETTINGS": {
+        "name": "guideSettingsContinue",
+        "kind": "click",
+        "confirmMs": 1200,
+        "maxAttempts": 2,
+        "allowedNextStates": [
+          "GUIDE_PROGRESS"
+        ]
+      },
+      "GUIDE_PROGRESS": {
+        "name": "guideProgressContinue",
+        "kind": "click",
+        "confirmMs": 1500,
+        "maxAttempts": 2,
+        "allowedNextStates": [
+          "LOBBY_MODE_SELECT"
+        ]
+      },
+      "LOBBY_MODE_SELECT": {
+        "name": "modeSelectClick",
+        "kind": "click",
+        "confirmMs": 1200,
+        "maxAttempts": 2,
+        "allowedNextStates": [
+          "MODE_PANEL_MATCH"
+        ]
+      },
+      "MODE_PANEL_MATCH": {
+        "name": "unrankedMatchClick",
+        "kind": "click",
+        "confirmMs": 1800,
+        "maxAttempts": 2,
+        "allowedNextStates": [
+          "LOBBY_READY"
+        ]
+      }
+    }
+  }
+}
