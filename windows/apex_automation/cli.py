@@ -54,13 +54,17 @@ def validate(config_path: Path) -> int:
     config = load_config(config_path)
     detector = VisionDetector(config)
     failures = 0
+    # Raw full-screen frames are deliberately not published with the source, so
+    # a fresh clone is missing every sample. That is not a recognition failure
+    # and must not be reported as one, or a first run looks broken.
+    missing = 0
     print(f"配置：{config.profile}")
     print("离线图片识别：")
 
     for image_path, expected in config.offline_cases:
         if not image_path.exists():
-            print(f"  FAIL {image_path.name}: 原图不存在")
-            failures += 1
+            print(f"  SKIP {image_path.name}: 样本未随源码分发")
+            missing += 1
             continue
         frame = load_frame(image_path)
         detector.validate_frame(frame)
@@ -95,25 +99,30 @@ def validate(config_path: Path) -> int:
                 raise ValueError("缺少 guidedOfflineCases")
             for image_path, expected in config.guided_offline_cases:
                 if not image_path.exists():
-                    print(f"  FAIL {image_path.name}: 教程 OCR 原图不存在")
-                    failures += 1
+                    print(f"  SKIP OCR {image_path.name}: 样本未随源码分发")
+                    missing += 1
                     continue
                 analysis = guided_detector.analyze(load_frame(image_path))
                 actual = None if analysis.decision is None else analysis.decision.state
                 passed = analysis.error is None and actual == expected
-                print(
-                    f"  {'PASS' if passed else 'FAIL'} OCR {image_path.name}: "
-                    f"{actual or 'UNKNOWN'}（期望 {expected}）"
-                )
+                # An engine that failed to load reads as UNKNOWN for every
+                # image otherwise, which hides the one line that explains it.
+                detail = analysis.error or f"{actual or 'UNKNOWN'}（期望 {expected}）"
+                print(f"  {'PASS' if passed else 'FAIL'} OCR {image_path.name}: {detail}")
                 if not passed:
                     failures += 1
     except Exception as error:
         print(f"  FAIL 教程 OCR：{error}")
         failures += 1
 
+    if missing:
+        print(f"跳过 {missing} 张：源码仓库不含原始全屏样本，发布包才有。")
     if failures:
         print(f"离线验证失败：{failures} 张")
         return 1
+    if missing and not any(path.exists() for path, _ in config.offline_cases):
+        print("没有可验证的样本；本次没有验证任何东西。")
+        return 0
     print("离线验证通过；本步骤没有发送任何系统输入。")
     return 0
 

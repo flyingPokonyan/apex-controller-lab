@@ -54,16 +54,30 @@ Windows 第一次克隆后，进入 `windows` 目录运行 `setup.ps1`。以后�
 - [Windows 首场匹配运行器](docs/windows-first-match-runner.md)
 - [Windows 新号训练任务运行器](docs/windows-first-tutorial-runner.md)
 - [可恢复任务运行器设计（讨论稿）](docs/resilient-task-runner-design.md)
+- [菜单改用文字证据：离线测量与待实测项](docs/ocr-first-calibration.md)
+- [观察会话清单](docs/observation-session-checklist.md)
 
 ## Windows 首场匹配验证
 
-`windows/` 已包含针对 `2560×1440`、中文、全屏环境的截图门控运行器。它覆盖新手任务完成后的首场匹配：继续、准备、自动选择英雄、跳伞指挥官等待、`E` 跳伞、自由落体、落地确认与最终截图。非跳伞指挥官的 `LCTRL` 分支还缺一张独立标定图，当前会安全暂停而不会猜测。
+`windows/` 已包含针对 `2560×1440`、中文、全屏环境的截图门控运行器。它覆盖新手任务完成后的首场匹配：继续、准备、自动选择英雄、跟队时按 `LCTRL` 脱离、`E` 跳伞、自由落体、落地确认与最终截图。真正的跳伞指挥官画面还缺一张标定图，当前不可达而不会猜测。
 
 真实输入默认不会启动；先在 Windows 中运行 `.\\windows\\run.ps1 validate` 做离线识别，再显式运行 `.\\windows\\run.ps1 start --mode match` 启动可恢复的常驻匹配任务。启动后可在 `http://127.0.0.1:8765` 查看状态、关键截图和事件，并暂停、继续、停止或释放输入。Apex 不在前台、加载黑屏或暂时无法识别时，任务会释放输入并暂停观察，而不是直接退出；任何时候按 `F8` 紧急停止。
 
-区域 OCR 和外置清障字典已经接入，但默认仅识别留证。只有在真实画面确认规则正确后，才使用 `--arm-safe-obstacles` 显式允许字典中的 `Enter`/`Esc` 安全动作；未知页面始终不会盲点。
+区域 OCR 和外置清障字典已经接入。`match` 档默认仅识别留证，需要 `--arm-safe-obstacles` 才允许字典中的 `Enter`/`Esc` 安全动作；`tutorial` 档在配置里声明了 `ocr.autoArm`，双击入口即为已武装。未知页面在两种情况下都不会盲点。
+
+区域可以声明 `singleLine`，这样跳过文字检测直接识别。检测占了 OCR 的绝大部分开销，且开销与输入尺寸基本无关，所以只裁小区域省不下时间——大厅模式名实测 4.7ms（单行）对 234ms（带检测），置信度相同。
 
 原来的 `.\\windows\\run.ps1 live` 仍保留为固定首场链路的线性回归入口，不建议作为日常任务入口。运行状态可从 `windows/runs/status.json` 查看，每次会话的事件和关键截图保存在对应的时间目录中。
+
+## 观察模式（标定用）
+
+```bat
+windows\observe.cmd
+```
+
+真实截屏、跑全套识别、逐帧记录得分与 OCR 文本，**整条命令不构造输入发送器，没有任何代码路径能发出按键或点击**，可以一边正常游戏一边开着。
+
+它存在的原因是离线验证给不出阈值余量：每个模板都是它所验证的那张原图的逐字节裁剪，所以离线分数恒为 `1.000`。观察会话产出 `observations-summary.json`，其中 `separation` 表示最差的真阳性比最好的假阳性高多少——这才是定阈值的依据。采集清单见[观察会话清单](docs/observation-session-checklist.md)。
 
 ## Windows 新号训练验证
 
