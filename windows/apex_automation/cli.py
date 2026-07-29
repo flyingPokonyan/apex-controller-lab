@@ -11,6 +11,7 @@ from .capabilities import CapabilityDispatcher, CapabilitySet
 from .capture import DxcamFrameSource
 from .config import (
     DEFAULT_CONFIG_PATH,
+    PLAY_CONFIG_PATH,
     REPOSITORY_ROOT,
     TUTORIAL_CONFIG_PATH,
     RunnerConfig,
@@ -21,6 +22,7 @@ from .control_server import LocalControlServer
 from .input_win32 import EmergencyStop, Win32InputSender, Win32SafetyGuard
 from .observer import ObservationSession
 from .ocr_obstacles import OcrObstacleDetector, RapidOcrProvider
+from .pilot import CapabilityPilot
 from .ocr_states import OcrStateDetector
 from .recorder import RunRecorder
 from .runner import ScenarioRunner
@@ -256,6 +258,97 @@ def run_observe(
     return 0
 
 
+def run_play(config_path: Path, *, countdown: int, duration_s: float | None) -> int:
+    if sys.platform != "win32":
+        print("play 模式只能在 Windows 上运行。", file=sys.stderr)
+        return 2
+
+    # The default profile is the first-match one, which has neither a state
+    # dictionary nor a capability set. Falling back to the play profile keeps
+    # `python -m apex_automation play` working the same as `play.cmd`.
+    if config_path.expanduser().resolve() == DEFAULT_CONFIG_PATH.resolve():
+        config_path = PLAY_CONFIG_PATH
+    config = load_config(config_path)
+    if not bool(config.game_states.get("enabled", False)):
+        print("这个画像没有开启 gameStates，能力集无从判断画面。", file=sys.stderr)
+        return 2
+    if not config.capability_set:
+        print("这个画像没有配置 capabilitySet，没有任何能力可以执行。", file=sys.stderr)
+        return 2
+
+    payload = json.loads(_repository_path(config.capability_set).read_text(encoding="utf-8"))
+    capabilities = CapabilitySet.from_payload(payload)
+    state_detector = OcrStateDetector.from_path(
+        RapidOcrProvider(), _repository_path(config.game_states["rules"])
+    )
+    # Every state a capability claims to handle has to be one the detector can
+    # actually produce, or that capability is dead configuration that looks
+    # alive. Checked here because this is the first command that acts on it.
+    unknown = {
+        state
+        for capability in capabilities.capabilities
+        for state in capability.states
+        if state not in state_detector.states
+    }
+    if unknown:
+        print(f"能力集引用了识别不出的画面：{sorted(unknown)}", file=sys.stderr)
+        return 2
+
+    guard = Win32SafetyGuard(config.environment["foregroundExecutables"])
+    sender = Win32InputSender(
+        guard,
+        int(config.environment["width"]),
+        int(config.environment["height"]),
+    )
+    recorder = RunRecorder(REPOSITORY_ROOT / "windows" / "runs", f"{config.profile}.play")
+    recorder.log("RUN_STARTED", profile=config.profile, capabilitySet=str(config.capability_set))
+
+    print("自动游玩：会真实发送键盘和鼠标输入。")
+    print(f"能力：{', '.join(item.id for item in capabilities.capabilities)}")
+    print("随时按 F8 或 Ctrl+C 立即停止；把 Apex 切到后台也会暂停。")
+    for remaining in range(max(0, countdown), 0, -1):
+        print(f"{remaining}...")
+        time.sleep(1)
+
+    pilot: CapabilityPilot | None = None
+    try:
+        with DxcamFrameSource(
+            backend=str(config.environment["captureBackend"]),
+            output_index=int(config.environment["outputIndex"]),
+        ) as source:
+            pilot = CapabilityPilot(
+                config,
+                source,
+                sender,
+                guard,
+                recorder,
+                state_detector=state_detector,
+                dispatcher=CapabilityDispatcher(capabilities),
+                actions=dict(payload.get("actions", {})),
+                notify=print,
+            )
+            pilot.run(duration_s=duration_s)
+    except (EmergencyStop, KeyboardInterrupt) as error:
+        sender.release_all()
+        reason = str(error) or "用户停止"
+        recorder.finish("STOPPED", reason=reason)
+        print(f"\n已停止：{reason}")
+    except Exception as error:
+        sender.release_all()
+        recorder.finish("FAILED", error=str(error))
+        print(f"自动游玩中断：{error}", file=sys.stderr)
+        print(f"证据目录：{recorder.run_dir}", file=sys.stderr)
+        return 1
+    else:
+        recorder.finish("PLAYED", actionsSent=0 if pilot is None else pilot.actions_sent)
+
+    if pilot is not None:
+        print(f"共 {pilot.frames} 帧，发出 {pilot.actions_sent} 次输入。")
+        print(f"统计摘要：{pilot.write_summary()}")
+    print(f"证据目录：{recorder.run_dir}")
+    return 0
+
+
 def run_start(
     config_path: Path,
     mode: str,
@@ -396,6 +489,12 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="同时跑 OCR；全屏 OCR 单次数秒，会把采样间隔拖到秒级",
     )
+    play = subparsers.add_parser(
+        "play",
+        help="按能力集自动游玩：真实识别、真实决策、真实输入",
+    )
+    play.add_argument("--countdown", type=int, default=5)
+    play.add_argument("--duration-s", type=float, help="到时自动停止，默认一直跑")
     start = subparsers.add_parser("start", help="启动可恢复的常驻任务监督器")
     start.add_argument("--mode", choices=("match", "tutorial"), default="match")
     start.add_argument(
@@ -423,6 +522,12 @@ def main(argv: list[str] | None = None) -> int:
             snapshot_interval_ms=max(1000, args.snapshot_interval_ms),
             duration_s=args.duration_s,
             with_ocr=args.with_ocr,
+        )
+    if command == "play":
+        return run_play(
+            args.config,
+            countdown=max(0, args.countdown),
+            duration_s=args.duration_s,
         )
     if command == "start":
         return run_start(

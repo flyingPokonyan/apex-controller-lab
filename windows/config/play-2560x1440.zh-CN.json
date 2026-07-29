@@ -1,0 +1,27 @@
+{
+  "profile": "play-2560x1440.zh-CN",
+  "_note": "自动游玩用的机器画像。刻意只留能力闭环需要的东西：没有模板、没有离线用例、没有 task.actions 那张有序动作表。要做什么全在 capabilitySet 里，认得出什么全在 gameStates 里，这里只交代这台机器长什么样。",
+  "environment": {
+    "width": 2560,
+    "height": 1440,
+    "language": "zh-CN",
+    "displayMode": "fullscreen",
+    "captureBackend": "dxgi",
+    "outputIndex": 0,
+    "foregroundExecutables": [
+      "r5apex.exe",
+      "r5apex_dx12.exe"
+    ]
+  },
+  "timing": {
+    "pollMs": 300,
+    "keyTapMs": 80
+  },
+  "actions": {},
+  "states": {},
+  "gameStates": {
+    "enabled": true,
+    "rules": "windows/config/game-states.zh-CN.json"
+  },
+  "capabilitySet": "windows/config/enter-game.zh-CN.json"
+}

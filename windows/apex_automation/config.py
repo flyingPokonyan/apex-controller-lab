@@ -9,6 +9,7 @@ from typing import Any
 REPOSITORY_ROOT = Path(__file__).resolve().parents[2]
 DEFAULT_CONFIG_PATH = REPOSITORY_ROOT / "windows" / "config" / "first-match-2560x1440.zh-CN.json"
 TUTORIAL_CONFIG_PATH = REPOSITORY_ROOT / "windows" / "config" / "first-tutorial-2560x1440.zh-CN.json"
+PLAY_CONFIG_PATH = REPOSITORY_ROOT / "windows" / "config" / "play-2560x1440.zh-CN.json"
 
 
 @dataclass(frozen=True)
