@@ -189,11 +189,43 @@ class ObserverTest(unittest.TestCase):
         session.step()
         self.assertAlmostEqual(session._next_snapshot_at, 15.0)
 
+        self.clock.sleep(1.0)
         session._classification = "LOBBY_TRAINING_READY"
         session.source.frames.append(_blank(90))
         session.step()
         # A death replay lasts a few seconds; 15s sampling would step over it.
+        self.assertAlmostEqual(session._next_snapshot_at, 1.0 + 2.0)
+
+    def test_moving_unknown_frames_do_not_eat_the_screenshot_budget(self) -> None:
+        session = self._session(
+            [_blank(0)],
+            unknown_snapshot_interval_ms=2_000,
+            moving_snapshot_interval_ms=10_000,
+        )
+        # A static unrecognised screen is a post-match dialog: sample it often.
+        session._screen_hint = lambda motion, std: None
+        session.step()
         self.assertAlmostEqual(session._next_snapshot_at, 2.0)
+
+        # A moving one is gameplay, and 15 minutes of it would otherwise fill
+        # the budget before the post-match screens are ever reached.
+        self.clock.sleep(3.0)
+        session._classification = "SOMETHING"
+        session._screen_hint = lambda motion, std: "HIGH_MOTION"
+        session.source.frames.append(_blank(200))
+        session.step()
+        self.assertAlmostEqual(session._next_snapshot_at, 3.0 + 10.0)
+
+    def test_flapping_classification_cannot_burst_screenshots(self) -> None:
+        lobby = load_frame(REPOSITORY_ROOT / "calibration" / "tutorial" / "raw" / "01-lobby-training-ready.png")
+        session = self._session(
+            [lobby, _blank(90), lobby, _blank(90)],
+            min_screenshot_gap_ms=700,
+        )
+        session.run(max_iterations=4)
+
+        # Four alternating frames at 300ms would be four saves without a floor.
+        self.assertLessEqual(session.screenshot_count, 2)
 
     def test_observer_never_exposes_an_input_sender(self) -> None:
         session = self._session([_blank(90)])

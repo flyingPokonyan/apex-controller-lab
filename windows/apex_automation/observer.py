@@ -74,8 +74,10 @@ class ObservationSession:
         ocr_interval_ms: int = 1500,
         snapshot_interval_ms: int = 15000,
         unknown_snapshot_interval_ms: int = 2000,
+        moving_snapshot_interval_ms: int = 10000,
         max_screenshots: int = 400,
         snapshot_min_change: float = 0.01,
+        min_screenshot_gap_ms: int = 700,
     ) -> None:
         self.config = config
         self.detector = detector
@@ -95,8 +97,18 @@ class ObservationSession:
         # fall between two slow samples. A recognised screen already has a
         # template, so it can be sampled lazily.
         self.unknown_snapshot_interval_ms = unknown_snapshot_interval_ms
+        # Gameplay is unrecognised and never stops moving, so it would spend
+        # the whole screenshot budget on running around and leave nothing for
+        # the post-match screens, which are unrecognised, nearly static, and
+        # the ones with no calibration at all.
+        self.moving_snapshot_interval_ms = moving_snapshot_interval_ms
         self.max_screenshots = max_screenshots
         self.snapshot_min_change = snapshot_min_change
+        # A HUD anchor that matches intermittently during play makes the
+        # classification flap, and a change is otherwise saved with no
+        # interval at all. This floor applies to every reason for saving.
+        self.min_screenshot_gap_ms = min_screenshot_gap_ms
+        self._last_screenshot_at = float("-inf")
 
         self.observations_path = Path(recorder.run_dir) / "observations.jsonl"
         self.summary_path = Path(recorder.run_dir) / "observations-summary.json"
@@ -274,14 +286,17 @@ class ObservationSession:
             else frame_motion(self._last_saved_frame, frame)
         )
         due = now >= self._next_snapshot_at and change_since_saved >= self.snapshot_min_change
-        if (changed or due) and self.screenshot_count < self.max_screenshots:
+        spaced = (now - self._last_screenshot_at) * 1000 >= self.min_screenshot_gap_ms
+        if (changed or due) and spaced and self.screenshot_count < self.max_screenshots:
             self.screenshot_count += 1
-            interval = (
-                self.unknown_snapshot_interval_ms
-                if classification is None
-                else self.snapshot_interval_ms
-            )
+            if classification is not None:
+                interval = self.snapshot_interval_ms
+            elif record["hint"] == "HIGH_MOTION":
+                interval = self.moving_snapshot_interval_ms
+            else:
+                interval = self.unknown_snapshot_interval_ms
             self._next_snapshot_at = now + interval / 1000
+            self._last_screenshot_at = now
             self._last_saved_frame = frame
             stage = classification or (record["hint"] or "unmatched")
             record["screenshot"] = str(self.recorder.screenshot(stage, frame))
