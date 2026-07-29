@@ -171,6 +171,7 @@ def run_observe(
     ocr_interval_ms: int,
     snapshot_interval_ms: int,
     duration_s: float | None,
+    with_ocr: bool = False,
 ) -> int:
     if sys.platform != "win32":
         print("observe 模式只能在 Windows 上运行。", file=sys.stderr)
@@ -180,11 +181,16 @@ def run_observe(
     detector = VisionDetector(config)
     guard = Win32SafetyGuard(config.environment["foregroundExecutables"])
     recorder = RunRecorder(REPOSITORY_ROOT / "windows" / "runs", f"{config.profile}.observe")
-    guided_detector = _build_guided_detector(config)
-    obstacle_detector = _build_obstacle_detector(config)
+    # Whole-frame OCR measured 2.1-6.8s per pass on the target machine, which
+    # is longer than the poll interval: a session spent 7.7s between frames
+    # and stepped straight over the dropship and the post-match screens.
+    # Collecting frames does not need OCR, so it is off unless asked for.
+    guided_detector = _build_guided_detector(config) if with_ocr else None
+    obstacle_detector = _build_obstacle_detector(config) if with_ocr else None
 
     print("观察模式：只截图和识别，不会发送任何键盘或鼠标输入。")
     print("请手动操作 Apex，按 F8 或 Ctrl+C 结束。")
+    print("OCR：" + ("已开启（会明显拖慢采样）" if with_ocr else "已关闭，采样保持约 300ms 一帧"))
     session: ObservationSession | None = None
 
     try:
@@ -363,6 +369,11 @@ def build_parser() -> argparse.ArgumentParser:
     observe.add_argument("--ocr-interval-ms", type=int, default=1500)
     observe.add_argument("--snapshot-interval-ms", type=int, default=15000)
     observe.add_argument("--duration-s", type=float, help="到时自动结束，默认一直观察")
+    observe.add_argument(
+        "--with-ocr",
+        action="store_true",
+        help="同时跑 OCR；全屏 OCR 单次数秒，会把采样间隔拖到秒级",
+    )
     start = subparsers.add_parser("start", help="启动可恢复的常驻任务监督器")
     start.add_argument("--mode", choices=("match", "tutorial"), default="match")
     start.add_argument(
@@ -389,6 +400,7 @@ def main(argv: list[str] | None = None) -> int:
             ocr_interval_ms=max(200, args.ocr_interval_ms),
             snapshot_interval_ms=max(1000, args.snapshot_interval_ms),
             duration_s=args.duration_s,
+            with_ocr=args.with_ocr,
         )
     if command == "start":
         return run_start(
