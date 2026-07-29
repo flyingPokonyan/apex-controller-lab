@@ -1,0 +1,103 @@
+{
+  "schemaVersion": 1,
+  "language": "zh-CN",
+  "_note": "目标：进入并留在对局里。这里没有任何地方表达「下一步是什么」——优先级只在同一帧内多个能力同时可处理时仲裁。所有坐标取自 2026-07-29 目标机器的实时 DXGI 帧。",
+  "actions": {
+    "continueClick": [1280, 865],
+    "keepAsIsClick": [1425, 956],
+    "modeSelectClick": [1280, 1295],
+    "unrankedCardClick": [493, 1035],
+    "unrankedConfirmClick": [522, 1143],
+    "returnLobbyScanCode": 15,
+    "meleeScanCode": 47
+  },
+  "capabilities": [
+    {
+      "id": "dismiss-climb-settings",
+      "priority": 90,
+      "states": ["CLIMB_SETTINGS_MODAL"],
+      "action": "keepAsIsClick",
+      "kind": "click",
+      "actionClass": "idempotent",
+      "confirmMs": 2000,
+      "maxAttempts": 3,
+      "_note": "「保持原样」而不是「更改设置」：任务无权替用户改游戏设置。"
+    },
+    {
+      "id": "title-continue",
+      "priority": 80,
+      "states": ["CONTINUE"],
+      "action": "continueClick",
+      "kind": "click",
+      "actionClass": "idempotent",
+      "confirmMs": 2500,
+      "maxAttempts": 3,
+      "_note": "断连之后也会回到这一页，所以断连恢复不需要单独的能力。"
+    },
+    {
+      "id": "post-match-return-lobby",
+      "priority": 70,
+      "states": ["POST_MATCH_SUMMARY"],
+      "action": "returnLobbyScanCode",
+      "kind": "key",
+      "actionClass": "idempotent",
+      "confirmMs": 4000,
+      "maxAttempts": 3,
+      "allowedNextStates": [
+        "LOBBY_READY_UNRANKED",
+        "LOBBY_READY_TRAINING",
+        "LOBBY_SELECT_REQUIRED",
+        "CLIMB_SETTINGS_MODAL"
+      ],
+      "_note": "结算页底部写的是 TAB 返回大厅。右上角那个「1 单人匹配」是匹配开关而不是下一把，而且结算页显示时匹配已经在跑了；走 TAB 会落到一个已认识的画面，比依赖匹配开关可靠。"
+    },
+    {
+      "id": "lobby-open-mode-panel",
+      "priority": 60,
+      "states": ["LOBBY_SELECT_REQUIRED", "LOBBY_READY_TRAINING"],
+      "action": "modeSelectClick",
+      "kind": "click",
+      "actionClass": "idempotent",
+      "confirmMs": 2500,
+      "maxAttempts": 3,
+      "allowedNextStates": ["MODE_PANEL_TARGET_VISIBLE", "MODE_PANEL_TARGET_SELECTED"],
+      "_note": "大厅停在训练模式时按「准备」会进训练场，所以这两个状态都要先去改模式。"
+    },
+    {
+      "id": "mode-panel-focus-target",
+      "priority": 55,
+      "states": ["MODE_PANEL_TARGET_VISIBLE"],
+      "action": "unrankedCardClick",
+      "kind": "click",
+      "actionClass": "idempotent",
+      "confirmMs": 2000,
+      "maxAttempts": 3,
+      "allowedNextStates": ["MODE_PANEL_TARGET_SELECTED", "LOBBY_READY_UNRANKED"],
+      "_note": "点卡片只是把焦点移过去，重复无害。之前配置的 [540,835] 落在已锁定的排位赛卡片上，实时帧显示未上榜在 y=1004-1067。"
+    },
+    {
+      "id": "mode-panel-confirm-target",
+      "priority": 55,
+      "states": ["MODE_PANEL_TARGET_SELECTED"],
+      "action": "unrankedConfirmClick",
+      "kind": "click",
+      "actionClass": "commit",
+      "confirmMs": 3000,
+      "maxAttempts": 2,
+      "allowedNextStates": ["LOBBY_READY_UNRANKED"],
+      "_note": "这一步真正改变了游戏模式，所以要求正向后置确认且不盲重试。"
+    },
+    {
+      "id": "in-match-melee",
+      "priority": 10,
+      "states": ["IN_MATCH_ALIVE"],
+      "action": "meleeScanCode",
+      "kind": "key",
+      "actionClass": "idempotent",
+      "trigger": "periodic",
+      "minIntervalMs": 1000,
+      "maxIntervalMs": 5000,
+      "_note": "画面不变时按间隔重复，没有后置画面可验，所以只能是 idempotent。闸门是 IN_MATCH_ALIVE：观战和结算页都不会命中它，原来的 LANDED 模板实测余量只有 0.002 不能当闸门。"
+    }
+  ]
+}
