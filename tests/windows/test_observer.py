@@ -170,6 +170,7 @@ class ObserverTest(unittest.TestCase):
         session = self._session(
             [still, still, still, _blank(200)],
             snapshot_interval_ms=0,
+            unknown_snapshot_interval_ms=0,
             max_screenshots=50,
         )
         session.run(max_iterations=4)
@@ -177,6 +178,22 @@ class ObserverTest(unittest.TestCase):
         # One for the first unmatched frame, one for the frame that changed;
         # the two identical frames in between are not worth transferring.
         self.assertEqual(session.screenshot_count, 2)
+
+    def test_unrecognised_screens_are_sampled_far_more_often(self) -> None:
+        lobby = load_frame(REPOSITORY_ROOT / "calibration" / "tutorial" / "raw" / "01-lobby-training-ready.png")
+        session = self._session(
+            [lobby],
+            snapshot_interval_ms=15_000,
+            unknown_snapshot_interval_ms=2_000,
+        )
+        session.step()
+        self.assertAlmostEqual(session._next_snapshot_at, 15.0)
+
+        session._classification = "LOBBY_TRAINING_READY"
+        session.source.frames.append(_blank(90))
+        session.step()
+        # A death replay lasts a few seconds; 15s sampling would step over it.
+        self.assertAlmostEqual(session._next_snapshot_at, 2.0)
 
     def test_observer_never_exposes_an_input_sender(self) -> None:
         session = self._session([_blank(90)])

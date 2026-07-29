@@ -73,6 +73,7 @@ class ObservationSession:
         poll_ms: int | None = None,
         ocr_interval_ms: int = 1500,
         snapshot_interval_ms: int = 15000,
+        unknown_snapshot_interval_ms: int = 2000,
         max_screenshots: int = 400,
         snapshot_min_change: float = 0.01,
     ) -> None:
@@ -89,6 +90,11 @@ class ObservationSession:
         self.poll_ms = int(config.timing.get("pollMs", 300) if poll_ms is None else poll_ms)
         self.ocr_interval_ms = ocr_interval_ms
         self.snapshot_interval_ms = snapshot_interval_ms
+        # An unrecognised screen is the whole point of a sampling session, and
+        # some of them are short: a death replay lasts a few seconds and would
+        # fall between two slow samples. A recognised screen already has a
+        # template, so it can be sampled lazily.
+        self.unknown_snapshot_interval_ms = unknown_snapshot_interval_ms
         self.max_screenshots = max_screenshots
         self.snapshot_min_change = snapshot_min_change
 
@@ -270,7 +276,12 @@ class ObservationSession:
         due = now >= self._next_snapshot_at and change_since_saved >= self.snapshot_min_change
         if (changed or due) and self.screenshot_count < self.max_screenshots:
             self.screenshot_count += 1
-            self._next_snapshot_at = now + self.snapshot_interval_ms / 1000
+            interval = (
+                self.unknown_snapshot_interval_ms
+                if classification is None
+                else self.snapshot_interval_ms
+            )
+            self._next_snapshot_at = now + interval / 1000
             self._last_saved_frame = frame
             stage = classification or (record["hint"] or "unmatched")
             record["screenshot"] = str(self.recorder.screenshot(stage, frame))
