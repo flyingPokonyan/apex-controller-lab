@@ -61,6 +61,41 @@ class EnterGameCapabilityTest(unittest.TestCase):
         second = dispatcher.decide("MODE_PANEL_TARGET_HOVERED", 2, 1.0)
         self.assertEqual(second.capability.action, "unrankedConfirmClick")
 
+    def test_an_unranked_lobby_presses_ready_and_a_training_lobby_never_does(self) -> None:
+        dispatcher = self._dispatcher()
+        decision = dispatcher.decide("LOBBY_READY_UNRANKED", 1, 0.0)
+        self.assertEqual(decision.capability.id, "lobby-start-match")
+        self.assertEqual(
+            [c.id for c in self.capabilities.for_state("LOBBY_READY_TRAINING")],
+            ["lobby-open-mode-panel"],
+        )
+
+    def test_starting_a_match_is_a_commit_confirmed_by_the_queue_screen(self) -> None:
+        start = next(c for c in self.capabilities.capabilities if c.id == "lobby-start-match")
+        self.assertEqual(start.action_class, "commit")
+        self.assertEqual(start.allowed_next_states, ("LOBBY_QUEUEING",))
+        # The button flips within ~100ms of the click, and the only real
+        # matchmaking queue on record lasted over 43s. The window has to land
+        # inside that, not merely be longer than the transition.
+        self.assertLess(start.confirm_ms, 43_000)
+
+    def test_queueing_waits_instead_of_pressing_anything(self) -> None:
+        # Cancel is the only thing on that screen, so any capability here would
+        # be a way to leave the queue we just joined.
+        self.assertEqual(self.capabilities.for_state("LOBBY_QUEUEING"), ())
+        self.assertEqual(self._dispatcher().decide("LOBBY_QUEUEING", 1, 0.0).reason, "NO_CAPABILITY")
+
+    def test_ready_is_not_retried_once_the_lobby_is_gone(self) -> None:
+        # Legend select and loading name no state, so the click's postcondition
+        # is still outstanding when the dropship finally appears. Retrying then
+        # would click the lobby button's coordinates inside a live match.
+        dispatcher = self._dispatcher()
+        dispatcher.note_state("LOBBY_READY_UNRANKED", 0.0)
+        self.assertEqual(dispatcher.decide("LOBBY_READY_UNRANKED", 1, 0.0).kind, "fire")
+        dispatcher.note_state("DROPSHIP_FOLLOWING", 90.0)
+        decision = dispatcher.decide("DROPSHIP_FOLLOWING", 2, 90.0)
+        self.assertEqual(decision.capability.id, "dropship-detach")
+
     def test_confirming_a_mode_is_a_commit_that_must_be_verified(self) -> None:
         confirm = next(c for c in self.capabilities.capabilities if c.id == "mode-panel-confirm-hovered")
         self.assertEqual(confirm.action_class, "commit")

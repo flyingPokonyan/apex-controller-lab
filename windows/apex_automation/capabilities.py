@@ -265,7 +265,13 @@ class CapabilityDispatcher:
                 return Decision("wait", reason="AWAITING_POSTCONDITION")
             retry = self.pending
             self.pending = None
-            return self._start(retry.capability, state, observation_version, now)
+            # A retry is only a retry on a screen the capability still owns.
+            # Pressing 准备 is followed by a minute of legend select and
+            # loading that no rule names, so an unconditional retry would come
+            # back long after the fact and click the lobby button at a point
+            # where those coordinates mean something else entirely.
+            if state in retry.capability.states:
+                return self._start(retry.capability, state, observation_version, now)
 
         candidates = self.capabilities.for_state(state)
         if not candidates:

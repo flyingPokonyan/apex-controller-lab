@@ -100,6 +100,20 @@ class DispatcherTest(unittest.TestCase):
         self.assertEqual(dispatcher.decide("CONTINUE", 1, 1.0).reason, "AWAITING_POSTCONDITION")
         self.assertEqual(dispatcher.decide("CONTINUE", 1, 2.5).kind, "fire")
 
+    def test_a_pending_retry_is_dropped_once_the_screen_has_moved_on(self) -> None:
+        ready = click("ready", "LOBBY", action_class="commit", confirm_ms=2000,
+                      max_attempts=2, allowed_next_states=("QUEUEING",))
+        melee = click("melee", "IN_MATCH")
+        dispatcher = self._dispatcher(ready, melee)
+
+        self.assertEqual(dispatcher.decide("LOBBY", 1, 0.0).kind, "fire")
+        # The screens in between name no state, so the postcondition never got
+        # settled either way and the window expires far from the lobby.
+        self.assertEqual(dispatcher.decide(None, 1, 1.0).reason, "NO_STATE")
+        decision = dispatcher.decide("IN_MATCH", 2, 90.0)
+        self.assertEqual(decision.capability.id, "melee")
+        self.assertEqual(dispatcher.pending.capability.id, "melee")
+
     def test_wrong_postcondition_is_rejected_not_counted_as_success(self) -> None:
         capability = click(
             "exit", "TUTORIAL_EXIT_MENU", action_class="commit",

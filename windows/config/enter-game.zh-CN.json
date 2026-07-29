@@ -1,11 +1,12 @@
 {
   "schemaVersion": 1,
   "language": "zh-CN",
-  "_note": "目标：进入并留在对局里。这里没有任何地方表达「下一步是什么」——优先级只在同一帧内多个能力同时可处理时仲裁。所有坐标取自 2026-07-29 目标机器的实时 DXGI 帧。",
+  "_note": "目标：进入并留在对局里。这里没有任何地方表达「下一步是什么」——优先级只在同一帧内多个能力同时可处理时仲裁。所有坐标取自 2026-07-29 目标机器的实时 DXGI 帧。modeSelectClick 与 startMatchClick 是同一个大厅主按钮，只是按钮上的字不同（「选择」/「准备」）；分成两个名字是为了让日志里的 ACTION_SENT 说清当时按的是哪一件事。",
   "actions": {
     "continueClick": [1280, 865],
     "keepAsIsClick": [1425, 956],
     "modeSelectClick": [1280, 1295],
+    "startMatchClick": [1280, 1295],
     "unrankedCardClick": [493, 1035],
     "unrankedConfirmClick": [522, 1143],
     "returnLobbyScanCode": 15,
@@ -88,6 +89,18 @@
       "maxAttempts": 2,
       "allowedNextStates": ["LOBBY_READY_UNRANKED"],
       "_note": "兜底：单击通常已经完成选择并回到大厅，这条只在还停在面板上时才轮到。它真正改变游戏模式，所以要求正向后置确认且不盲重试。"
+    },
+    {
+      "id": "lobby-start-match",
+      "priority": 50,
+      "states": ["LOBBY_READY_UNRANKED"],
+      "action": "startMatchClick",
+      "kind": "click",
+      "actionClass": "commit",
+      "confirmMs": 3000,
+      "maxAttempts": 2,
+      "allowedNextStates": ["LOBBY_QUEUEING"],
+      "_note": "按「准备」开始排队。只挂在未上榜上：训练大厅按同一个按钮会进训练场，那条路归 lobby-open-mode-panel。它真的把人送进匹配队列，所以按 commit 处理。confirmMs 取 3000：录屏里按下到主按钮变「取消」不超过 100ms，而实测的真人匹配队列持续了四十多秒（训练模式打机器人快得多，但这条能力遇不到）。排队中本身不给能力——等着就行，任何输入都只会退出队列。"
     },
     {
       "id": "dropship-detach",

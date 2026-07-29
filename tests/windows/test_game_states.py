@@ -33,6 +33,13 @@ LIVE_READINGS: dict[str, dict[str, tuple[str, float]]] = {
         "lobbyModeName": ("训练", 1.000),
         "lobbyPrimaryButton": ("选择", 1.000),
     },
+    # Queueing keeps showing the mode it queued into, so the mode name alone
+    # can never tell this apart from a lobby that is merely ready. The button
+    # is what changes, and it is the only thing that does so reliably.
+    "LOBBY_QUEUEING": {
+        "lobbyModeName": ("未上榜", 0.999),
+        "lobbyPrimaryButton": ("取消", 1.000),
+    },
     "POST_MATCH_SUMMARY": {
         "postMatchHints": ("SPACE继续 TAB返回大厅 ESC打开菜单", 0.973),
         "postMatchTabs": ("死亡回放总结经验值通行证", 1.000),
@@ -101,6 +108,10 @@ class GameStateRoutingTest(unittest.TestCase):
             "continue": {"lobbyPrimaryButton": ("点击继续", 0.99)},
             "dropship": {"squadCountAlive": ("140", 0.98), "spectateTabs": ("315", 0.97)},
             "mode-panel": {"lobbyModeName": ("核心", 0.99)},
+            # The dropship prompt region overlaps the lobby button box, so an
+            # in-flight frame reads something there on every single pass.
+            "dropship-prompt": {"lobbyPrimaryButton": ("LCTRL单独发射", 0.91)},
+            "control-mode-hud": {"lobbyPrimaryButton": ("与基地相连的区域", 0.95)},
         }.items():
             with self.subTest(screen=label):
                 analysis = self._detector(readings).analyze(np.zeros((4, 4, 3), np.uint8))
@@ -120,6 +131,16 @@ class GameStateRoutingTest(unittest.TestCase):
         }
         analysis = self._detector(covered).analyze(np.zeros((4, 4, 3), np.uint8))
         self.assertEqual(analysis.decision.state, "CLIMB_SETTINGS_MODAL")
+
+    def test_queueing_outranks_the_mode_it_queued_into(self) -> None:
+        # Whichever mode is on the card, and whether matchmaking is still
+        # searching or already connecting, the screen means "wait".
+        for label, mode in {"training": "训练", "unranked": "未上榜"}.items():
+            with self.subTest(mode=label):
+                analysis = self._detector(
+                    {"lobbyModeName": (mode, 1.000), "lobbyPrimaryButton": ("取消", 1.000)}
+                ).analyze(np.zeros((4, 4, 3), np.uint8))
+                self.assertEqual(analysis.decision.state, "LOBBY_QUEUEING")
 
     def test_every_region_is_declared_single_line(self) -> None:
         detector = self._detector({})
