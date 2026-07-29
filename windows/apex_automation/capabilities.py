@@ -38,6 +38,10 @@ class Capability:
     allowed_next_states: tuple[str, ...] = ()
     min_interval_ms: int = 0
     max_interval_ms: int = 0
+    # How long a key stays down. Left at 0 the runner uses the profile's
+    # default tap. Some prompts do not accept a tap at all, so this has to be
+    # per-capability rather than one number for the whole session.
+    hold_ms: int = 0
 
     def __post_init__(self) -> None:
         if not self.states:
@@ -48,6 +52,10 @@ class Capability:
             raise ValueError(f"能力 {self.id} 的触发方式非法：{self.trigger}")
         if self.kind not in ACTION_KINDS:
             raise ValueError(f"能力 {self.id} 的动作类型非法：{self.kind}")
+        if self.hold_ms and self.kind != "key":
+            raise ValueError(f"只有按键动作可以设置按住时长：{self.id}")
+        if not 0 <= self.hold_ms <= 2000:
+            raise ValueError(f"能力 {self.id} 的按住时长必须为 0 到 2000ms")
 
         # A toggle undoes itself when repeated, so a retry without positive
         # evidence is never safe. LCTRL on the dropship is the example that
@@ -138,6 +146,7 @@ class CapabilitySet:
                 allowed_next_states=tuple(str(value) for value in item.get("allowedNextStates", [])),
                 min_interval_ms=int(item.get("minIntervalMs", 0)),
                 max_interval_ms=int(item.get("maxIntervalMs", 0)),
+                hold_ms=int(item.get("holdMs", 0)),
             )
             for item in payload.get("capabilities", [])
         )

@@ -141,8 +141,9 @@ class CapabilityPilot:
             self.sender.click(x, y)
             return {"x": x, "y": y}
         scan_code = int(spec)
-        self.sender.tap_scan_code(scan_code, self.key_tap_ms)
-        return {"scanCode": scan_code, "durationMs": self.key_tap_ms}
+        duration_ms = capability.hold_ms or self.key_tap_ms
+        self.sender.tap_scan_code(scan_code, duration_ms)
+        return {"scanCode": scan_code, "durationMs": duration_ms}
 
     # ------------------------------------------------------------- pending
 

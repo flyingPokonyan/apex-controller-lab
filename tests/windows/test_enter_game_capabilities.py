@@ -152,6 +152,19 @@ class EnterGameCapabilityTest(unittest.TestCase):
         self.assertEqual(self.capabilities.for_state("SPECTATING"), ())
         self.assertEqual(self._dispatcher().decide("SPECTATING", 1, 0.0).reason, "NO_CAPABILITY")
 
+    def test_every_assumed_key_binding_is_written_down(self) -> None:
+        # A wrong scan code and an input that never arrives look identical on
+        # screen: the action is sent, nothing happens. Melee was configured as
+        # V while the account had it on N, and that cost a whole session to
+        # find. Whatever the codes are, the file has to say what they assume.
+        bindings = self.payload["_keyBindings"]
+        for capability in self.capabilities.capabilities:
+            if capability.kind != "key":
+                continue
+            code = self.payload["actions"][capability.action]
+            with self.subTest(capability=capability.id, scanCode=code):
+                self.assertIn(str(code), bindings)
+
     def test_post_match_returns_to_the_lobby_rather_than_toggling_matchmaking(self) -> None:
         capability = next(c for c in self.capabilities.capabilities if c.id == "post-match-return-lobby")
         self.assertEqual(self.payload["actions"][capability.action], 15)  # TAB

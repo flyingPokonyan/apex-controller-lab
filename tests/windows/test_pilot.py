@@ -181,10 +181,21 @@ class PilotTest(unittest.TestCase):
         self.assertEqual(rejected["capability"], "lobby-start-match")
         self.assertEqual(rejected["evidenceState"], "POST_MATCH_SUMMARY")
 
+    def test_a_capability_may_hold_its_key_longer_than_the_default_tap(self) -> None:
+        # An 80ms tap of this same scan code crouches in the firing range but
+        # did nothing on the dropship, so the duration has to be per action.
+        self.screen(dropshipPrompt=("LCTRL单独发射", 0.91))
+        self.pilot.step()
+        detach = next(
+            c for c in self.pilot.dispatcher.capabilities.capabilities if c.id == "dropship-detach"
+        )
+        self.assertEqual(self.sender.calls, [("tap", 29, detach.hold_ms)])
+        self.assertGreater(detach.hold_ms, self.pilot.key_tap_ms)
+
     def test_losing_the_foreground_releases_input_and_forgets_the_pending_action(self) -> None:
         self.screen(dropshipPrompt=("LCTRL单独发射", 0.91))
         self.pilot.step()
-        self.assertEqual(self.sender.calls, [("tap", 29, 80)])
+        self.assertEqual(len(self.sender.calls), 1)
         self.assertIsNotNone(self.pilot.dispatcher.pending)
 
         self.guard.foreground = False
@@ -203,7 +214,9 @@ class PilotTest(unittest.TestCase):
         for moment in (0.0, 0.3, 3.5, 7.0, 11.0):
             self.now = moment
             self.pilot.step()
-        self.assertEqual(self.sender.calls.count(("tap", 29, 80)), 1)
+        detach = self.payload["actions"]["detachScanCode"]
+        taps = [call for call in self.sender.calls if call[0] == "tap" and call[1] == detach]
+        self.assertEqual(len(taps), 1)
         self.assertIn("DECISION_PAUSED", self.recorder.names())
 
     def test_melee_repeats_while_the_match_screen_persists(self) -> None:
@@ -214,7 +227,8 @@ class PilotTest(unittest.TestCase):
             if self.pilot.step()["decision"]["kind"] == "fire":
                 fired += 1
         self.assertGreater(fired, 1)
-        self.assertTrue(all(call[0] == "tap" and call[1] == 47 for call in self.sender.calls))
+        melee = self.payload["actions"]["meleeScanCode"]
+        self.assertTrue(all(call[0] == "tap" and call[1] == melee for call in self.sender.calls))
 
     def test_a_run_always_releases_input_when_it_ends(self) -> None:
         self.screen(squadCountAlive=("20 剩余小队数量", 0.98))
