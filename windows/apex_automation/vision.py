@@ -48,6 +48,26 @@ def _edges(frame: np.ndarray) -> np.ndarray:
     return cv2.Canny(_gray(frame), 70, 160)
 
 
+def frame_gray_std(frame: np.ndarray) -> float:
+    return float(_gray(frame).std())
+
+
+def frame_motion(previous: np.ndarray | None, current: np.ndarray) -> float:
+    """Mean absolute luma change between two frames, normalised to 0..1.
+
+    Downscaled so the metric stays cheap at the observation cadence and
+    tolerates per-pixel capture noise. It separates three cases the anchor
+    scores alone cannot tell apart: a cutscene (high and sustained), a loading
+    screen (low and dark) and a frozen frame (near zero).
+    """
+    if previous is None or previous.shape != current.shape:
+        return 0.0
+    size = (320, 180)
+    before = cv2.resize(_gray(previous), size, interpolation=cv2.INTER_AREA)
+    after = cv2.resize(_gray(current), size, interpolation=cv2.INTER_AREA)
+    return float(np.mean(cv2.absdiff(before, after))) / 255.0
+
+
 def _edge_f1(template_edges: np.ndarray, current_edges: np.ndarray) -> float:
     template = template_edges > 0
     current = current_edges > 0
@@ -86,7 +106,7 @@ class VisionDetector:
         expected = (int(self.config.environment["width"]), int(self.config.environment["height"]))
         if (width, height) != expected:
             raise ValueError(f"捕获分辨率必须为 {expected[0]}x{expected[1]}，实际为 {width}x{height}")
-        if float(_gray(frame).std()) < 3.0:
+        if frame_gray_std(frame) < 3.0:
             raise NearBlackFrameError("捕获画面接近纯黑")
 
     def _score_anchor(self, frame: np.ndarray, anchor: AnchorConfig) -> float:

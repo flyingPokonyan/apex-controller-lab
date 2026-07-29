@@ -16,6 +16,7 @@ from .config import (
 from .control import TaskControl, TaskStopRequested
 from .control_server import LocalControlServer
 from .input_win32 import EmergencyStop, Win32InputSender, Win32SafetyGuard
+from .observer import ObservationSession
 from .ocr_obstacles import OcrObstacleDetector, RapidOcrProvider
 from .ocr_states import OcrStateDetector
 from .recorder import RunRecorder
@@ -155,6 +156,69 @@ def run_live(config_path: Path, countdown: int) -> int:
     return 0
 
 
+def run_observe(
+    config_path: Path,
+    *,
+    ocr_interval_ms: int,
+    snapshot_interval_ms: int,
+    duration_s: float | None,
+) -> int:
+    if sys.platform != "win32":
+        print("observe 模式只能在 Windows 上运行。", file=sys.stderr)
+        return 2
+
+    config = load_config(config_path)
+    detector = VisionDetector(config)
+    guard = Win32SafetyGuard(config.environment["foregroundExecutables"])
+    recorder = RunRecorder(REPOSITORY_ROOT / "windows" / "runs", f"{config.profile}.observe")
+    guided_detector = _build_guided_detector(config)
+    obstacle_detector = _build_obstacle_detector(config)
+
+    print("观察模式：只截图和识别，不会发送任何键盘或鼠标输入。")
+    print("请手动操作 Apex，按 F8 或 Ctrl+C 结束。")
+    session: ObservationSession | None = None
+
+    try:
+        # No Win32InputSender is constructed anywhere in this command, so no
+        # code path can reach SendInput while an observation runs.
+        with DxcamFrameSource(
+            backend=str(config.environment["captureBackend"]),
+            output_index=int(config.environment["outputIndex"]),
+        ) as source:
+            session = ObservationSession(
+                config,
+                detector,
+                source,
+                recorder,
+                guard=guard,
+                guided_detector=guided_detector,
+                obstacle_detector=obstacle_detector,
+                notify=print,
+                ocr_interval_ms=ocr_interval_ms,
+                snapshot_interval_ms=snapshot_interval_ms,
+            )
+            print(f"逐帧记录：{session.observations_path}")
+            session.run(duration_s=duration_s)
+    except (EmergencyStop, KeyboardInterrupt):
+        print("\n已结束观察。")
+    except Exception as error:
+        print(f"观察中断：{error}", file=sys.stderr)
+        recorder.finish("FAILED", error=str(error))
+        if session is not None:
+            session.write_summary()
+            print(f"已记录 {session.observation_count} 帧：{recorder.run_dir}", file=sys.stderr)
+        return 1
+
+    if session is None:
+        return 1
+    summary_path = session.write_summary()
+    recorder.finish("OBSERVED", observations=session.observation_count)
+    print(f"共记录 {session.observation_count} 帧，{session.screenshot_count} 张截图。")
+    print(f"统计摘要：{summary_path}")
+    print(f"请把整个目录打包回传：{recorder.run_dir}")
+    return 0
+
+
 def run_start(
     config_path: Path,
     mode: str,
@@ -283,6 +347,13 @@ def build_parser() -> argparse.ArgumentParser:
     subparsers.add_parser("validate", help="只对保存的 PNG 做离线识别，不发送输入")
     live = subparsers.add_parser("live", help="在 Windows 上捕获屏幕并发送真实输入")
     live.add_argument("--countdown", type=int, default=5)
+    observe = subparsers.add_parser(
+        "observe",
+        help="真实截屏并记录全部识别得分，绝不发送输入",
+    )
+    observe.add_argument("--ocr-interval-ms", type=int, default=1500)
+    observe.add_argument("--snapshot-interval-ms", type=int, default=15000)
+    observe.add_argument("--duration-s", type=float, help="到时自动结束，默认一直观察")
     start = subparsers.add_parser("start", help="启动可恢复的常驻任务监督器")
     start.add_argument("--mode", choices=("match", "tutorial"), default="match")
     start.add_argument(
@@ -303,6 +374,13 @@ def main(argv: list[str] | None = None) -> int:
         return validate(args.config)
     if command == "live":
         return run_live(args.config, max(1, args.countdown))
+    if command == "observe":
+        return run_observe(
+            args.config,
+            ocr_interval_ms=max(200, args.ocr_interval_ms),
+            snapshot_interval_ms=max(1000, args.snapshot_interval_ms),
+            duration_s=args.duration_s,
+        )
     if command == "start":
         return run_start(
             args.config,
