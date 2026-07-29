@@ -39,6 +39,8 @@ class RunnerConfig:
     guided_ocr: dict[str, Any]
     task: dict[str, Any]
     control_api: dict[str, Any]
+    game_states: dict[str, Any]
+    capability_set: str | None
 
 
 def _repository_path(value: str) -> Path:
@@ -88,4 +90,6 @@ def load_config(path: Path | str = DEFAULT_CONFIG_PATH) -> RunnerConfig:
         guided_ocr=dict(payload.get("guidedOcr", {})),
         task=dict(payload.get("task", {})),
         control_api=dict(payload.get("controlApi", {})),
+        game_states=dict(payload.get("gameStates", {})),
+        capability_set=payload.get("capabilitySet"),
     )

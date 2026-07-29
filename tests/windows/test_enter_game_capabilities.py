@@ -56,13 +56,13 @@ class EnterGameCapabilityTest(unittest.TestCase):
         dispatcher = self._dispatcher()
         first = dispatcher.decide("MODE_PANEL_TARGET_VISIBLE", 1, 0.0)
         self.assertEqual(first.capability.action, "unrankedCardClick")
-        dispatcher.confirm_pending("MODE_PANEL_TARGET_SELECTED")
-        dispatcher.note_state("MODE_PANEL_TARGET_SELECTED", 1.0)
-        second = dispatcher.decide("MODE_PANEL_TARGET_SELECTED", 2, 1.0)
+        dispatcher.confirm_pending("MODE_PANEL_TARGET_HOVERED")
+        dispatcher.note_state("MODE_PANEL_TARGET_HOVERED", 1.0)
+        second = dispatcher.decide("MODE_PANEL_TARGET_HOVERED", 2, 1.0)
         self.assertEqual(second.capability.action, "unrankedConfirmClick")
 
     def test_confirming_a_mode_is_a_commit_that_must_be_verified(self) -> None:
-        confirm = next(c for c in self.capabilities.capabilities if c.id == "mode-panel-confirm-target")
+        confirm = next(c for c in self.capabilities.capabilities if c.id == "mode-panel-confirm-hovered")
         self.assertEqual(confirm.action_class, "commit")
         self.assertEqual(confirm.allowed_next_states, ("LOBBY_READY_UNRANKED",))
 

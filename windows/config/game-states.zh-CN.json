@@ -11,6 +11,7 @@
     "spectateTabs": {"roi": [1090, 115, 1460, 175], "singleLine": true},
     "squadCountAlive": {"roi": [2150, 58, 2420, 112], "singleLine": true},
     "modalTitle": {"roi": [1080, 445, 1480, 540], "singleLine": true},
+    "titleContinue": {"roi": [1240, 820, 1380, 900], "singleLine": true},
     "modePanelTargetCard": {"roi": [400, 990, 640, 1080], "singleLine": true},
     "modePanelConfirm": {"roi": [440, 1110, 740, 1180], "singleLine": true}
   },
@@ -48,9 +49,17 @@
       ]
     },
     {
-      "id": "mode-panel-target-selected",
-      "state": "MODE_PANEL_TARGET_SELECTED",
-      "_note": "选中卡片后它会展开出描述和「选择模式」按钮。选择是两步的：先点卡片，再点这个按钮。原配置只点一次卡片，不会真正完成选择。放在未选中那条之前，因为选中后卡片标题不再出现在原位。",
+      "id": "title-continue",
+      "state": "CONTINUE",
+      "_note": "标题页。断连之后也回到这里，所以断连恢复不需要单独的能力。季节名（「超频」）就在上方但会随赛季变，不能作为判据。",
+      "requirements": [
+        {"region": "titleContinue", "all": ["继续"]}
+      ]
+    },
+    {
+      "id": "mode-panel-target-hovered",
+      "state": "MODE_PANEL_TARGET_HOVERED",
+      "_note": "鼠标悬停在卡片上时它展开成描述加「选择模式」按钮，单击即完成选择并回大厅。这个状态因此通常一闪而过；它存在是为了让「点了但还停在面板上」有兜底，而不是因为选择需要两步。放在未悬停那条之前，因为悬停后卡片标题不再出现在原位。",
       "requirements": [
         {"region": "modePanelConfirm", "all": ["选择模式"]}
       ]

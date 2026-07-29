@@ -5,6 +5,9 @@ from pathlib import Path
 import sys
 import time
 
+import json
+
+from .capabilities import CapabilityDispatcher, CapabilitySet
 from .capture import DxcamFrameSource
 from .config import (
     DEFAULT_CONFIG_PATH,
@@ -188,9 +191,26 @@ def run_observe(
     guided_detector = _build_guided_detector(config) if with_ocr else None
     obstacle_detector = _build_obstacle_detector(config) if with_ocr else None
 
+    state_detector: OcrStateDetector | None = None
+    dispatcher: CapabilityDispatcher | None = None
+    if bool(config.game_states.get("enabled", False)):
+        state_detector = OcrStateDetector.from_path(
+            RapidOcrProvider(),
+            _repository_path(config.game_states["rules"]),
+        )
+        if config.capability_set:
+            payload = json.loads(
+                _repository_path(config.capability_set).read_text(encoding="utf-8")
+            )
+            dispatcher = CapabilityDispatcher(CapabilitySet.from_payload(payload))
+
     print("观察模式：只截图和识别，不会发送任何键盘或鼠标输入。")
     print("请手动操作 Apex，按 F8 或 Ctrl+C 结束。")
     print("OCR：" + ("已开启（会明显拖慢采样）" if with_ocr else "已关闭，采样保持约 300ms 一帧"))
+    if dispatcher is not None:
+        print("决策试跑：已开启。会打印「本来会执行什么」，但没有任何东西在另一端接收。")
+    elif state_detector is not None:
+        print("状态识别：已开启（无能力集，只记录画面语义）。")
     session: ObservationSession | None = None
 
     try:
@@ -208,6 +228,8 @@ def run_observe(
                 guard=guard,
                 guided_detector=guided_detector,
                 obstacle_detector=obstacle_detector,
+                state_detector=state_detector,
+                dispatcher=dispatcher,
                 notify=print,
                 ocr_interval_ms=ocr_interval_ms,
                 snapshot_interval_ms=snapshot_interval_ms,

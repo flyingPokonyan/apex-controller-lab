@@ -9,6 +9,7 @@ from typing import Any, Callable, Protocol
 
 import numpy as np
 
+from .capabilities import CapabilityDispatcher
 from .config import RunnerConfig
 from .ocr_obstacles import OcrObstacleDetector
 from .ocr_states import OcrStateDetector
@@ -67,6 +68,8 @@ class ObservationSession:
         guard: ObservationGuard | None = None,
         guided_detector: OcrStateDetector | None = None,
         obstacle_detector: OcrObstacleDetector | None = None,
+        state_detector: OcrStateDetector | None = None,
+        dispatcher: CapabilityDispatcher | None = None,
         sleep: Callable[[float], None] = time.sleep,
         monotonic: Callable[[], float] = time.monotonic,
         notify: Callable[[str], None] = lambda _: None,
@@ -86,6 +89,15 @@ class ObservationSession:
         self.guard = guard
         self.guided_detector = guided_detector
         self.obstacle_detector = obstacle_detector
+        # A dry run of the real decision path: the same detector and the same
+        # dispatcher the task would use, with nothing on the other end. It is
+        # the only way to see whether the decisions are right before anything
+        # is allowed to act on them.
+        self.state_detector = state_detector
+        self.dispatcher = dispatcher
+        self.observed_state: str | None = None
+        self.state_version = 0
+        self.decisions: dict[str, int] = defaultdict(int)
         self.sleep = sleep
         self.monotonic = monotonic
         self.notify = notify
@@ -209,6 +221,51 @@ class ObservationSession:
                 }
         return obstacle_rule
 
+    def _decide(self, frame: np.ndarray, record: dict[str, Any], now: float) -> None:
+        """Run the real recognition and the real dispatcher, and execute nothing."""
+        if self.state_detector is None:
+            return
+        started = self.monotonic()
+        analysis = self.state_detector.analyze(frame)
+        record["stateOcrMs"] = round((self.monotonic() - started) * 1000, 1)
+        if analysis.error:
+            record["stateOcrError"] = analysis.error
+            return
+        state = None if analysis.decision is None else analysis.decision.state
+        record["state"] = state
+        if analysis.decision is not None:
+            record["stateRule"] = analysis.decision.rule_id
+            record["stateConfidence"] = round(analysis.decision.confidence, 4)
+        if state != self.observed_state:
+            self.observed_state = state
+            self.state_version += 1
+            if state is not None:
+                self.notify(f"[状态] {state}")
+
+        if self.dispatcher is None:
+            return
+        self.dispatcher.note_state(state, now)
+        decision = self.dispatcher.decide(state, self.state_version, now)
+        entry: dict[str, Any] = {"kind": decision.kind, "reason": decision.reason}
+        if decision.capability is not None:
+            entry["capability"] = decision.capability.id
+            entry["action"] = decision.capability.action
+            entry["actionClass"] = decision.capability.action_class
+            entry["attempt"] = decision.attempt
+        if decision.detail:
+            entry["detail"] = decision.detail
+        record["decision"] = entry
+        self.decisions[f"{decision.kind}:{entry.get('capability', decision.reason)}"] += 1
+
+        if decision.kind == "fire":
+            self.notify(f"  ↳ 本来会执行：{decision.capability.id}（{decision.capability.action}）")
+            # Nothing sent it, so the screen will not change on its own. Settle
+            # the pending action immediately or every later frame would just
+            # report waiting for a postcondition that can never arrive.
+            self.dispatcher.pending = None
+        elif decision.kind == "pause":
+            self.notify(f"  ↳ 本来会暂停：{decision.reason}")
+
     def step(self) -> dict[str, Any]:
         now = self.monotonic()
         if self.guard is not None:
@@ -273,6 +330,7 @@ class ObservationSession:
             obstacle_rule = self._run_ocr(frame, record)
 
         record["wouldFire"] = self._would_fire(classification, obstacle_rule)
+        self._decide(frame, record, now)
 
         changed = classification != self._classification
         # An unrecognised screen never triggers a change, so a whole match
@@ -354,6 +412,7 @@ class ObservationSession:
             "motion": _stats(self._motion),
             "ocrLatencyMs": {name: _stats(values) for name, values in self._ocr_latency.items()},
             "classificationFrames": dict(self._classification_frames),
+            "decisions": dict(self.decisions),
             "ocrRuleFrames": dict(self._ocr_rule_frames),
             "ocrErrors": dict(self._ocr_errors),
             "states": states,

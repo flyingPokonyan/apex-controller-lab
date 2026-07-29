@@ -310,6 +310,11 @@
   "controlApi": {
     "enabled": false
   },
+  "gameStates": {
+    "enabled": true,
+    "rules": "windows/config/game-states.zh-CN.json"
+  },
+  "capabilitySet": "windows/config/enter-game.zh-CN.json",
   "states": {
     "CONTINUE": {
       "stableFrames": 2,

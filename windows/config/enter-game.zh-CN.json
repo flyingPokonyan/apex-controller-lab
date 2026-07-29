@@ -60,7 +60,7 @@
       "actionClass": "idempotent",
       "confirmMs": 2500,
       "maxAttempts": 3,
-      "allowedNextStates": ["MODE_PANEL_TARGET_VISIBLE", "MODE_PANEL_TARGET_SELECTED"],
+      "allowedNextStates": ["MODE_PANEL_TARGET_VISIBLE", "MODE_PANEL_TARGET_HOVERED"],
       "_note": "大厅停在训练模式时按「准备」会进训练场，所以这两个状态都要先去改模式。"
     },
     {
@@ -72,20 +72,20 @@
       "actionClass": "idempotent",
       "confirmMs": 2000,
       "maxAttempts": 3,
-      "allowedNextStates": ["MODE_PANEL_TARGET_SELECTED", "LOBBY_READY_UNRANKED"],
+      "allowedNextStates": ["MODE_PANEL_TARGET_HOVERED", "LOBBY_READY_UNRANKED"],
       "_note": "点卡片只是把焦点移过去，重复无害。之前配置的 [540,835] 落在已锁定的排位赛卡片上，实时帧显示未上榜在 y=1004-1067。"
     },
     {
-      "id": "mode-panel-confirm-target",
+      "id": "mode-panel-confirm-hovered",
       "priority": 55,
-      "states": ["MODE_PANEL_TARGET_SELECTED"],
+      "states": ["MODE_PANEL_TARGET_HOVERED"],
       "action": "unrankedConfirmClick",
       "kind": "click",
       "actionClass": "commit",
       "confirmMs": 3000,
       "maxAttempts": 2,
       "allowedNextStates": ["LOBBY_READY_UNRANKED"],
-      "_note": "这一步真正改变了游戏模式，所以要求正向后置确认且不盲重试。"
+      "_note": "兜底：单击通常已经完成选择并回到大厅，这条只在还停在面板上时才轮到。它真正改变游戏模式，所以要求正向后置确认且不盲重试。"
     },
     {
       "id": "in-match-melee",
