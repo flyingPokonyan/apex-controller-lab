@@ -20,11 +20,30 @@ Roi = tuple[int, int, int, int]
 
 
 @dataclass(frozen=True)
+class PixelRequirement:
+    """A checkbox is a picture, not a word.
+
+    OCR reads "补满" identically whether or not the box beside it is ticked,
+    so the only evidence that separates the two is the tick itself. This
+    measures one tight crop: what fraction of it is brighter than
+    `bright_above`. The tick is a fixed white sprite, so on the target
+    machine the ratio is 0.284 when ticked and 0.000 when not — the widest
+    margin anything in this dictionary has.
+    """
+
+    region: str
+    bright_above: float
+    min_ratio: float
+    max_ratio: float
+
+
+@dataclass(frozen=True)
 class OcrStateRule:
     rule_id: str
     enabled: bool
     state: str
     requirements: tuple[RegionRequirement, ...]
+    pixel_requirements: tuple[PixelRequirement, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -106,12 +125,35 @@ class OcrStateDetector:
                     raise ValueError(f"OCR 状态规则 {item.get('id')} 存在空匹配条件")
                 if not 0 <= requirement.min_confidence <= 1:
                     raise ValueError(f"OCR 状态规则 {item.get('id')} 的置信度无效")
+            pixel_requirements = tuple(
+                PixelRequirement(
+                    region=str(requirement["region"]),
+                    bright_above=float(requirement.get("brightAbove", 0.75)),
+                    min_ratio=float(requirement.get("minRatio", 0.0)),
+                    max_ratio=float(requirement.get("maxRatio", 1.0)),
+                )
+                for requirement in item.get("pixelRequirements", [])
+            )
+            for pixel in pixel_requirements:
+                if pixel.region not in regions:
+                    raise ValueError(
+                        f"OCR 状态规则 {item.get('id')} 引用了未知像素区域 {pixel.region}"
+                    )
+                if not 0 <= pixel.bright_above <= 1:
+                    raise ValueError(f"OCR 状态规则 {item.get('id')} 的亮度阈值无效")
+                if not 0 <= pixel.min_ratio <= pixel.max_ratio <= 1:
+                    raise ValueError(f"OCR 状态规则 {item.get('id')} 的亮点比例区间无效")
             rule = OcrStateRule(
                 rule_id=str(item["id"]),
                 enabled=bool(item.get("enabled", True)),
                 state=str(item["state"]),
                 requirements=requirements,
+                pixel_requirements=pixel_requirements,
             )
+            # A pixel measurement is a modifier on a page the text already
+            # identified, never the whole case for acting on one.
+            if rule.enabled and rule.pixel_requirements and not rule.requirements:
+                raise ValueError(f"OCR 状态规则 {rule.rule_id} 只有像素证据，没有文字证据")
             if rule.enabled and not rule.requirements:
                 raise ValueError(f"OCR 状态规则 {rule.rule_id} 没有正向页面证据")
             if rule.enabled and rule.state in states:
@@ -146,6 +188,17 @@ class OcrStateDetector:
         ]
         return True, min(matched_confidences or [token.confidence for token in eligible])
 
+    def _pixel_matches(self, frame: np.ndarray, requirement: PixelRequirement) -> bool:
+        x1, y1, x2, y2 = self.regions[requirement.region].roi
+        crop = frame[y1:y2, x1:x2]
+        if crop.size == 0:
+            return False
+        # Averaging the channels keeps this independent of whether the capture
+        # backend hands over BGR or RGB.
+        values = crop.mean(axis=2) if crop.ndim == 3 else crop
+        ratio = float((values / 255.0 > requirement.bright_above).mean())
+        return requirement.min_ratio <= ratio <= requirement.max_ratio
+
     def analyze(self, frame: np.ndarray) -> OcrStateAnalysis:
         begin_frame = getattr(self.provider, "begin_frame", None)
         if callable(begin_frame):
@@ -179,6 +232,11 @@ class OcrStateDetector:
                 confidences.append(confidence)
                 evidence[requirement.region] = tokens
             else:
+                if not all(
+                    self._pixel_matches(frame, pixel)
+                    for pixel in rule.pixel_requirements
+                ):
+                    continue
                 return OcrStateAnalysis(
                     region_results,
                     OcrStateDecision(

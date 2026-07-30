@@ -176,6 +176,58 @@ class DispatcherTest(unittest.TestCase):
         self.assertEqual(detected[0].kind, "pause")
         self.assertEqual(decisions[-1].reason, "CYCLE_PAUSED")
 
+    def test_a_screen_the_runner_never_acts_on_cannot_latch_the_cycle_pause(self) -> None:
+        # A cycle means the runner's own actions are not making progress.
+        # Spectating a squad that outlives you recurs constantly and is acted
+        # on never; in 20260730-215512 it latched the pause and the match
+        # summary that followed went unanswered for 78 seconds.
+        summary = click("return", "SUMMARY", allowed_next_states=("LOBBY",))
+        dispatcher = self._dispatcher(summary, cycle_window_s=180.0, cycle_threshold=4)
+
+        for index in range(8):
+            dispatcher.note_state("SPECTATING", index * 6.0)
+            dispatcher.note_state(None, index * 6.0 + 3.0)
+
+        dispatcher.note_state("SUMMARY", 50.0)
+        decision = dispatcher.decide("SUMMARY", 1, 50.0)
+        self.assertEqual(decision.kind, "fire")
+        self.assertEqual(decision.capability.id, "return")
+
+    def test_a_periodic_screen_recurring_is_rhythm_rather_than_a_cycle(self) -> None:
+        # Melee is meant to repeat for as long as a match runs, so alternating
+        # between the match screen and free fall must not read as a loop.
+        melee = Capability(
+            id="melee", priority=10, states=("IN_MATCH",), action="meleeKey",
+            kind="key", action_class="idempotent", trigger="periodic",
+            min_interval_ms=1000, max_interval_ms=5000,
+        )
+        summary = click("return", "SUMMARY", allowed_next_states=("LOBBY",))
+        dispatcher = self._dispatcher(melee, summary, cycle_window_s=180.0, cycle_threshold=4)
+
+        for index in range(8):
+            dispatcher.note_state("IN_MATCH", index * 6.0)
+            dispatcher.note_state("FREEFALL", index * 6.0 + 3.0)
+
+        dispatcher.note_state("SUMMARY", 50.0)
+        self.assertEqual(dispatcher.decide("SUMMARY", 1, 50.0).kind, "fire")
+
+    def test_a_loop_still_latches_when_the_runner_is_the_one_going_in_circles(self) -> None:
+        ready = click("ready", "LOBBY", action_class="commit",
+                      allowed_next_states=("PANEL",), max_attempts=2)
+        card = click("card", "PANEL", allowed_next_states=("LOBBY",))
+        dispatcher = self._dispatcher(ready, card, cycle_window_s=180.0, cycle_threshold=4)
+
+        reasons = []
+        for index in range(6):
+            dispatcher.note_state("LOBBY", index * 10.0)
+            reasons.append(dispatcher.decide("LOBBY", index * 2, index * 10.0).reason)
+            dispatcher.confirm_pending("PANEL")
+            dispatcher.note_state("PANEL", index * 10.0 + 5)
+            dispatcher.decide("PANEL", index * 2 + 1, index * 10.0 + 5)
+            dispatcher.confirm_pending("LOBBY")
+
+        self.assertIn("CYCLE_DETECTED", reasons)
+
     def test_periodic_capability_fires_repeatedly_on_an_unchanged_screen(self) -> None:
         melee = Capability(
             id="melee", priority=10, states=("IN_MATCH",), action="meleeKey",

@@ -161,13 +161,84 @@ class GameStateRoutingTest(unittest.TestCase):
                 ).analyze(np.zeros((4, 4, 3), np.uint8))
                 self.assertEqual(analysis.decision.state, "LOBBY_QUEUEING")
 
-    def test_every_region_is_declared_single_line(self) -> None:
+    @staticmethod
+    def _fill_frame(bright_rows: int) -> np.ndarray:
+        """A full frame whose fill checkbox crop is bright for N rows."""
+        frame = np.zeros((1440, 2560, 3), np.uint8)
+        frame[212 : 212 + bright_rows, 75:97] = 255
+        return frame
+
+    def test_a_ticked_fill_box_is_a_different_lobby_from_an_unticked_one(self) -> None:
+        # Same three readings either way — the tick is the only difference, and
+        # it decides whether the next match is filled with strangers or solo.
+        readings = {
+            "lobbyModeName": ("未上榜", 0.999),
+            "lobbyPrimaryButton": ("准备", 1.000),
+            "lobbyFillLabel": ("补满", 0.997),
+        }
+        detector = self._detector(readings)
+
+        ticked = detector.analyze(self._fill_frame(21)).decision
+        self.assertEqual(ticked.state, "LOBBY_READY_UNRANKED_FILL_ON")
+
+        unticked = detector.analyze(self._fill_frame(0)).decision
+        self.assertEqual(unticked.state, "LOBBY_READY_UNRANKED")
+
+    def test_the_configured_tick_threshold_sits_between_the_measured_ratios(self) -> None:
+        # Measured on seven real lobby frames: 0.284 ticked, 0.000 unticked.
+        # A future edit that narrows this to the wrong side of either number
+        # would silently queue filled matches forever.
         detector = self._detector({})
-        for name, region in detector.regions.items():
+        rule = next(
+            item for item in detector.rules if item.state == "LOBBY_READY_UNRANKED_FILL_ON"
+        )
+        pixel = rule.pixel_requirements[0]
+        self.assertLess(0.0, pixel.min_ratio)
+        self.assertLess(pixel.min_ratio, 0.284)
+
+    def test_a_lobby_with_no_fill_box_at_all_is_still_an_ordinary_lobby(self) -> None:
+        # Modes without squad fill show no such control; the rule must fail on
+        # the missing text rather than on whatever the empty crop measures.
+        readings = {
+            "lobbyModeName": ("未上榜", 0.999),
+            "lobbyPrimaryButton": ("准备", 1.000),
+        }
+        decision = self._detector(readings).analyze(self._fill_frame(21)).decision
+        self.assertEqual(decision.state, "LOBBY_READY_UNRANKED")
+
+    def test_every_region_that_gets_read_is_declared_single_line(self) -> None:
+        detector = self._detector({})
+        read_regions = {
+            requirement.region
+            for rule in detector.rules
+            if rule.enabled
+            for requirement in rule.requirements
+        }
+        for name in read_regions:
             with self.subTest(region=name):
                 # Reading without detection is what makes these regions cost
                 # 4-16ms instead of seconds, and it only works on one line.
-                self.assertTrue(region.single_line, f"{name} 未声明 singleLine")
+                self.assertTrue(detector.regions[name].single_line, f"{name} 未声明 singleLine")
+
+    def test_a_region_only_measured_by_pixels_is_never_sent_to_ocr(self) -> None:
+        detector = self._detector({})
+        read_regions = {
+            requirement.region
+            for rule in detector.rules
+            if rule.enabled
+            for requirement in rule.requirements
+        }
+        pixel_regions = {
+            requirement.region
+            for rule in detector.rules
+            if rule.enabled
+            for requirement in rule.pixel_requirements
+        }
+        # A pixel region is a crop of a checkbox, not a line of text. Letting
+        # one reach the recognition path would return garbage that no rule
+        # asked for and cost a read per frame for nothing.
+        self.assertTrue(pixel_regions)
+        self.assertEqual(pixel_regions & read_regions, set())
 
 
 if __name__ == "__main__":

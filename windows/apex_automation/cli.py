@@ -425,6 +425,16 @@ def run_play(config_path: Path, *, countdown: int, duration_s: float | None) -> 
         if unhandled:
             print(f"覆盖层状态既没有能力也未声明人工处理：{sorted(unhandled)}", file=sys.stderr)
             return 2
+        unknown_only_states = {
+            str(value) for value in config.overlay_ocr.get("unknownOnlyStates", [])
+        }
+        invalid_unknown_only = unknown_only_states - overlay_detector.states
+        if invalid_unknown_only:
+            print(
+                f"仅未知画面可用的覆盖层状态不在识别字典里：{sorted(invalid_unknown_only)}",
+                file=sys.stderr,
+            )
+            return 2
 
     # The old obstacle dictionary still owns the safety decision: only rules
     # marked safePage and restricted to the keyboard allowlist can load. The

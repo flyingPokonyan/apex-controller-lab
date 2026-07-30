@@ -10,6 +10,7 @@
     "startMatchClick": [1280, 1295],
     "unrankedCardClick": [493, 1035],
     "unrankedConfirmClick": [522, 1143],
+    "fillToggleClick": [86, 222],
     "guideAccountContinue": [610, 150],
     "guideFriendsContinue": [480, 252],
     "guideSettingsContinue": [1730, 155],
@@ -121,6 +122,29 @@
       "actionClass": "idempotent",
       "confirmMs": 1500,
       "maxAttempts": 2
+    },
+    {
+      "id": "dismiss-esc-back",
+      "priority": 100,
+      "states": ["FULLSCREEN_ESC_BACK"],
+      "action": "escapeScanCode",
+      "kind": "key",
+      "actionClass": "idempotent",
+      "confirmMs": 2000,
+      "maxAttempts": 2,
+      "_note": "任何左下角写着「ESC 返回」而快速识别不认识的全屏页，一律按它自己写的那个键退出去。20260730-215512 的奖励页（004-unknown）就死在这里：reward-continue 要求标题区读到「奖励」、底部读到「继续/领取」，而那一页的标题在 titleCenter 左边界之外，且压根没有继续按钮，动作却配的是 ENTER。ESC 是这一族页面上唯一被页面自己写出来的键。"
+    },
+    {
+      "id": "lobby-disable-fill",
+      "priority": 65,
+      "states": ["LOBBY_READY_UNRANKED_FILL_ON"],
+      "action": "fillToggleClick",
+      "kind": "click",
+      "actionClass": "toggle",
+      "confirmMs": 2500,
+      "maxAttempts": 1,
+      "allowedNextStates": ["LOBBY_READY_UNRANKED"],
+      "_note": "关掉「补满」再排队，也就是单人匹配。它是 toggle 不是 idempotent：点第二下会把补满重新勾上。后置确认很干净——勾没了以后同一个大厅就不再匹配 fill-on 规则，落回普通的 LOBBY_READY_UNRANKED。点空了不会有这个后置，toggle 也不允许重试，于是停下来等人，而不是反复点。坐标是复选框正中（框实测占 x72-100、y209-235），不是整行，因为只有框本身一定可点。"
     },
     {
       "id": "dismiss-climb-settings",

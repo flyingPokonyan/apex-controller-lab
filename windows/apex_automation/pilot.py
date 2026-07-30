@@ -117,6 +117,14 @@ class CapabilityPilot:
         self.overlay_guard_states = frozenset(
             str(value) for value in overlay.get("guardStates", [])
         )
+        # Rules broad enough to describe a whole family of pages — "anything
+        # with ESC 返回 in the corner" — are only safe where nothing more
+        # specific applies. The mode panel carries that same hint and is a
+        # screen the runner must stay on, so these states are ignored whenever
+        # the fast detector already named the frame.
+        self.overlay_unknown_only_states = frozenset(
+            str(value) for value in overlay.get("unknownOnlyStates", [])
+        )
         self.overlay_scan_interval_s = int(overlay.get("scanIntervalMs", 900)) / 1000
         self.overlay_unknown_grace_s = int(overlay.get("unknownGraceMs", 1500)) / 1000
         self.overlay_unknown_retry_s = int(overlay.get("unknownRetryMs", 15000)) / 1000
@@ -374,6 +382,18 @@ class CapabilityPilot:
             return self._active_overlay or StateObservation(None, "overlayGate")
 
         match, failed = self._scan_overlay_detector(frame)
+        if (
+            match is not None
+            and base.state is not None
+            and match.state in self.overlay_unknown_only_states
+        ):
+            self.recorder.log(
+                "OVERLAY_RULE_OUTRANKED",
+                state=match.state,
+                ruleId=match.rule_id,
+                baseState=base.state,
+            )
+            match = None
         finished = self.monotonic()
         if failed:
             self._overlay_next_scan_at = finished + self.overlay_scan_interval_s

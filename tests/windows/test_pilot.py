@@ -255,6 +255,92 @@ class PilotTest(unittest.TestCase):
         self.assertEqual(error["source"], "overlayOcr")
         self.assertIn("offline OCR unavailable", str(error["error"]))
 
+    def _settle_overlay(self, first: float = 0.0) -> dict[str, object]:
+        """Run the three steps a two-observation overlay rule needs."""
+        self.now = first
+        self.pilot.step()
+        self.now = first + 1.5
+        self.pilot.step()
+        self.now = first + 2.5
+        return self.pilot.step()
+
+    def test_a_page_that_only_offers_escape_is_closed_with_escape(self) -> None:
+        # 20260730-215512 stalled on the post-match reward page: its title sits
+        # left of titleCenter and it carries no 继续 button at all, so the
+        # reward rule could not match and ENTER would have been the wrong key
+        # regardless. The page names its own key in the corner.
+        self.enable_overlays()
+        self.screen()
+        self.overlay_provider.readings = {"bottomLeftBack": ("ESC 返回", 0.98)}
+
+        record = self._settle_overlay()
+        self.assertEqual(record["state"], "FULLSCREEN_ESC_BACK")
+        self.assertEqual(self.sender.calls, [("tap", 1, 80)])
+
+    def test_the_generic_back_rule_never_backs_out_of_the_mode_panel(self) -> None:
+        # The mode panel carries the same 「ESC 返回」 hint and is a screen the
+        # runner has to stay on and act within, so a rule this broad may only
+        # speak where the fast detector said nothing.
+        self.enable_overlays()
+        self.screen(modePanelTargetCard=("未上榜", 1.0))
+        self.overlay_provider.readings = {"bottomLeftBack": ("ESC 返回", 0.98)}
+
+        record = self._settle_overlay()
+        self.assertEqual(record["state"], "MODE_PANEL_TARGET_VISIBLE")
+        self.assertNotIn(("tap", 1, 80), self.sender.calls)
+        self.assertEqual({call for call in self.sender.calls}, {("click", 493, 1035)})
+        self.assertIn("OVERLAY_RULE_OUTRANKED", self.recorder.names())
+
+    def test_a_ticked_fill_box_is_unticked_before_the_match_is_started(self) -> None:
+        self.screen(
+            lobbyPrimaryButton=("准备", 1.0),
+            lobbyModeName=("未上榜", 1.0),
+            lobbyFillLabel=("补满", 1.0),
+        )
+        ticked = np.zeros((1440, 2560, 3), dtype=np.uint8)
+        ticked[212:233, 75:97] = 255
+
+        class TickedSource:
+            def grab(self) -> np.ndarray:
+                return ticked
+
+        self.pilot.source = TickedSource()
+        record = self.pilot.step()
+
+        self.assertEqual(record["state"], "LOBBY_READY_UNRANKED_FILL_ON")
+        self.assertEqual(self.sender.calls, [("click", 86, 222)])
+
+    def test_an_unticked_fill_box_goes_straight_to_starting_the_match(self) -> None:
+        self.screen(
+            lobbyPrimaryButton=("准备", 1.0),
+            lobbyModeName=("未上榜", 1.0),
+            lobbyFillLabel=("补满", 1.0),
+        )
+        record = self.pilot.step()
+
+        self.assertEqual(record["state"], "LOBBY_READY_UNRANKED")
+        self.assertEqual(self.sender.calls, [("click", 1280, 1295)])
+
+    def test_spectating_a_living_squad_cannot_freeze_the_match_summary(self) -> None:
+        # The whole of 20260730-215512's second match: dying while the squad
+        # lived flickered SPECTATING in and out, which latched the session-wide
+        # cycle pause and left TAB unpressed on the summary for 78 seconds.
+        for index in range(8):
+            self.now = index * 6.0
+            self.screen(spectateTabs=("观战小队", 0.99), squadCountAlive=("37", 0.99))
+            self.pilot.step()
+            self.now += 3.0
+            self.screen()
+            self.pilot.step()
+
+        self.now += 3.0
+        self.screen(postMatchHints=("SPACE继续 TAB返回大厅 ESC打开菜单", 0.97))
+        record = self.pilot.step()
+
+        self.assertEqual(record["state"], "POST_MATCH_SUMMARY")
+        self.assertEqual(record["decision"]["capability"], "post-match-return-lobby")
+        self.assertIn(("tap", 15, 80), self.sender.calls)
+
     def test_auth_overlay_is_recognised_but_never_automated(self) -> None:
         self.enable_overlays()
         self.screen()

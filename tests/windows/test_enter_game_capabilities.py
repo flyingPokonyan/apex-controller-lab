@@ -142,7 +142,7 @@ class EnterGameCapabilityTest(unittest.TestCase):
         overlay_states = detector.states
         self.assertEqual(
             set(detector.regions),
-            {"fullFrame", "titleCenter", "bottomCenter", "bottomRight"},
+            {"fullFrame", "titleCenter", "bottomCenter", "bottomRight", "bottomLeftBack"},
         )
         self.assertEqual(self.capabilities.for_state("AUTH_REQUIRED"), ())
         for state in overlay_states - {"AUTH_REQUIRED"}:
@@ -289,6 +289,25 @@ class EnterGameCapabilityTest(unittest.TestCase):
                 with self.subTest(capability=capability.id, state=state):
                     self.assertIn(state, safe_to_click)
                     self.assertIn(safe_to_click[state], self._button_terms(state))
+
+    def test_turning_off_fill_squad_is_a_toggle_the_lobby_itself_confirms(self) -> None:
+        fill = next(c for c in self.capabilities.capabilities if c.id == "lobby-disable-fill")
+        # Clicking a checkbox twice puts it back, so this can never be retried
+        # blind. Its postcondition is free: with the tick gone the same lobby
+        # stops matching the fill rule and falls through to the plain one.
+        self.assertEqual(fill.action_class, "toggle")
+        self.assertEqual(fill.max_attempts, 1)
+        self.assertEqual(fill.allowed_next_states, ("LOBBY_READY_UNRANKED",))
+        self.assertNotEqual(
+            self.payload["actions"][fill.action],
+            self.payload["actions"]["startMatchClick"],
+        )
+
+    def test_a_filled_lobby_unticks_the_box_instead_of_queueing(self) -> None:
+        dispatcher = self._dispatcher()
+        decision = dispatcher.decide("LOBBY_READY_UNRANKED_FILL_ON", 1, 0.0)
+        self.assertEqual(decision.capability.id, "lobby-disable-fill")
+        self.assertEqual(self.capabilities.for_state("LOBBY_READY_UNRANKED_FILL_ON"), (decision.capability,))
 
     def test_starting_a_match_is_a_commit_confirmed_by_the_queue_screen(self) -> None:
         start = next(c for c in self.capabilities.capabilities if c.id == "lobby-start-match")

@@ -22,6 +22,25 @@
       ],
       "singleLine": true
     },
+    "lobbyFillLabel": {
+      "roi": [
+        100,
+        202,
+        212,
+        242
+      ],
+      "singleLine": true,
+      "_note": "「补满」两个字，刻意不含左边的复选框——框里勾没勾要靠像素判据，文字两种状态下读到的完全一样。"
+    },
+    "lobbyFillCheckbox": {
+      "roi": [
+        75,
+        212,
+        97,
+        233
+      ],
+      "_note": "复选框内部，不含边框。这个区域不做 OCR，只量亮点比例。实测勾上 0.284、没勾 0.000（20260730-215512 与 20260730-191304 共 7 帧）。"
+    },
     "postMatchHints": {
       "roi": [
         1820,
@@ -271,6 +290,38 @@
       ]
     },
     {
+      "id": "lobby-ready-unranked-fill-on",
+      "state": "LOBBY_READY_UNRANKED_FILL_ON",
+      "_note": "未上榜大厅，且左上角「补满」还勾着。它必须排在 lobby-ready-unranked 之前：两条规则的文字证据完全相同，区别只在那一格勾没勾，先匹配先赢是这套规则表达「且」的唯一方式。补满关掉就是单人排队，队友不会被补进来——这也顺带解决了「我死了但队友还活着，只能干等」的问题，因为单人局里我死了小队就结束了。",
+      "requirements": [
+        {
+          "region": "lobbyPrimaryButton",
+          "all": [
+            "准备"
+          ]
+        },
+        {
+          "region": "lobbyModeName",
+          "all": [
+            "未上榜"
+          ]
+        },
+        {
+          "region": "lobbyFillLabel",
+          "all": [
+            "补满"
+          ]
+        }
+      ],
+      "pixelRequirements": [
+        {
+          "region": "lobbyFillCheckbox",
+          "brightAbove": 0.75,
+          "minRatio": 0.15
+        }
+      ]
+    },
+    {
       "id": "lobby-ready-training",
       "state": "LOBBY_READY_TRAINING",
       "_note": "大厅停在训练模式。此时按「准备」会进训练场，正是有序模型下大厅与训练场来回空转的起点。",
@@ -322,5 +373,5 @@
       ]
     }
   ],
-  "_ruleOrder": "更具体的画面排在前面：自由落体和跳伞机上「剩余小队数量」同样可见，所以它们必须先于 in-match-alive 判定；排队中与三种大厅态共用模式名区域，所以 lobby-queueing 必须先于它们判定。"
+  "_ruleOrder": "更具体的画面排在前面：自由落体和跳伞机上「剩余小队数量」同样可见，所以它们必须先于 in-match-alive 判定；排队中与三种大厅态共用模式名区域，所以 lobby-queueing 必须先于它们判定；lobby-ready-unranked-fill-on 的文字证据是 lobby-ready-unranked 的超集，只多一条像素判据，所以它必须先于后者判定。"
 }

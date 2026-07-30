@@ -33,11 +33,13 @@
     "unknownRetryMs": 15000,
     "activeRetryMs": 3000,
     "manualStates": ["AUTH_REQUIRED"],
+    "unknownOnlyStates": ["FULLSCREEN_ESC_BACK"],
     "guardStates": [
       "LOBBY_SELECT_REQUIRED",
       "LOBBY_READY_TRAINING",
       "LOBBY_READY_OTHER",
       "LOBBY_READY_UNRANKED",
+      "LOBBY_READY_UNRANKED_FILL_ON",
       "MODE_PANEL_TARGET_VISIBLE",
       "MODE_PANEL_TARGET_HOVERED"
     ]

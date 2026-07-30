@@ -192,6 +192,25 @@ class CapabilityDispatcher:
         self.pending = None
         self.blocked_observation_version = None
 
+    def counts_toward_cycle(self, state: str) -> bool:
+        """Whether revisiting this screen is evidence of a loop.
+
+        A cycle means *the runner's own actions* are not making progress, so
+        only screens it tries to advance past can form one. Screens it never
+        acts on are ordinary gameplay rhythm however often they recur, and
+        periodic screens are excluded for the same reason: repeating melee
+        while a match runs is the intended behaviour, not a loop.
+
+        `20260730-215512` is why this distinction exists. Dying while the
+        squad lived entered `SPECTATING` five times in 145s; that latched the
+        session-wide pause, and the match summary that arrived 56s later went
+        unhandled for another 78 seconds — `TAB` was on screen the whole time.
+        """
+        return any(
+            capability.trigger == "onState"
+            for capability in self.capabilities.for_state(state)
+        )
+
     def note_state(self, state: str | None, now: float) -> None:
         """Record a screen change so attempt budgets and cycles stay honest."""
         if state == self._current_state:
@@ -203,12 +222,15 @@ class CapabilityDispatcher:
             # budget, which is what makes "handle whatever shows up" workable.
             for capability in self.capabilities.for_state(previous):
                 self.attempts.pop(capability.id, None)
-        if state is None:
-            return
-        self._state_entries.append((now, state))
+        # Ageing runs on every change, not only on recorded ones: sitting on an
+        # unrecorded screen for longer than the window must still let an old
+        # loop expire, or the latch would outlive its own evidence.
         cutoff = now - self.cycle_window_s
         while self._state_entries and self._state_entries[0][0] < cutoff:
             self._state_entries.popleft()
+        if state is None or not self.counts_toward_cycle(state):
+            return
+        self._state_entries.append((now, state))
 
     def cycle_count(self, state: str) -> int:
         return sum(1 for _, entry in self._state_entries if entry == state)

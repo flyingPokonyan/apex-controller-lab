@@ -17,13 +17,14 @@
 第一轮采集只按"有哪些画面"列清单，漏了第二类，结果是做到某条能力才发现少东西。
 以后每加一条能力，先在这张表里补一行，再决定要不要采集。
 
-## 现有 20 条能力（`windows/config/enter-game.zh-CN.json`）
+## 现有 22 条能力（`windows/config/enter-game.zh-CN.json`）
 
 | 优先级 | 能力 | 触发画面 | 动作 | 分级 | 后置画面 |
 |---|---|---|---|---|---|
 | 120 | dismiss-level-up | 升级语义 + 继续/跳过 | `ENTER` | idempotent | — |
 | 120 | dismiss-reward | 奖励语义 + 继续/领取 | `ENTER` | idempotent | — |
 | 120 | dismiss-announcement | 公告/新闻/活动 + 关闭/返回 | `ESC` | idempotent | — |
+| 100 | dismiss-esc-back | 左下角「ESC 返回」且快速识别认不出 | `ESC` | idempotent | — |
 | 115 | dismiss-news-welcome | NEWS_WELCOME | `ESC` | idempotent | — |
 | 115 | dismiss-news-memorial | NEWS_MEMORIAL | `ESC` | idempotent | — |
 | 110 | guide-account-continue | GUIDE_ACCOUNT | 点既有「继续」坐标 | idempotent | — |
@@ -33,6 +34,7 @@
 | 90 | dismiss-climb-settings | CLIMB_SETTINGS_MODAL | 点「保持原样」 | idempotent | — |
 | 80 | title-continue | CONTINUE | 点「继续」 | idempotent | — |
 | 70 | post-match-return-lobby | POST_MATCH_SUMMARY | `TAB` → 等待 1500ms → 长按 `SPACE` 2000ms | idempotent | 三种大厅态 / 攀爬弹窗 |
+| 65 | lobby-disable-fill | LOBBY_READY_UNRANKED_FILL_ON | 点「补满」复选框 | **toggle** | LOBBY_READY_UNRANKED |
 | 60 | lobby-open-mode-panel | LOBBY_SELECT_REQUIRED | 点主按钮（写着「选择」） | idempotent | 模式面板两态 |
 | 60 | lobby-change-mode | LOBBY_READY_TRAINING、LOBBY_READY_OTHER | 点左下模式卡片 | idempotent | 模式面板两态 |
 | 55 | mode-panel-focus-target | MODE_PANEL_TARGET_VISIBLE | 点未上榜卡片 | idempotent | 悬停态 / 大厅 |
@@ -254,17 +256,66 @@
 | 登录过场视频 | 约 60 秒后自行结束，主动长按空格探测不划算 |
 | 断连回到继续页 | 继续页已有能力，断连恢复是它的副产品 |
 
+## 认提示，别认页面
+
+`20260730-215512` 一次跑停在四张互不相干的全屏页上：奖励页、排位之路、以及另外两张。
+按老办法这是四条规则、四轮采集。实际上它们共用一件东西——左下角那句「ESC 返回」，
+位置固定在 `x74-202 / y1325-1357`，八张真实帧上逐帧核对过。
+
+奖励页尤其值得记：它本来就有一条规则 `reward-continue`，却**三个原因同时不成立**。
+
+| 规则要求 | 那一页的实际情况 |
+|---|---|
+| `titleCenter [320,80,2240,760]` 读到「奖励」 | 标题「奖励」在 `x107-265`，在左边界之外 |
+| `bottomCenter` 读到「继续」或「领取」 | 整页没有这两个词，也没有任何按钮 |
+| 动作发 `ENTER` | 页面自己写的是 `ESC` |
+
+三条里任何一条修对了都还是打不开。这说明「为每一页写一条规则」这条路本身在漏——
+页面是无穷的，提示是有限的。`fullscreen-esc-back` 因此不认页面，只认那句提示。
+
+代价是这条规则太宽，所以加了两道闸门：
+
+- **排在所有专门规则之后**，新闻页、纪念页、四个导览、升级、奖励、公告先匹配先赢；
+- **只在快速识别认不出这一帧时才成立**（画像里的 `unknownOnlyStates`）。这一条是必须的：
+  模式面板左下角写着一模一样的「ESC 返回」，而那是运行器必须留在上面动手的画面，
+  没有闸门就会一进面板就退出去。有测试直接盯着这个场景。
+
+传奇选择页实测**没有**这句提示（那一格是「现在请选择」的横幅），入场等待页和结算页
+在这个区域读到的分别是空白和一串构建号，都不会误命中。
+
+## 环检测：什么才算「在原地打转」
+
+`20260730-215512` 第二局死了而队友还活着。`SPECTATING` 在 145 秒里进出 5 次，
+超过阈值，会话级环检测就此锁上——然后 56 秒后出现的结算页**被晾了 78 秒**，
+`TAB 返回大厅` 就明晃晃写在屏幕底部。
+
+```
+734.8  DECISION_PAUSED CYCLE_DETECTED {state: SPECTATING, entries: 5}
+791.0  STATE_DETECTED  POST_MATCH_SUMMARY     ← 什么都不做
+...    wait:CYCLE_PAUSED ×255
+869.2  ACTION_SENT     post-match-return-lobby ← 旧记录终于滑出 180 秒窗口
+```
+
+判据错在把「画面反复出现」当成了环。观战、自由落体、读条反复出现是游戏节奏，
+运行器在那些画面上一次手都没动过——**没动手就不可能打转**。
+
+现在只有挂着 `onState` 能力的画面才计入。周期能力的画面同样不计：近战本来就该在
+对局里重复，把它算成环等于禁止它工作。真正的环——大厅↔模式面板互相触发对方——
+每一步都发输入，照样会被抓住。
+
 ## 仍缺的证据
 
 | 缺什么 | 挡住什么 |
 |---|---|
-| **完整结算返回序列的真机后置确认** | 动作已经是 `TAB → 长按 SPACE`；仍需下一次 `play` 取得 `ACTION_CONFIRMED → LOBBY_*` |
-| **点模式卡片之后的那一帧** | 不挡运行，但 `lobby-change-mode` 的坐标目前只有量出来的位置，没有「点了确实开面板」的证据帧 |
+| **一局打完再排队为什么三四秒就掉队** | 连着跑。两次会话形态一致，怀疑是上一局的奖励流程没走完；先看修好奖励页之后还掉不掉 |
+| **`dismiss-esc-back` 和 `lobby-disable-fill` 的真机确认** | 两条能力都是这一版新加的，规则和坐标来自真实帧，但还没有一次 `ACTION_CONFIRMED` |
 | **控制模式死亡 / 重生选点帧** | 控制模式里的「还活着」闸门，也就是 `in-match-melee` |
-| **融合后的冷启动清障串实跑** | 欢迎、纪念、四导览已有旧样本；公告、奖励、升级已有安全语义规则，现在缺的是在当前 `play` 路径上的整串实测，不是再录一套相同素材 |
-| 模式面板「自由式」栏的实时帧 | 选择娱乐模式 |
-| 娱乐模式大厅的模式名 | `lobby-ready-entertainment` |
-| 娱乐模式结算页 | 娱乐模式的 post-match（可能与匹配不同） |
+| 模式面板「自由式」栏的实时帧 | 选择娱乐模式（已暂缓） |
+| 娱乐模式大厅的模式名 | `lobby-ready-entertainment`（已暂缓） |
+| 娱乐模式结算页 | 娱乐模式的 post-match，可能与匹配不同（已暂缓） |
+
+已收齐的：结算返回序列的大厅后置确认（`20260730-200857` 342.3s）、点模式卡片之后
+确实开面板（`20260730-215512` 888.3s）、跳伞长按生效（`20260730-200857` 225.9s）。
 
 已知冷启动页面已经不会因为“只存在于 tutorial”而留在 `play` 外面。下一次直接从
 「继续」起跑即可同时验证它们；若当前版本多出新页面，低频 OCR 不会命中，8 秒后
