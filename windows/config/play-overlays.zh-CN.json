@@ -22,7 +22,7 @@
       "id": "news-welcome-safe-close",
       "state": "NEWS_WELCOME",
       "requirements": [
-        {"region": "fullFrame", "all": ["欢迎传奇", "ESC返回"]}
+        {"region": "fullFrame", "all": ["新闻", "ESC返回"]}
       ]
     },
     {

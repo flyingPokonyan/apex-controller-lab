@@ -32,7 +32,7 @@
 | 110 | guide-progress-continue | GUIDE_PROGRESS | 点既有「继续」坐标 | idempotent | — |
 | 90 | dismiss-climb-settings | CLIMB_SETTINGS_MODAL | 点「保持原样」 | idempotent | — |
 | 80 | title-continue | CONTINUE | 点「继续」 | idempotent | — |
-| 70 | post-match-return-lobby | POST_MATCH_SUMMARY | `TAB` → 等待 800ms → 长按 `SPACE` 2000ms | idempotent | 三种大厅态 / 攀爬弹窗 |
+| 70 | post-match-return-lobby | POST_MATCH_SUMMARY | `TAB` → 等待 1500ms → 长按 `SPACE` 2000ms | idempotent | 三种大厅态 / 攀爬弹窗 |
 | 60 | lobby-open-mode-panel | LOBBY_SELECT_REQUIRED | 点主按钮（写着「选择」） | idempotent | 模式面板两态 |
 | 60 | lobby-change-mode | LOBBY_READY_TRAINING、LOBBY_READY_OTHER | 点左下模式卡片 | idempotent | 模式面板两态 |
 | 55 | mode-panel-focus-target | MODE_PANEL_TARGET_VISIBLE | 点未上榜卡片 | idempotent | 悬停态 / 大厅 |
@@ -56,6 +56,8 @@
 - 专用欢迎/导览规则先匹配，通用公告/奖励规则兜底；验证码只识别并停住，绝不填写；
 - 10 类覆盖层共用一次全屏 OCR，再按文字块坐标过滤出标题区、底部和右下角；旧安全
   字典在启动时逐项校验区域、文案、阈值和动作合同，不再额外扫描三个大区域；
+- `20260730-191304` 证明共享 RapidOCR 在快速单行识别后可能沿用 `use_det=False`，导致
+  全屏结果有文字却没有坐标框；现在全屏调用显式传入 `use_det=True`，缺框时再逐区域降级；
 - 识别层只回答「是什么画面」，20 条动作全部交给同一个 `CapabilityDispatcher`，所以
   重试预算、后置确认、环检测和输入记录只有一套。
 
@@ -177,13 +179,13 @@
 | 提示 | 实际要求 | 现状 |
 |---|---|---|
 | 跳伞机「LCTRL 单独发射」 | 长按 | `dropship-detach` 设了 `holdMs: 2000`，**未实测** |
-| 结算返回大厅 | `TAB` 后长按 `SPACE` | 已实现完整序列，**未实跑** |
+| 结算返回大厅 | `TAB` 后长按 `SPACE` | `20260730-191304` 已真实发出完整序列并进入黑屏，缺大厅后置确认 |
 
 所以按键能力有了自己的 `holdMs`：默认的 `keyTapMs` 是给菜单点按用的，长按提示必须
 逐条声明。
 
 `post-match-return-lobby` 以已识别的结算页作为唯一触发条件，依次轻按 `TAB` 80ms、
-等待 800ms、长按 `SPACE` 2000ms，再以大厅态或攀爬设置弹窗确认完成。这个顺序来自
+等待 1500ms、长按 `SPACE` 2000ms，再以大厅态或攀爬设置弹窗确认完成。这个顺序来自
 操作者的实际操作确认，不再等待中间页截图；`SPACE` 也不会被注册成未知画面的通用动作。
 
 ## 闭环怎么跑起来的

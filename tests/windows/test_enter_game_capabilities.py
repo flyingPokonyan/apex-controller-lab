@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 import sys
+from types import SimpleNamespace
 import unittest
 
 import numpy as np
@@ -15,7 +16,9 @@ from apex_automation.capabilities import CapabilityDispatcher, CapabilitySet
 from apex_automation.ocr_obstacles import (
     FullFrameOcrProvider,
     OcrObstacleDetector,
+    OcrPositionUnavailable,
     OcrToken,
+    RapidOcrProvider,
     parse_regions,
 )
 from apex_automation.ocr_states import OcrStateDetector
@@ -35,6 +38,36 @@ class FakeLayoutProvider:
     def read_with_boxes(self, frame: np.ndarray) -> tuple[OcrToken, ...]:
         self.calls += 1
         return self.tokens
+
+
+class MissingBoxProvider:
+    def __init__(self, values: dict[str, tuple[OcrToken, ...]]) -> None:
+        self.values = values
+        self.positioned_calls = 0
+        self.region_calls: list[str] = []
+
+    def read_with_boxes(self, frame: np.ndarray) -> tuple[OcrToken, ...]:
+        self.positioned_calls += 1
+        raise OcrPositionUnavailable("no boxes")
+
+    def read(self, frame: np.ndarray, region) -> tuple[OcrToken, ...]:
+        self.region_calls.append(region.name)
+        return self.values.get(region.name, ())
+
+
+class RecordingRapidEngine:
+    def __init__(self) -> None:
+        self.calls: list[dict[str, bool]] = []
+
+    def __call__(self, frame: np.ndarray, **options: bool):
+        self.calls.append(options)
+        if options["use_det"]:
+            return SimpleNamespace(
+                txts=("新闻",),
+                scores=(0.99,),
+                boxes=np.asarray([[[1, 2], [11, 2], [11, 12], [1, 12]]]),
+            )
+        return SimpleNamespace(txts=("准备",), scores=(0.99,), boxes=None)
 
 
 class EnterGameCapabilityTest(unittest.TestCase):
@@ -155,6 +188,60 @@ class EnterGameCapabilityTest(unittest.TestCase):
         cached.begin_frame(frame)
         cached.read(frame, regions["fullFrame"])
         self.assertEqual(provider.calls, 3)
+
+    def test_full_frame_ocr_explicitly_reenables_detection_after_fast_state_ocr(self) -> None:
+        engine = RecordingRapidEngine()
+        provider = RapidOcrProvider()
+        provider._engine = engine
+        regions = parse_regions(
+            {
+                "fast": {"roi": [0, 0, 20, 20], "singleLine": True},
+                "full": [0, 0, 40, 40],
+            }
+        )
+        frame = np.zeros((40, 40, 3), dtype=np.uint8)
+
+        provider.read(frame, regions["fast"])
+        positioned = provider.read_with_boxes(frame)
+
+        self.assertFalse(engine.calls[0]["use_det"])
+        self.assertTrue(engine.calls[1]["use_det"])
+        self.assertEqual(positioned[0].roi, (1, 2, 11, 12))
+
+    def test_missing_full_frame_boxes_fall_back_to_the_original_regions(self) -> None:
+        provider = MissingBoxProvider(
+            {
+                "fullFrame": (
+                    OcrToken("新闻", 0.99),
+                    OcrToken("掌控游戏", 0.99),
+                    OcrToken("ESC 返回", 0.99),
+                )
+            }
+        )
+        detector = OcrStateDetector.from_path(FullFrameOcrProvider(provider), OVERLAYS)
+        analysis = detector.analyze(np.zeros((1440, 2560, 3), dtype=np.uint8))
+
+        self.assertIsNone(analysis.error)
+        self.assertEqual(analysis.decision.state, "NEWS_WELCOME")
+        self.assertEqual(provider.positioned_calls, 1)
+        self.assertIn("fullFrame", provider.region_calls)
+
+    def test_the_captured_news_page_is_safe_to_close_with_escape(self) -> None:
+        provider = FakeLayoutProvider(
+            (
+                OcrToken("新闻", 1.0, (850, 20, 980, 75)),
+                OcrToken("掌控游戏", 1.0, (390, 670, 700, 740)),
+                OcrToken("ESC 返回", 1.0, (55, 1040, 190, 1100)),
+            )
+        )
+        analysis = OcrStateDetector.from_path(
+            FullFrameOcrProvider(provider), OVERLAYS
+        ).analyze(np.zeros((1440, 2560, 3), dtype=np.uint8))
+
+        self.assertIsNone(analysis.error)
+        self.assertEqual(analysis.decision.state, "NEWS_WELCOME")
+        action = self.capabilities.for_state("NEWS_WELCOME")[0]
+        self.assertEqual(self.payload["actions"][action.action], 1)
 
     def test_a_modal_over_the_lobby_is_handled_before_the_lobby(self) -> None:
         dispatcher = self._dispatcher()
@@ -282,7 +369,7 @@ class EnterGameCapabilityTest(unittest.TestCase):
             self.payload["actions"][capability.action],
             [
                 {"type": "tapKey", "scanCode": 15, "durationMs": 80},
-                {"type": "wait", "durationMs": 800},
+                {"type": "wait", "durationMs": 1500},
                 {"type": "tapKey", "scanCode": 57, "durationMs": 2000},
             ],
         )

@@ -74,6 +74,10 @@ class PositionedOcrProvider(Protocol):
     def read_with_boxes(self, frame: np.ndarray) -> tuple[OcrToken, ...]: ...
 
 
+class OcrPositionUnavailable(RuntimeError):
+    """The OCR text is usable, but this engine result omitted line boxes."""
+
+
 class RapidOcrProvider:
     """Lazy RapidOCR adapter so template-only startup stays inexpensive."""
 
@@ -101,7 +105,11 @@ class RapidOcrProvider:
             # for the same crop with detection enabled.
             result = self._get_engine()(crop, use_det=False, use_cls=False, use_rec=True)
         else:
-            result = self._get_engine()(crop)
+            # RapidOCR call options can persist on the shared engine in some
+            # releases. State OCR uses recognition-only calls immediately
+            # before overlay OCR, so every detected-text call must explicitly
+            # turn detection back on rather than inherit use_det=False.
+            result = self._get_engine()(crop, use_det=True, use_cls=True, use_rec=True)
         texts = tuple(getattr(result, "txts", ()) or ())
         scores = tuple(getattr(result, "scores", ()) or ())
         return tuple(
@@ -111,25 +119,27 @@ class RapidOcrProvider:
 
     def read_with_boxes(self, frame: np.ndarray) -> tuple[OcrToken, ...]:
         """Read a complete frame and retain each text block's coordinates."""
-        result = self._get_engine()(frame)
+        result = self._get_engine()(frame, use_det=True, use_cls=True, use_rec=True)
         texts = tuple(getattr(result, "txts", ()) or ())
         scores = tuple(getattr(result, "scores", ()) or ())
         raw_boxes = getattr(result, "boxes", None)
         boxes = () if raw_boxes is None else tuple(raw_boxes)
         if len(texts) != len(scores) or len(texts) != len(boxes):
-            raise RuntimeError("RapidOCR 没有为每个文字块返回位置，不能安全复用全屏结果")
+            raise OcrPositionUnavailable(
+                "RapidOCR 没有为每个文字块返回位置，改用逐区域 OCR"
+            )
 
         tokens: list[OcrToken] = []
         for text, score, box in zip(texts, scores, boxes, strict=True):
             points = np.asarray(box, dtype=float).reshape(-1, 2)
             if not len(points):
-                raise RuntimeError("RapidOCR 返回了空文字位置")
+                raise OcrPositionUnavailable("RapidOCR 返回了空文字位置，改用逐区域 OCR")
             x1 = int(np.floor(points[:, 0].min()))
             y1 = int(np.floor(points[:, 1].min()))
             x2 = int(np.ceil(points[:, 0].max()))
             y2 = int(np.ceil(points[:, 1].max()))
             if x1 >= x2 or y1 >= y2:
-                raise RuntimeError("RapidOCR 返回了无效文字位置")
+                raise OcrPositionUnavailable("RapidOCR 返回了无效文字位置，改用逐区域 OCR")
             tokens.append(OcrToken(str(text), float(score), (x1, y1, x2, y2)))
         return tuple(tokens)
 
@@ -148,15 +158,40 @@ class FullFrameOcrProvider:
         self.provider = provider
         self._frame: np.ndarray | None = None
         self._tokens: tuple[OcrToken, ...] | None = None
+        self._fallback_to_regions = False
 
     def begin_frame(self, frame: np.ndarray) -> None:
         self._frame = frame
         self._tokens = None
+        self._fallback_to_regions = False
+
+    def _read_region_fallback(
+        self,
+        frame: np.ndarray,
+        region: Region,
+    ) -> tuple[OcrToken, ...]:
+        read = getattr(self.provider, "read", None)
+        if not callable(read):
+            raise OcrPositionUnavailable("OCR 不支持逐区域降级")
+        return read(frame, region)
 
     def read(self, frame: np.ndarray, region: Region) -> tuple[OcrToken, ...]:
+        if self._frame is not frame:
+            self.begin_frame(frame)
+        if self._fallback_to_regions:
+            return self._read_region_fallback(frame, region)
         if self._frame is not frame or self._tokens is None:
-            self._tokens = self.provider.read_with_boxes(frame)
-            self._frame = frame
+            try:
+                self._tokens = self.provider.read_with_boxes(frame)
+                self._frame = frame
+            except OcrPositionUnavailable:
+                # Preserve the old region safety contract instead of either
+                # blocking forever or flattening every rule to full-screen
+                # text. This path is slower, but overlay scans are deliberately
+                # low-frequency and correctness matters more here.
+                self._fallback_to_regions = True
+                self._tokens = None
+                return self._read_region_fallback(frame, region)
 
         x1, y1, x2, y2 = region.roi
         selected: list[OcrToken] = []

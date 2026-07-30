@@ -313,14 +313,14 @@ class PilotTest(unittest.TestCase):
             self.sender.calls,
             [("tap", 15, 80), ("tap", 57, 2000)],
         )
-        self.assertEqual(self.sleeps, [0.8])
+        self.assertEqual(self.sleeps, [1.5])
         sent = next(p for e, p in self.recorder.events if e == "ACTION_SENT")
         self.assertEqual(sent["capability"], "post-match-return-lobby")
         self.assertEqual(
             sent["steps"],
             [
                 {"type": "tapKey", "scanCode": 15, "durationMs": 80},
-                {"type": "wait", "durationMs": 800},
+                {"type": "wait", "durationMs": 1500},
                 {"type": "tapKey", "scanCode": 57, "durationMs": 2000},
             ],
         )

@@ -18,7 +18,7 @@
     "enterScanCode": 28,
     "returnLobbySequence": [
       {"type": "tapKey", "scanCode": 15, "durationMs": 80},
-      {"type": "wait", "durationMs": 800},
+      {"type": "wait", "durationMs": 1500},
       {"type": "tapKey", "scanCode": 57, "durationMs": 2000}
     ],
     "meleeScanCode": 47,
@@ -159,7 +159,7 @@
         "LOBBY_SELECT_REQUIRED",
         "CLIMB_SETTINGS_MODAL"
       ],
-      "_note": "操作者确认返回大厅需要完整执行 TAB，再长按 SPACE。序列轻按 TAB 80ms，等待 800ms 让确认页出现，再长按 SPACE 2000ms；不要求额外识别确认页，也绝不在未知画面上单独发送 SPACE。最后只以已认识的大厅态或攀爬设置弹窗作为成功后置。"
+      "_note": "操作者确认返回大厅需要完整执行 TAB，再长按 SPACE。序列轻按 TAB 80ms，等待 1500ms 让确认页稳定出现，再长按 SPACE 2000ms；不要求额外识别确认页，也绝不在未知画面上单独发送 SPACE。20260730-191304 已记录程序发出旧版 800ms 序列并进入黑屏加载；这里把间隔放宽以兼容慢切页，最后仍只以已认识的大厅态或攀爬设置弹窗作为成功后置。"
     },
     {
       "id": "lobby-open-mode-panel",
