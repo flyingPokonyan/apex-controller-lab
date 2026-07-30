@@ -8,8 +8,8 @@
     "modeSelectClick": [1280, 1295],
     "modeCardClick": [308, 1215],
     "startMatchClick": [1280, 1295],
-    "unrankedCardClick": [493, 1035],
-    "unrankedConfirmClick": [522, 1143],
+    "targetCardClick": [1750, 696],
+    "targetConfirmClick": [1700, 806],
     "fillToggleClick": [86, 222],
     "guideAccountContinue": [610, 150],
     "guideFriendsContinue": [480, 252],
@@ -137,14 +137,14 @@
     {
       "id": "lobby-disable-fill",
       "priority": 65,
-      "states": ["LOBBY_READY_UNRANKED_FILL_ON"],
+      "states": ["LOBBY_READY_TARGET_FILL_ON"],
       "action": "fillToggleClick",
       "kind": "click",
       "actionClass": "toggle",
       "confirmMs": 2500,
       "maxAttempts": 1,
-      "allowedNextStates": ["LOBBY_READY_UNRANKED"],
-      "_note": "关掉「补满」再排队，也就是单人匹配。它是 toggle 不是 idempotent：点第二下会把补满重新勾上。后置确认很干净——勾没了以后同一个大厅就不再匹配 fill-on 规则，落回普通的 LOBBY_READY_UNRANKED。点空了不会有这个后置，toggle 也不允许重试，于是停下来等人，而不是反复点。坐标是复选框正中（框实测占 x72-100、y209-235），不是整行，因为只有框本身一定可点。"
+      "allowedNextStates": ["LOBBY_READY_TARGET"],
+      "_note": "关掉「补满」再排队，也就是单人匹配。它是 toggle 不是 idempotent：点第二下会把补满重新勾上。后置确认很干净——勾没了以后同一个大厅就不再匹配 fill-on 规则，落回普通的 LOBBY_READY_TARGET。点空了不会有这个后置，toggle 也不允许重试，于是停下来等人，而不是反复点。坐标是复选框正中（框实测占 x72-100、y209-235），不是整行，因为只有框本身一定可点。"
     },
     {
       "id": "dismiss-climb-settings",
@@ -178,8 +178,10 @@
       "confirmMs": 8000,
       "maxAttempts": 3,
       "allowedNextStates": [
-        "LOBBY_READY_UNRANKED",
+        "LOBBY_READY_TARGET",
+        "LOBBY_READY_TARGET_FILL_ON",
         "LOBBY_READY_TRAINING",
+        "LOBBY_READY_OTHER",
         "LOBBY_SELECT_REQUIRED",
         "CLIMB_SETTINGS_MODAL"
       ],
@@ -213,37 +215,37 @@
       "id": "mode-panel-focus-target",
       "priority": 55,
       "states": ["MODE_PANEL_TARGET_VISIBLE"],
-      "action": "unrankedCardClick",
+      "action": "targetCardClick",
       "kind": "click",
       "actionClass": "idempotent",
       "confirmMs": 2000,
       "maxAttempts": 3,
-      "allowedNextStates": ["MODE_PANEL_TARGET_HOVERED", "LOBBY_READY_UNRANKED"],
-      "_note": "点卡片只是把焦点移过去，重复无害。之前配置的 [540,835] 落在已锁定的排位赛卡片上，实时帧显示未上榜在 y=1004-1067。"
+      "allowedNextStates": ["MODE_PANEL_TARGET_HOVERED", "LOBBY_READY_TARGET", "LOBBY_READY_TARGET_FILL_ON"],
+      "_note": "点卡片只是把焦点移过去，重复无害。坐标落在目标卡片的标题上（进化版机器人大逃杀，标题实测 x1637-2055 / y675-717）。20260730-215512 实测这一击通常一步到位：888.8s 点下去，891.2s 就已经回到大厅，悬停态只是兜底。"
     },
     {
       "id": "mode-panel-confirm-hovered",
       "priority": 55,
       "states": ["MODE_PANEL_TARGET_HOVERED"],
-      "action": "unrankedConfirmClick",
+      "action": "targetConfirmClick",
       "kind": "click",
       "actionClass": "commit",
       "confirmMs": 3000,
       "maxAttempts": 2,
-      "allowedNextStates": ["LOBBY_READY_UNRANKED"],
+      "allowedNextStates": ["LOBBY_READY_TARGET", "LOBBY_READY_TARGET_FILL_ON"],
       "_note": "兜底：单击通常已经完成选择并回到大厅，这条只在还停在面板上时才轮到。它真正改变游戏模式，所以要求正向后置确认且不盲重试。"
     },
     {
       "id": "lobby-start-match",
       "priority": 50,
-      "states": ["LOBBY_READY_UNRANKED"],
+      "states": ["LOBBY_READY_TARGET"],
       "action": "startMatchClick",
       "kind": "click",
       "actionClass": "commit",
       "confirmMs": 3000,
       "maxAttempts": 2,
       "allowedNextStates": ["LOBBY_QUEUEING"],
-      "_note": "按「准备」开始排队。只挂在未上榜上：训练大厅按同一个按钮会进训练场，那条路归 lobby-open-mode-panel。它真的把人送进匹配队列，所以按 commit 处理。confirmMs 取 3000：录屏里按下到主按钮变「取消」不超过 100ms，而实测的真人匹配队列持续了四十多秒（训练模式打机器人快得多，但这条能力遇不到）。排队中本身不给能力——等着就行，任何输入都只会退出队列。"
+      "_note": "按「准备」开始排队。只挂在目标模式大厅上：训练大厅按同一个按钮会进训练场，那条路归 lobby-open-mode-panel。它真的把人送进匹配队列，所以按 commit 处理。confirmMs 取 3000：录屏里按下到主按钮变「取消」不超过 100ms，而实测的真人匹配队列持续了四十多秒（训练模式打机器人快得多，但这条能力遇不到）。排队中本身不给能力——等着就行，任何输入都只会退出队列。"
     },
     {
       "id": "dropship-detach",

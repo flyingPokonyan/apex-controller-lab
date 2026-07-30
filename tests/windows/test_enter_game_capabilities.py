@@ -264,15 +264,15 @@ class EnterGameCapabilityTest(unittest.TestCase):
     def test_mode_selection_takes_the_card_then_the_confirm_button(self) -> None:
         dispatcher = self._dispatcher()
         first = dispatcher.decide("MODE_PANEL_TARGET_VISIBLE", 1, 0.0)
-        self.assertEqual(first.capability.action, "unrankedCardClick")
+        self.assertEqual(first.capability.action, "targetCardClick")
         dispatcher.confirm_pending("MODE_PANEL_TARGET_HOVERED")
         dispatcher.note_state("MODE_PANEL_TARGET_HOVERED", 1.0)
         second = dispatcher.decide("MODE_PANEL_TARGET_HOVERED", 2, 1.0)
-        self.assertEqual(second.capability.action, "unrankedConfirmClick")
+        self.assertEqual(second.capability.action, "targetConfirmClick")
 
-    def test_only_the_unranked_lobby_may_press_the_primary_button(self) -> None:
+    def test_only_the_target_mode_lobby_may_press_the_primary_button(self) -> None:
         dispatcher = self._dispatcher()
-        decision = dispatcher.decide("LOBBY_READY_UNRANKED", 1, 0.0)
+        decision = dispatcher.decide("LOBBY_READY_TARGET", 1, 0.0)
         self.assertEqual(decision.capability.id, "lobby-start-match")
 
         # One box, three different buttons depending on what it reads. 选择
@@ -280,7 +280,7 @@ class EnterGameCapabilityTest(unittest.TestCase):
         # showing, so pressing it is only safe where the rule also pins the
         # mode. Everything allowed to click that box is listed here, and a
         # new entry has to justify itself against the label.
-        safe_to_click = {"LOBBY_SELECT_REQUIRED": "选择", "LOBBY_READY_UNRANKED": "准备"}
+        safe_to_click = {"LOBBY_SELECT_REQUIRED": "选择", "LOBBY_READY_TARGET": "准备"}
         primary_button = self.payload["actions"]["startMatchClick"]
         for capability in self.capabilities.capabilities:
             if self.payload["actions"].get(capability.action) != primary_button:
@@ -290,6 +290,31 @@ class EnterGameCapabilityTest(unittest.TestCase):
                     self.assertIn(state, safe_to_click)
                     self.assertIn(safe_to_click[state], self._button_terms(state))
 
+    def test_pressing_ready_is_only_safe_where_the_rule_pins_the_mode_name(self) -> None:
+        # 准备 queues into whatever the card happens to be showing, so the one
+        # state allowed to press it has to prove which mode that is. Retargeting
+        # the runner at a different mode is a matter of editing the pinned name
+        # in five places; this is what stops a sixth from being forgotten.
+        states = json.loads(STATES.read_text(encoding="utf-8"))
+        rule = next(r for r in states["rules"] if r["state"] == "LOBBY_READY_TARGET")
+        mode_terms = [
+            term
+            for requirement in rule["requirements"]
+            if requirement["region"] == "lobbyModeName"
+            for term in requirement.get("all", ())
+        ]
+        self.assertTrue(mode_terms, "目标大厅规则没有钉死模式名，按「准备」就成了赌当前卡片")
+
+        panel = next(r for r in states["rules"] if r["state"] == "MODE_PANEL_TARGET_VISIBLE")
+        panel_terms = [
+            term
+            for requirement in panel["requirements"]
+            for term in requirement.get("all", ())
+        ]
+        # The card the runner picks and the lobby it then presses 准备 on have
+        # to name the same mode, or it selects one thing and queues another.
+        self.assertEqual(set(mode_terms), set(panel_terms))
+
     def test_turning_off_fill_squad_is_a_toggle_the_lobby_itself_confirms(self) -> None:
         fill = next(c for c in self.capabilities.capabilities if c.id == "lobby-disable-fill")
         # Clicking a checkbox twice puts it back, so this can never be retried
@@ -297,7 +322,7 @@ class EnterGameCapabilityTest(unittest.TestCase):
         # stops matching the fill rule and falls through to the plain one.
         self.assertEqual(fill.action_class, "toggle")
         self.assertEqual(fill.max_attempts, 1)
-        self.assertEqual(fill.allowed_next_states, ("LOBBY_READY_UNRANKED",))
+        self.assertEqual(fill.allowed_next_states, ("LOBBY_READY_TARGET",))
         self.assertNotEqual(
             self.payload["actions"][fill.action],
             self.payload["actions"]["startMatchClick"],
@@ -305,9 +330,9 @@ class EnterGameCapabilityTest(unittest.TestCase):
 
     def test_a_filled_lobby_unticks_the_box_instead_of_queueing(self) -> None:
         dispatcher = self._dispatcher()
-        decision = dispatcher.decide("LOBBY_READY_UNRANKED_FILL_ON", 1, 0.0)
+        decision = dispatcher.decide("LOBBY_READY_TARGET_FILL_ON", 1, 0.0)
         self.assertEqual(decision.capability.id, "lobby-disable-fill")
-        self.assertEqual(self.capabilities.for_state("LOBBY_READY_UNRANKED_FILL_ON"), (decision.capability,))
+        self.assertEqual(self.capabilities.for_state("LOBBY_READY_TARGET_FILL_ON"), (decision.capability,))
 
     def test_starting_a_match_is_a_commit_confirmed_by_the_queue_screen(self) -> None:
         start = next(c for c in self.capabilities.capabilities if c.id == "lobby-start-match")
@@ -329,8 +354,8 @@ class EnterGameCapabilityTest(unittest.TestCase):
         # is still outstanding when the dropship finally appears. Retrying then
         # would click the lobby button's coordinates inside a live match.
         dispatcher = self._dispatcher()
-        dispatcher.note_state("LOBBY_READY_UNRANKED", 0.0)
-        self.assertEqual(dispatcher.decide("LOBBY_READY_UNRANKED", 1, 0.0).kind, "fire")
+        dispatcher.note_state("LOBBY_READY_TARGET", 0.0)
+        self.assertEqual(dispatcher.decide("LOBBY_READY_TARGET", 1, 0.0).kind, "fire")
         dispatcher.note_state("DROPSHIP_FOLLOWING", 90.0)
         decision = dispatcher.decide("DROPSHIP_FOLLOWING", 2, 90.0)
         self.assertEqual(decision.capability.id, "dropship-detach")
@@ -338,7 +363,12 @@ class EnterGameCapabilityTest(unittest.TestCase):
     def test_confirming_a_mode_is_a_commit_that_must_be_verified(self) -> None:
         confirm = next(c for c in self.capabilities.capabilities if c.id == "mode-panel-confirm-hovered")
         self.assertEqual(confirm.action_class, "commit")
-        self.assertEqual(confirm.allowed_next_states, ("LOBBY_READY_UNRANKED",))
+        # Both target-lobby readings count: whether 补满 happens to be ticked
+        # when the panel closes is unrelated to whether the mode took.
+        self.assertEqual(
+            set(confirm.allowed_next_states),
+            {"LOBBY_READY_TARGET", "LOBBY_READY_TARGET_FILL_ON"},
+        )
 
     def test_melee_repeats_while_alive_and_stops_everywhere_else(self) -> None:
         dispatcher = self._dispatcher()
@@ -347,7 +377,7 @@ class EnterGameCapabilityTest(unittest.TestCase):
         self.assertEqual(dispatcher.decide("IN_MATCH_ALIVE", 1, 1.0).reason, "PERIODIC_COOLDOWN")
         self.assertEqual(dispatcher.decide("IN_MATCH_ALIVE", 1, 4.0).kind, "fire")
 
-        for state in ("SPECTATING", "POST_MATCH_SUMMARY", "LOBBY_READY_UNRANKED"):
+        for state in ("SPECTATING", "POST_MATCH_SUMMARY", "LOBBY_READY_TARGET"):
             with self.subTest(state=state):
                 decision = self._dispatcher().decide(state, 1, 0.0)
                 self.assertNotEqual(
@@ -392,7 +422,7 @@ class EnterGameCapabilityTest(unittest.TestCase):
                 {"type": "tapKey", "scanCode": 57, "durationMs": 2000},
             ],
         )
-        self.assertIn("LOBBY_READY_UNRANKED", capability.allowed_next_states)
+        self.assertIn("LOBBY_READY_TARGET", capability.allowed_next_states)
 
 
 if __name__ == "__main__":

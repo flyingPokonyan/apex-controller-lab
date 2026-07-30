@@ -21,8 +21,8 @@ STATES_PATH = REPOSITORY_ROOT / "windows" / "config" / "game-states.zh-CN.json"
 # the spectate region, and a spectating frame reads a revive countdown where
 # the alive frame carries the squad count.
 LIVE_READINGS: dict[str, dict[str, tuple[str, float]]] = {
-    "LOBBY_READY_UNRANKED": {
-        "lobbyModeName": ("未上榜", 0.999),
+    "LOBBY_READY_TARGET": {
+        "lobbyModeName": ("进化版机器人大逃杀", 0.999),
         "lobbyPrimaryButton": ("准备", 1.000),
     },
     "LOBBY_READY_TRAINING": {
@@ -37,7 +37,7 @@ LIVE_READINGS: dict[str, dict[str, tuple[str, float]]] = {
     # can never tell this apart from a lobby that is merely ready. The button
     # is what changes, and it is the only thing that does so reliably.
     "LOBBY_QUEUEING": {
-        "lobbyModeName": ("未上榜", 0.999),
+        "lobbyModeName": ("进化版机器人大逃杀", 0.999),
         "lobbyPrimaryButton": ("取消", 1.000),
     },
     "POST_MATCH_SUMMARY": {
@@ -127,7 +127,7 @@ class GameStateRoutingTest(unittest.TestCase):
         # whatever shows through it must not win the routing.
         covered = {
             **LIVE_READINGS["CLIMB_SETTINGS_MODAL"],
-            **LIVE_READINGS["LOBBY_READY_UNRANKED"],
+            **LIVE_READINGS["LOBBY_READY_TARGET"],
         }
         analysis = self._detector(covered).analyze(np.zeros((4, 4, 3), np.uint8))
         self.assertEqual(analysis.decision.state, "CLIMB_SETTINGS_MODAL")
@@ -147,7 +147,7 @@ class GameStateRoutingTest(unittest.TestCase):
         detector = self._detector({})
         enabled = [rule.state for rule in detector.rules if rule.enabled]
         self.assertEqual(enabled[-1], "LOBBY_READY_OTHER")
-        for named in ("LOBBY_READY_TRAINING", "LOBBY_READY_UNRANKED"):
+        for named in ("LOBBY_READY_TRAINING", "LOBBY_READY_TARGET"):
             with self.subTest(state=named):
                 self.assertLess(enabled.index(named), enabled.index("LOBBY_READY_OTHER"))
 
@@ -172,17 +172,17 @@ class GameStateRoutingTest(unittest.TestCase):
         # Same three readings either way — the tick is the only difference, and
         # it decides whether the next match is filled with strangers or solo.
         readings = {
-            "lobbyModeName": ("未上榜", 0.999),
+            "lobbyModeName": ("进化版机器人大逃杀", 0.999),
             "lobbyPrimaryButton": ("准备", 1.000),
             "lobbyFillLabel": ("补满", 0.997),
         }
         detector = self._detector(readings)
 
         ticked = detector.analyze(self._fill_frame(21)).decision
-        self.assertEqual(ticked.state, "LOBBY_READY_UNRANKED_FILL_ON")
+        self.assertEqual(ticked.state, "LOBBY_READY_TARGET_FILL_ON")
 
         unticked = detector.analyze(self._fill_frame(0)).decision
-        self.assertEqual(unticked.state, "LOBBY_READY_UNRANKED")
+        self.assertEqual(unticked.state, "LOBBY_READY_TARGET")
 
     def test_the_configured_tick_threshold_sits_between_the_measured_ratios(self) -> None:
         # Measured on seven real lobby frames: 0.284 ticked, 0.000 unticked.
@@ -190,7 +190,7 @@ class GameStateRoutingTest(unittest.TestCase):
         # would silently queue filled matches forever.
         detector = self._detector({})
         rule = next(
-            item for item in detector.rules if item.state == "LOBBY_READY_UNRANKED_FILL_ON"
+            item for item in detector.rules if item.state == "LOBBY_READY_TARGET_FILL_ON"
         )
         pixel = rule.pixel_requirements[0]
         self.assertLess(0.0, pixel.min_ratio)
@@ -200,11 +200,11 @@ class GameStateRoutingTest(unittest.TestCase):
         # Modes without squad fill show no such control; the rule must fail on
         # the missing text rather than on whatever the empty crop measures.
         readings = {
-            "lobbyModeName": ("未上榜", 0.999),
+            "lobbyModeName": ("进化版机器人大逃杀", 0.999),
             "lobbyPrimaryButton": ("准备", 1.000),
         }
         decision = self._detector(readings).analyze(self._fill_frame(21)).decision
-        self.assertEqual(decision.state, "LOBBY_READY_UNRANKED")
+        self.assertEqual(decision.state, "LOBBY_READY_TARGET")
 
     def test_every_region_that_gets_read_is_declared_single_line(self) -> None:
         detector = self._detector({})

@@ -125,21 +125,23 @@
     },
     "modePanelTargetCard": {
       "roi": [
-        400,
-        990,
-        640,
-        1080
+        1620,
+        668,
+        2065,
+        722
       ],
-      "singleLine": true
+      "singleLine": true,
+      "_note": "目标模式卡片的标题。现在指向训练栏中间那张「进化版机器人大逃杀」，卡片实测占 x1604-2166 / y544-845，标题占 x1637-2055 / y675-717，下一行「三人赛」从 y722 开始，所以框到 722 为止仍是单行。换目标模式就改这里、modePanelConfirm、下面两条大厅规则的模式名，以及 enter-game 里的两个点击坐标——五处，没有第六处。"
     },
     "modePanelConfirm": {
       "roi": [
-        440,
-        1110,
-        740,
-        1180
+        1620,
+        780,
+        1960,
+        840
       ],
-      "singleLine": true
+      "singleLine": true,
+      "_note": "卡片被悬停时底部那一行会从「地图｜倒计时」变成「选择模式  更多信息」。位置由 20260730-215512 的 039 帧确定：未上榜卡片悬停后「选择模式」落在它自己那张卡的同一行上（未上榜是 y1133-1158，非悬停时那里是「世界尽头｜24秒」），机器人卡片的对应行实测是 y793-823。"
     }
   },
   "rules": [
@@ -276,12 +278,12 @@
     {
       "id": "mode-panel-target-visible",
       "state": "MODE_PANEL_TARGET_VISIBLE",
-      "_note": "未上榜卡片在面板上可见但尚未选中。同一区域在未选中时读到的是地图名和倒计时，不会误命中。",
+      "_note": "目标模式卡片在面板上可见但尚未选中。判据只取「机器人」三个字而不是整串「进化版机器人大逃杀」：卡片标题在窄一点的框里会被裁掉尾巴，赛季文案也可能微调，而这三个字是这张卡区别于面板上其他任何一张的最短子串。同一区域在未选中时读到的是地图名和倒计时，不会误命中。",
       "requirements": [
         {
           "region": "modePanelTargetCard",
           "all": [
-            "未上榜"
+            "机器人"
           ]
         }
       ]
@@ -313,8 +315,8 @@
       ]
     },
     {
-      "id": "lobby-ready-unranked-fill-on",
-      "state": "LOBBY_READY_UNRANKED_FILL_ON",
+      "id": "lobby-ready-target-fill-on",
+      "state": "LOBBY_READY_TARGET_FILL_ON",
       "_note": "未上榜大厅，且左上角「补满」还勾着。它必须排在 lobby-ready-unranked 之前：两条规则的文字证据完全相同，区别只在那一格勾没勾，先匹配先赢是这套规则表达「且」的唯一方式。补满关掉就是单人排队，队友不会被补进来——这也顺带解决了「我死了但队友还活着，只能干等」的问题，因为单人局里我死了小队就结束了。",
       "requirements": [
         {
@@ -326,7 +328,7 @@
         {
           "region": "lobbyModeName",
           "all": [
-            "未上榜"
+            "机器人"
           ]
         },
         {
@@ -364,8 +366,8 @@
       ]
     },
     {
-      "id": "lobby-ready-unranked",
-      "state": "LOBBY_READY_UNRANKED",
+      "id": "lobby-ready-target",
+      "state": "LOBBY_READY_TARGET",
       "_note": "大厅停在未上榜，可以直接开始匹配。模板 LOBBY_READY 实测余量只有 0.038，且与 LOBBY_TRAINING_READY 在同一帧上同时匹配过；文字判据没有这个问题。",
       "requirements": [
         {
@@ -377,7 +379,7 @@
         {
           "region": "lobbyModeName",
           "all": [
-            "未上榜"
+            "机器人"
           ]
         }
       ]

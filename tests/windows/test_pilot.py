@@ -228,7 +228,7 @@ class PilotTest(unittest.TestCase):
         # 20260730-232551 finished as FAILED with no summary because alt-tab
         # between the frame's foreground check and the send raised out of the
         # loop. Handing the window back has to be enough to carry on.
-        self.screen(lobbyPrimaryButton=("准备", 1.0), lobbyModeName=("未上榜", 1.0))
+        self.screen(lobbyPrimaryButton=("准备", 1.0), lobbyModeName=("进化版机器人大逃杀", 1.0))
         self.guard.ensure_target_foreground = self._raise_foreground_lost
 
         record = self.pilot.step()
@@ -309,15 +309,15 @@ class PilotTest(unittest.TestCase):
 
     def test_a_clear_overlay_scan_allows_the_lobby_action_immediately(self) -> None:
         self.enable_overlays()
-        self.screen(lobbyPrimaryButton=("准备", 1.0), lobbyModeName=("未上榜", 1.0))
+        self.screen(lobbyPrimaryButton=("准备", 1.0), lobbyModeName=("进化版机器人大逃杀", 1.0))
 
         record = self.pilot.step()
-        self.assertEqual(record["state"], "LOBBY_READY_UNRANKED")
+        self.assertEqual(record["state"], "LOBBY_READY_TARGET")
         self.assertEqual(self.sender.calls, [("click", 1280, 1295)])
 
     def test_overlay_ocr_failure_blocks_the_underlying_lobby_action(self) -> None:
         self.enable_overlays()
-        self.screen(lobbyPrimaryButton=("准备", 1.0), lobbyModeName=("未上榜", 1.0))
+        self.screen(lobbyPrimaryButton=("准备", 1.0), lobbyModeName=("进化版机器人大逃杀", 1.0))
         self.overlay_provider.error = RuntimeError("offline OCR unavailable")
 
         record = self.pilot.step()
@@ -355,19 +355,19 @@ class PilotTest(unittest.TestCase):
         # runner has to stay on and act within, so a rule this broad may only
         # speak where the fast detector said nothing.
         self.enable_overlays()
-        self.screen(modePanelTargetCard=("未上榜", 1.0))
+        self.screen(modePanelTargetCard=("进化版机器人大逃杀", 1.0))
         self.overlay_provider.readings = {"bottomLeftBack": ("ESC 返回", 0.98)}
 
         record = self._settle_overlay()
         self.assertEqual(record["state"], "MODE_PANEL_TARGET_VISIBLE")
         self.assertNotIn(("tap", 1, 80), self.sender.calls)
-        self.assertEqual({call for call in self.sender.calls}, {("click", 493, 1035)})
+        self.assertEqual({call for call in self.sender.calls}, {("click", 1750, 696)})
         self.assertIn("OVERLAY_RULE_OUTRANKED", self.recorder.names())
 
     def test_a_ticked_fill_box_is_unticked_before_the_match_is_started(self) -> None:
         self.screen(
             lobbyPrimaryButton=("准备", 1.0),
-            lobbyModeName=("未上榜", 1.0),
+            lobbyModeName=("进化版机器人大逃杀", 1.0),
             lobbyFillLabel=("补满", 1.0),
         )
         ticked = np.zeros((1440, 2560, 3), dtype=np.uint8)
@@ -380,18 +380,18 @@ class PilotTest(unittest.TestCase):
         self.pilot.source = TickedSource()
         record = self.pilot.step()
 
-        self.assertEqual(record["state"], "LOBBY_READY_UNRANKED_FILL_ON")
+        self.assertEqual(record["state"], "LOBBY_READY_TARGET_FILL_ON")
         self.assertEqual(self.sender.calls, [("click", 86, 222)])
 
     def test_an_unticked_fill_box_goes_straight_to_starting_the_match(self) -> None:
         self.screen(
             lobbyPrimaryButton=("准备", 1.0),
-            lobbyModeName=("未上榜", 1.0),
+            lobbyModeName=("进化版机器人大逃杀", 1.0),
             lobbyFillLabel=("补满", 1.0),
         )
         record = self.pilot.step()
 
-        self.assertEqual(record["state"], "LOBBY_READY_UNRANKED")
+        self.assertEqual(record["state"], "LOBBY_READY_TARGET")
         self.assertEqual(self.sender.calls, [("click", 1280, 1295)])
 
     def test_spectating_a_living_squad_cannot_freeze_the_match_summary(self) -> None:
@@ -429,7 +429,7 @@ class PilotTest(unittest.TestCase):
         self.assertEqual(self.sender.calls, [])
 
     def test_a_ready_lobby_clicks_ready_once_and_then_waits_for_the_queue(self) -> None:
-        self.screen(lobbyPrimaryButton=("准备", 1.0), lobbyModeName=("未上榜", 1.0))
+        self.screen(lobbyPrimaryButton=("准备", 1.0), lobbyModeName=("进化版机器人大逃杀", 1.0))
         self.pilot.step()
         self.assertEqual(self.sender.calls, [("click", 1280, 1295)])
         sent = next(p for e, p in self.recorder.events if e == "ACTION_SENT")
@@ -450,7 +450,7 @@ class PilotTest(unittest.TestCase):
         self.assertEqual(len(self.sender.calls), 1)
 
     def test_a_wrong_postcondition_is_recorded_rather_than_treated_as_success(self) -> None:
-        self.screen(lobbyPrimaryButton=("准备", 1.0), lobbyModeName=("未上榜", 1.0))
+        self.screen(lobbyPrimaryButton=("准备", 1.0), lobbyModeName=("进化版机器人大逃杀", 1.0))
         self.pilot.step()
         # Pressing ready cannot land on the post-match screen; if it looks like
         # it did, the click went somewhere unintended.
@@ -485,11 +485,11 @@ class PilotTest(unittest.TestCase):
         )
 
         self.now = 4.0
-        self.screen(lobbyPrimaryButton=("准备", 1.0), lobbyModeName=("未上榜", 1.0))
+        self.screen(lobbyPrimaryButton=("准备", 1.0), lobbyModeName=("进化版机器人大逃杀", 1.0))
         self.pilot.step()
         confirmed = next(p for e, p in self.recorder.events if e == "ACTION_CONFIRMED")
         self.assertEqual(confirmed["capability"], "post-match-return-lobby")
-        self.assertEqual(confirmed["evidenceState"], "LOBBY_READY_UNRANKED")
+        self.assertEqual(confirmed["evidenceState"], "LOBBY_READY_TARGET")
 
     def test_a_capability_may_hold_its_key_longer_than_the_default_tap(self) -> None:
         # An 80ms tap of this same scan code crouches in the firing range but
