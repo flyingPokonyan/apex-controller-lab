@@ -49,6 +49,8 @@ Windows 第一次克隆后，进入 `windows` 目录运行 `setup.ps1`。以后�
 
 ## 技术方案
 
+- [**现状汇总**：有哪些采集数据、闭环做到哪一步](docs/current-status.md)
+- [能力证据矩阵：每条能力靠什么帧成立、还缺什么](docs/capability-evidence.md)
 - [本地菜单自动化验证与 Windows 接入清单](docs/menu-automation-local-validation.md)
 - [模式选择、脱离跳伞与截图技术可行性](docs/apex-ui-drop-screenshot-feasibility.md)
 - [Windows 首场匹配运行器](docs/windows-first-match-runner.md)
