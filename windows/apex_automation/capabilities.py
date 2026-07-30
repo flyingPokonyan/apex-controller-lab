@@ -211,6 +211,21 @@ class CapabilityDispatcher:
             for capability in self.capabilities.for_state(state)
         )
 
+    def _age_entries(self, now: float) -> None:
+        """Drop entries the cycle window has moved past.
+
+        Called on every decision rather than only on a screen change. Ageing
+        used to happen inside `note_state`, which returns early while the
+        screen is unchanged — so a latched pause could outlive its own
+        evidence indefinitely. `20260730-225411` did exactly that: the latch
+        closed at 226.8s and the screen then went unrecognised until the run
+        ended, leaving the runner inert for **704 seconds** with entries that
+        should have expired at 406s.
+        """
+        cutoff = now - self.cycle_window_s
+        while self._state_entries and self._state_entries[0][0] < cutoff:
+            self._state_entries.popleft()
+
     def note_state(self, state: str | None, now: float) -> None:
         """Record a screen change so attempt budgets and cycles stay honest."""
         if state == self._current_state:
@@ -222,12 +237,7 @@ class CapabilityDispatcher:
             # budget, which is what makes "handle whatever shows up" workable.
             for capability in self.capabilities.for_state(previous):
                 self.attempts.pop(capability.id, None)
-        # Ageing runs on every change, not only on recorded ones: sitting on an
-        # unrecorded screen for longer than the window must still let an old
-        # loop expire, or the latch would outlive its own evidence.
-        cutoff = now - self.cycle_window_s
-        while self._state_entries and self._state_entries[0][0] < cutoff:
-            self._state_entries.popleft()
+        self._age_entries(now)
         if state is None or not self.counts_toward_cycle(state):
             return
         self._state_entries.append((now, state))
@@ -261,6 +271,7 @@ class CapabilityDispatcher:
         )
 
     def decide(self, state: str | None, observation_version: int, now: float) -> Decision:
+        self._age_entries(now)
         if state is None:
             return Decision("wait", reason="NO_STATE")
 

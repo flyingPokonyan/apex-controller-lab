@@ -211,6 +211,29 @@ class DispatcherTest(unittest.TestCase):
         dispatcher.note_state("SUMMARY", 50.0)
         self.assertEqual(dispatcher.decide("SUMMARY", 1, 50.0).kind, "fire")
 
+    def test_a_latched_pause_expires_even_if_the_screen_never_changes_again(self) -> None:
+        # 20260730-225411 latched at 226.8s and then sat on an unrecognised
+        # screen until the run ended. Ageing lived in note_state, which
+        # returns early while the screen is unchanged, so the entries never
+        # expired and the runner stayed inert for 704 seconds.
+        ready = click("ready", "LOBBY", action_class="commit",
+                      allowed_next_states=("PANEL",), max_attempts=2)
+        card = click("card", "PANEL", allowed_next_states=("LOBBY",))
+        dispatcher = self._dispatcher(ready, card, cycle_window_s=180.0, cycle_threshold=4)
+
+        for index in range(6):
+            dispatcher.note_state("LOBBY", index * 10.0)
+            dispatcher.decide("LOBBY", index * 2, index * 10.0)
+            dispatcher.confirm_pending("PANEL")
+            dispatcher.note_state("PANEL", index * 10.0 + 5)
+            dispatcher.decide("PANEL", index * 2 + 1, index * 10.0 + 5)
+            dispatcher.confirm_pending("LOBBY")
+        self.assertEqual(dispatcher.decide("LOBBY", 99, 60.0).reason, "CYCLE_PAUSED")
+
+        # Nothing changes screen from here; only time passes.
+        self.assertEqual(dispatcher.decide("LOBBY", 99, 100.0).reason, "CYCLE_PAUSED")
+        self.assertEqual(dispatcher.decide("LOBBY", 100, 400.0).kind, "fire")
+
     def test_a_loop_still_latches_when_the_runner_is_the_one_going_in_circles(self) -> None:
         ready = click("ready", "LOBBY", action_class="commit",
                       allowed_next_states=("PANEL",), max_attempts=2)
