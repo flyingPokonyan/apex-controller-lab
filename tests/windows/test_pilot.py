@@ -139,6 +139,35 @@ class PilotTest(unittest.TestCase):
         self.assertEqual(record["decision"]["reason"], "NO_STATE")
         self.assertEqual(self.sender.calls, [])
 
+    def test_a_screen_with_no_rule_keeps_one_frame_of_itself(self) -> None:
+        # The post-match confirm page is the current example: four capture
+        # sessions never recorded it, so the runner has to bring it back.
+        self.screen()
+        self.pilot.step()
+        self.assertNotIn("SCREENSHOT_SAVED", self.recorder.names())
+
+        self.now = 20.0
+        self.pilot.step()
+        saved = next(p for e, p in self.recorder.events if e == "SCREENSHOT_SAVED")
+        self.assertEqual(saved["stage"], "unknown")
+
+        # One per episode, not one per frame, or a loading screen alone eats
+        # the whole screenshot budget.
+        self.now = 40.0
+        self.pilot.step()
+        self.assertEqual(self.recorder.names().count("SCREENSHOT_SAVED"), 1)
+
+        # A recognised screen ends the episode, so the next stall is captured.
+        self.now = 41.0
+        self.screen(lobbyPrimaryButton=("取消", 1.0))
+        self.pilot.step()
+        self.now = 60.0
+        self.screen()
+        self.pilot.step()
+        self.now = 80.0
+        self.pilot.step()
+        self.assertEqual(self.recorder.names().count("SCREENSHOT_SAVED"), 3)
+
     def test_a_queueing_lobby_waits_because_it_owns_no_capability(self) -> None:
         self.screen(lobbyPrimaryButton=("取消", 1.0))
         record = self.pilot.step()

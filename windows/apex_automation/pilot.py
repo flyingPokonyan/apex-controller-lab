@@ -74,6 +74,7 @@ class CapabilityPilot:
         poll_ms: int | None = None,
         key_tap_ms: int | None = None,
         max_screenshots: int = 400,
+        unknown_grace_ms: int = 8000,
     ) -> None:
         self.config = config
         self.source = source
@@ -89,6 +90,13 @@ class CapabilityPilot:
         self.poll_ms = int(config.timing.get("pollMs", 300) if poll_ms is None else poll_ms)
         self.key_tap_ms = int(config.timing.get("keyTapMs", 80) if key_tap_ms is None else key_tap_ms)
         self.max_screenshots = max_screenshots
+        # Every screen with no rule looks the same from the log: NO_STATE, over
+        # and over. Whether that is a two-second loading wipe or the run being
+        # stuck forever is only visible in a frame, and the useful ones are
+        # exactly the screens nobody knew to collect. Loading screens get
+        # captured too; one shot per episode is cheap and they are the reason
+        # the grace is this long.
+        self.unknown_grace_s = unknown_grace_ms / 1000
 
         self._validate_actions()
 
@@ -102,6 +110,8 @@ class CapabilityPilot:
         self._foreground = True
         self._released = False
         self._resolution_warned = False
+        self._unknown_since: float | None = None
+        self._unknown_captured = False
 
     def _validate_actions(self) -> None:
         """Fail before the first frame rather than mid-action.
@@ -213,6 +223,27 @@ class CapabilityPilot:
             self._snapshot(state, frame)
         return state
 
+    def _note_unknown(self, state: str | None, frame: np.ndarray, now: float) -> None:
+        """Keep one frame of every screen that has no rule.
+
+        This is how the next missing rule gets found without asking anyone to
+        go and reproduce it: whatever the runner stalls on ends up in the run
+        directory by itself.
+        """
+        if state is not None:
+            self._unknown_since = None
+            self._unknown_captured = False
+            return
+        if self._unknown_since is None:
+            self._unknown_since = now
+            return
+        if self._unknown_captured or now - self._unknown_since < self.unknown_grace_s:
+            return
+        self._unknown_captured = True
+        self.counters["unknownScreens"] += 1
+        self._snapshot("unknown", frame)
+        self.notify(f"  ↳ 这个画面没有规则，已存证（停了 {now - self._unknown_since:.0f} 秒）")
+
     def _snapshot(self, stage: str, frame: np.ndarray) -> None:
         if self.screenshot_count >= self.max_screenshots:
             return
@@ -291,6 +322,7 @@ class CapabilityPilot:
 
         state = self._observe(frame)
         record["state"] = state
+        self._note_unknown(state, frame, now)
 
         self._settle_pending(state)
         self.dispatcher.note_state(state, now)
