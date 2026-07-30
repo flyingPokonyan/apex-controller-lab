@@ -1,0 +1,88 @@
+{
+  "schemaVersion": 1,
+  "language": "zh-CN",
+  "defaultMinConfidence": 0.58,
+  "_note": "自动游玩需要先于大厅按钮处理的已知覆盖层。它刻意只保留已有真实帧的全局页面，不包含训练任务本身。全屏 OCR 很慢，因此 CapabilityPilot 只在未知画面和会发送菜单输入的画面上低频调用它。",
+  "regions": {
+    "fullFrame": [0, 0, 2560, 1440],
+    "titleCenter": [320, 80, 2240, 760],
+    "bottomCenter": [480, 820, 2080, 1440],
+    "bottomRight": [1360, 760, 2560, 1440]
+  },
+  "rules": [
+    {
+      "id": "auth-two-factor-manual",
+      "state": "AUTH_REQUIRED",
+      "requirements": [
+        {"region": "fullFrame", "any": ["双重身份登录", "双里身份登录"]},
+        {"region": "fullFrame", "all": ["输入您的代码", "输入6位数代码"]}
+      ]
+    },
+    {
+      "id": "news-welcome-safe-close",
+      "state": "NEWS_WELCOME",
+      "requirements": [
+        {"region": "fullFrame", "all": ["欢迎传奇", "ESC返回"]}
+      ]
+    },
+    {
+      "id": "memorial-safe-close",
+      "state": "NEWS_MEMORIAL",
+      "requirements": [
+        {"region": "fullFrame", "all": ["纪念泰坦", "ESC返回"]}
+      ]
+    },
+    {
+      "id": "guide-account",
+      "state": "GUIDE_ACCOUNT",
+      "requirements": [
+        {"region": "fullFrame", "all": ["账户", "账号经验值", "奖励进度", "继续"]}
+      ]
+    },
+    {
+      "id": "guide-friends",
+      "state": "GUIDE_FRIENDS",
+      "requirements": [
+        {"region": "fullFrame", "all": ["好友", "好友列表", "组队", "继续"]}
+      ]
+    },
+    {
+      "id": "guide-settings",
+      "state": "GUIDE_SETTINGS",
+      "requirements": [
+        {"region": "fullFrame", "all": ["设置", "游戏设置", "继续"]}
+      ]
+    },
+    {
+      "id": "guide-progress",
+      "state": "GUIDE_PROGRESS",
+      "requirements": [
+        {"region": "fullFrame", "all": ["进度", "通行证", "挑战进度", "继续"]}
+      ]
+    },
+    {
+      "id": "level-up-continue",
+      "state": "LEVEL_UP_VIDEO",
+      "requirements": [
+        {"region": "titleCenter", "any": ["等级提升", "等级升级", "升级"], "minConfidence": 0.65},
+        {"region": "bottomCenter", "any": ["继续", "跳过"], "minConfidence": 0.65}
+      ]
+    },
+    {
+      "id": "reward-continue",
+      "state": "REWARD",
+      "requirements": [
+        {"region": "titleCenter", "any": ["奖励", "已解锁", "获得奖励"], "minConfidence": 0.65},
+        {"region": "bottomCenter", "any": ["继续", "领取"], "minConfidence": 0.65}
+      ]
+    },
+    {
+      "id": "announcement-close",
+      "state": "GENERIC_MODAL",
+      "requirements": [
+        {"region": "titleCenter", "any": ["公告", "新闻", "活动"], "minConfidence": 0.65},
+        {"region": "bottomRight", "any": ["关闭", "返回"], "minConfidence": 0.65}
+      ]
+    }
+  ]
+}

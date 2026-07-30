@@ -1,7 +1,7 @@
 {
   "schemaVersion": 1,
   "language": "zh-CN",
-  "_note": "目标：进入并留在对局里。这里没有任何地方表达「下一步是什么」——优先级只在同一帧内多个能力同时可处理时仲裁。所有坐标取自 2026-07-29 目标机器的实时 DXGI 帧。modeSelectClick 与 startMatchClick 是同一个大厅主按钮，只是按钮上的字不同（「选择」/「准备」）；分成两个名字是为了让日志里的 ACTION_SENT 说清当时按的是哪一件事。",
+  "_note": "目标：从继续页清掉已知覆盖层，进入匹配并留在对局里。这里没有任何地方表达「下一步是什么」——优先级只在同一帧内多个能力同时可处理时仲裁。坐标全部复用目标机器的已有真实帧；大厅坐标来自 2026-07-29 实时 DXGI 帧，四个导览坐标来自既有 tutorial 样本。modeSelectClick 与 startMatchClick 是同一个大厅主按钮，只是按钮上的字不同（「选择」/「准备」）；分成两个名字是为了让日志里的 ACTION_SENT 说清当时按的是哪一件事。",
   "actions": {
     "continueClick": [1280, 865],
     "keepAsIsClick": [1425, 956],
@@ -10,13 +10,118 @@
     "startMatchClick": [1280, 1295],
     "unrankedCardClick": [493, 1035],
     "unrankedConfirmClick": [522, 1143],
-    "returnLobbyScanCode": 15,
+    "guideAccountContinue": [610, 150],
+    "guideFriendsContinue": [480, 252],
+    "guideSettingsContinue": [1730, 155],
+    "guideProgressContinue": [1560, 290],
+    "escapeScanCode": 1,
+    "enterScanCode": 28,
+    "returnLobbySequence": [
+      {"type": "tapKey", "scanCode": 15, "durationMs": 80},
+      {"type": "wait", "durationMs": 800},
+      {"type": "tapKey", "scanCode": 57, "durationMs": 2000}
+    ],
     "meleeScanCode": 47,
     "detachScanCode": 29,
     "launchScanCode": 18
   },
-  "_keyBindings": "扫描码写死在这里，等于假定了游戏里的键位。这些假定必须和目标账号实际绑的键一致，否则动作照发、游戏没反应，而画面上和「输入没送到」长得一模一样——2026-07-30 就栽在这上面：配置写 V(47)，当时账号绑在 N 上，白查了一轮反作弊。当前假定：15=TAB 返回大厅，47=V 近战，29=LCTRL 单独发射，18=E 发射。改键位的话这里也要跟着改；windows/probe-input.cmd 可以逐个验。另外 Apex 里有相当一批提示是长按而不是点按，那种要靠能力自己的 holdMs 声明，默认的 keyTapMs 太短。",
+  "_keyBindings": "扫描码写死在这里，等于假定了游戏里的键位。这些假定必须和目标账号实际绑的键一致，否则动作照发、游戏没反应，而画面上和「输入没送到」长得一模一样——2026-07-30 就栽在这上面：配置写 V(47)，当时账号绑在 N 上，白查了一轮反作弊。当前假定：1=ESC 安全返回，28=ENTER 安全继续，15=TAB 返回大厅，57=SPACE 确认返回大厅，47=V 近战，29=LCTRL 单独发射，18=E 发射。改键位的话这里也要跟着改；windows/probe-input.cmd 可以逐个验。另外 Apex 里有相当一批提示是长按而不是点按，那种要靠能力自己的 holdMs 或动作序列内的 durationMs 声明，默认的 keyTapMs 太短。",
   "capabilities": [
+    {
+      "id": "dismiss-level-up",
+      "priority": 120,
+      "states": ["LEVEL_UP_VIDEO"],
+      "action": "enterScanCode",
+      "kind": "key",
+      "actionClass": "idempotent",
+      "confirmMs": 2500,
+      "maxAttempts": 2,
+      "_note": "沿用外置清障字典：必须同时读到升级语义和继续/跳过，才允许 ENTER。"
+    },
+    {
+      "id": "dismiss-reward",
+      "priority": 120,
+      "states": ["REWARD"],
+      "action": "enterScanCode",
+      "kind": "key",
+      "actionClass": "idempotent",
+      "confirmMs": 2500,
+      "maxAttempts": 2,
+      "_note": "沿用外置清障字典：必须同时读到奖励语义和继续/领取，才允许 ENTER。"
+    },
+    {
+      "id": "dismiss-announcement",
+      "priority": 120,
+      "states": ["GENERIC_MODAL"],
+      "action": "escapeScanCode",
+      "kind": "key",
+      "actionClass": "idempotent",
+      "confirmMs": 2000,
+      "maxAttempts": 1,
+      "_note": "公告、新闻、活动页只走 ESC 返回，不点击页面里的正向按钮。"
+    },
+    {
+      "id": "dismiss-news-welcome",
+      "priority": 115,
+      "states": ["NEWS_WELCOME"],
+      "action": "escapeScanCode",
+      "kind": "key",
+      "actionClass": "idempotent",
+      "confirmMs": 1500,
+      "maxAttempts": 2,
+      "_note": "已有真实帧明确显示 ESC 返回。"
+    },
+    {
+      "id": "dismiss-news-memorial",
+      "priority": 115,
+      "states": ["NEWS_MEMORIAL"],
+      "action": "escapeScanCode",
+      "kind": "key",
+      "actionClass": "idempotent",
+      "confirmMs": 1500,
+      "maxAttempts": 2,
+      "_note": "已有真实帧明确显示 ESC 返回。"
+    },
+    {
+      "id": "guide-account-continue",
+      "priority": 110,
+      "states": ["GUIDE_ACCOUNT"],
+      "action": "guideAccountContinue",
+      "kind": "click",
+      "actionClass": "idempotent",
+      "confirmMs": 1200,
+      "maxAttempts": 2
+    },
+    {
+      "id": "guide-friends-continue",
+      "priority": 110,
+      "states": ["GUIDE_FRIENDS"],
+      "action": "guideFriendsContinue",
+      "kind": "click",
+      "actionClass": "idempotent",
+      "confirmMs": 1200,
+      "maxAttempts": 2
+    },
+    {
+      "id": "guide-settings-continue",
+      "priority": 110,
+      "states": ["GUIDE_SETTINGS"],
+      "action": "guideSettingsContinue",
+      "kind": "click",
+      "actionClass": "idempotent",
+      "confirmMs": 1200,
+      "maxAttempts": 2
+    },
+    {
+      "id": "guide-progress-continue",
+      "priority": 110,
+      "states": ["GUIDE_PROGRESS"],
+      "action": "guideProgressContinue",
+      "kind": "click",
+      "actionClass": "idempotent",
+      "confirmMs": 1500,
+      "maxAttempts": 2
+    },
     {
       "id": "dismiss-climb-settings",
       "priority": 90,
@@ -43,10 +148,10 @@
       "id": "post-match-return-lobby",
       "priority": 70,
       "states": ["POST_MATCH_SUMMARY"],
-      "action": "returnLobbyScanCode",
-      "kind": "key",
+      "action": "returnLobbySequence",
+      "kind": "sequence",
       "actionClass": "idempotent",
-      "confirmMs": 4000,
+      "confirmMs": 8000,
       "maxAttempts": 3,
       "allowedNextStates": [
         "LOBBY_READY_UNRANKED",
@@ -54,7 +159,7 @@
         "LOBBY_SELECT_REQUIRED",
         "CLIMB_SETTINGS_MODAL"
       ],
-      "_note": "结算页底部写的是 TAB 返回大厅。右上角那个「1 单人匹配」是匹配开关而不是下一把，而且结算页显示时匹配已经在跑了；走 TAB 会落到一个已认识的画面，比依赖匹配开关可靠。"
+      "_note": "操作者确认返回大厅需要完整执行 TAB，再长按 SPACE。序列轻按 TAB 80ms，等待 800ms 让确认页出现，再长按 SPACE 2000ms；不要求额外识别确认页，也绝不在未知画面上单独发送 SPACE。最后只以已认识的大厅态或攀爬设置弹窗作为成功后置。"
     },
     {
       "id": "lobby-open-mode-panel",
@@ -125,9 +230,9 @@
       "actionClass": "toggle",
       "confirmMs": 3000,
       "maxAttempts": 1,
-      "holdMs": 800,
+      "holdMs": 2000,
       "allowedNextStates": ["LAUNCH_READY", "FREEFALL"],
-      "_note": "LCTRL 在脱离和归队之间切换，按第二下会把自己送回小队，所以只允许一次且必须拿到正向证据。跟队时不按它就永远等不到可发射画面。holdMs 取 800 而不是默认的 80：这个提示要长按，操作者确认过；2026-07-30 那次 80ms 的点按没有生效，而同一枚扫描码在训练场里能正常蹲下，说明键是送到了的。800 还没有实测过，只知道方向对——按住久一点没有代价，它仍然只脱离一次。"
+      "_note": "LCTRL 在脱离和归队之间切换，按第二下会把自己送回小队，所以只允许一次且必须拿到正向证据。跟队时不按它就永远等不到可发射画面。holdMs 取 2000 而不是默认的 80：这个提示要长按，操作者确认过；2026-07-30 那次 80ms 的点按没有生效，而同一枚扫描码在训练场里能正常蹲下，说明键是送到了的。公开资料没有给出精确阈值，2 秒取当前允许上限以增加容错；仍需目标机器实测确认。"
     },
     {
       "id": "dropship-launch",

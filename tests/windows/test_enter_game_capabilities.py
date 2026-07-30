@@ -5,16 +5,36 @@ from pathlib import Path
 import sys
 import unittest
 
+import numpy as np
+
 
 REPOSITORY_ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(REPOSITORY_ROOT / "windows"))
 
 from apex_automation.capabilities import CapabilityDispatcher, CapabilitySet
+from apex_automation.ocr_obstacles import (
+    FullFrameOcrProvider,
+    OcrObstacleDetector,
+    OcrToken,
+    parse_regions,
+)
 from apex_automation.ocr_states import OcrStateDetector
 
 
 CONFIG = REPOSITORY_ROOT / "windows" / "config" / "enter-game.zh-CN.json"
 STATES = REPOSITORY_ROOT / "windows" / "config" / "game-states.zh-CN.json"
+OVERLAYS = REPOSITORY_ROOT / "windows" / "config" / "play-overlays.zh-CN.json"
+OBSTACLES = REPOSITORY_ROOT / "windows" / "config" / "obstacle-rules.zh-CN.json"
+
+
+class FakeLayoutProvider:
+    def __init__(self, tokens: tuple[OcrToken, ...]) -> None:
+        self.tokens = tokens
+        self.calls = 0
+
+    def read_with_boxes(self, frame: np.ndarray) -> tuple[OcrToken, ...]:
+        self.calls += 1
+        return self.tokens
 
 
 class EnterGameCapabilityTest(unittest.TestCase):
@@ -48,12 +68,93 @@ class EnterGameCapabilityTest(unittest.TestCase):
 
     def test_every_state_and_postcondition_is_one_the_detector_can_produce(self) -> None:
         known = {rule.state for rule in OcrStateDetector.from_path(object(), STATES).rules}
-        # CONTINUE still comes from a template rather than from the dictionary.
-        known.add("CONTINUE")
+        known.update(OcrStateDetector.from_path(object(), OVERLAYS).states)
+        known.update(OcrObstacleDetector.from_path(object(), OBSTACLES).states)
         for capability in self.capabilities.capabilities:
             for state in (*capability.states, *capability.allowed_next_states):
                 with self.subTest(capability=capability.id, state=state):
                     self.assertIn(state, known, f"{capability.id} 引用了无法产生的状态 {state}")
+
+    def test_every_safe_obstacle_rule_has_the_same_capability_contract(self) -> None:
+        detector = OcrObstacleDetector.from_path(object(), OBSTACLES)
+        overlay_detector = OcrStateDetector.from_path(object(), OVERLAYS)
+        overlay_rules = {rule.state: rule for rule in overlay_detector.rules if rule.enabled}
+        for rule in detector.rules:
+            if not rule.enabled:
+                continue
+            self.assertIn(rule.state, overlay_rules)
+            self.assertEqual(
+                [
+                    (item.region, item.any_terms, item.all_terms, item.min_confidence)
+                    for item in overlay_rules[rule.state].requirements
+                ],
+                [
+                    (item.region, item.any_terms, item.all_terms, item.min_confidence)
+                    for item in rule.requirements
+                ],
+            )
+            matches = [
+                capability
+                for capability in self.capabilities.for_state(rule.state)
+                if capability.action == rule.action.name
+                and capability.kind == rule.action.kind
+                and capability.confirm_ms == rule.action.confirm_ms
+                and capability.max_attempts == rule.action.max_attempts
+            ]
+            with self.subTest(rule=rule.rule_id):
+                self.assertEqual(len(matches), 1)
+
+    def test_known_overlay_pages_are_all_routed_into_the_capability_set(self) -> None:
+        detector = OcrStateDetector.from_path(object(), OVERLAYS)
+        overlay_states = detector.states
+        self.assertEqual(
+            set(detector.regions),
+            {"fullFrame", "titleCenter", "bottomCenter", "bottomRight"},
+        )
+        self.assertEqual(self.capabilities.for_state("AUTH_REQUIRED"), ())
+        for state in overlay_states - {"AUTH_REQUIRED"}:
+            with self.subTest(state=state):
+                self.assertEqual(len(self.capabilities.for_state(state)), 1)
+
+        self.assertEqual(self.payload["actions"]["escapeScanCode"], 1)
+        self.assertEqual(self.payload["actions"]["guideAccountContinue"], [610, 150])
+        self.assertEqual(self.payload["actions"]["guideFriendsContinue"], [480, 252])
+        self.assertEqual(self.payload["actions"]["guideSettingsContinue"], [1730, 155])
+        self.assertEqual(self.payload["actions"]["guideProgressContinue"], [1560, 290])
+
+    def test_one_full_frame_pass_preserves_the_old_obstacle_regions(self) -> None:
+        provider = FakeLayoutProvider(
+            (
+                OcrToken("最新活动", 0.98, (400, 100, 620, 160)),
+                OcrToken("ESC 返回", 0.97, (1700, 1000, 1900, 1060)),
+            )
+        )
+        cached = FullFrameOcrProvider(provider)
+        frame = np.zeros((1440, 2560, 3), dtype=np.uint8)
+
+        analysis = OcrStateDetector.from_path(cached, OVERLAYS).analyze(frame)
+        self.assertIsNotNone(analysis.decision)
+        self.assertEqual(analysis.decision.state, "GENERIC_MODAL")
+        self.assertEqual(provider.calls, 1)
+
+        regions = parse_regions(
+            {
+                "fullFrame": [0, 0, 2560, 1440],
+                "titleCenter": [320, 80, 2240, 760],
+                "bottomRight": [1360, 760, 2560, 1440],
+            }
+        )
+        cached.begin_frame(frame)
+        self.assertEqual([t.text for t in cached.read(frame, regions["titleCenter"])], ["最新活动"])
+        self.assertEqual([t.text for t in cached.read(frame, regions["bottomRight"])], ["ESC 返回"])
+        self.assertEqual(len(cached.read(frame, regions["fullFrame"])), 2)
+        self.assertEqual(provider.calls, 2)
+
+        # A new analysis must invalidate the cache even when the capture
+        # backend reuses the same ndarray object.
+        cached.begin_frame(frame)
+        cached.read(frame, regions["fullFrame"])
+        self.assertEqual(provider.calls, 3)
 
     def test_a_modal_over_the_lobby_is_handled_before_the_lobby(self) -> None:
         dispatcher = self._dispatcher()
@@ -159,15 +260,32 @@ class EnterGameCapabilityTest(unittest.TestCase):
         # find. Whatever the codes are, the file has to say what they assume.
         bindings = self.payload["_keyBindings"]
         for capability in self.capabilities.capabilities:
-            if capability.kind != "key":
+            action = self.payload["actions"][capability.action]
+            if capability.kind == "key":
+                codes = [action]
+            elif capability.kind == "sequence":
+                codes = [
+                    step["scanCode"]
+                    for step in action
+                    if step["type"] == "tapKey"
+                ]
+            else:
                 continue
-            code = self.payload["actions"][capability.action]
-            with self.subTest(capability=capability.id, scanCode=code):
-                self.assertIn(str(code), bindings)
+            for code in codes:
+                with self.subTest(capability=capability.id, scanCode=code):
+                    self.assertIn(str(code), bindings)
 
     def test_post_match_returns_to_the_lobby_rather_than_toggling_matchmaking(self) -> None:
         capability = next(c for c in self.capabilities.capabilities if c.id == "post-match-return-lobby")
-        self.assertEqual(self.payload["actions"][capability.action], 15)  # TAB
+        self.assertEqual(capability.kind, "sequence")
+        self.assertEqual(
+            self.payload["actions"][capability.action],
+            [
+                {"type": "tapKey", "scanCode": 15, "durationMs": 80},
+                {"type": "wait", "durationMs": 800},
+                {"type": "tapKey", "scanCode": 57, "durationMs": 2000},
+            ],
+        )
         self.assertIn("LOBBY_READY_UNRANKED", capability.allowed_next_states)
 
 

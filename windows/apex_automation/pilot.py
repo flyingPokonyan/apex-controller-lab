@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from collections import defaultdict
+from dataclasses import dataclass
 import json
 from pathlib import Path
 import time
@@ -17,7 +18,7 @@ from .ocr_states import OcrStateDetector
 # these; the check in `_validate_actions` is what makes that true rather than
 # assumed, because the alternative is discovering a bad action name halfway
 # into a match with an input already sent.
-SUPPORTED_KINDS = frozenset({"click", "key"})
+SUPPORTED_KINDS = frozenset({"click", "key", "sequence"})
 
 
 # Declared here rather than imported from `runner`: that module pulls in the
@@ -46,6 +47,14 @@ class PilotRecorder(Protocol):
     def screenshot(self, stage: str, frame: np.ndarray) -> object: ...
 
 
+@dataclass(frozen=True)
+class StateObservation:
+    state: str | None
+    source: str
+    rule_id: str | None = None
+    confidence: float = 0.0
+
+
 class CapabilityPilot:
     """The capability set with the input path attached.
 
@@ -66,6 +75,7 @@ class CapabilityPilot:
         recorder: PilotRecorder,
         *,
         state_detector: OcrStateDetector,
+        overlay_detector: OcrStateDetector | None = None,
         dispatcher: CapabilityDispatcher,
         actions: dict[str, Any],
         sleep: Callable[[float], None] = time.sleep,
@@ -82,6 +92,7 @@ class CapabilityPilot:
         self.guard = guard
         self.recorder = recorder
         self.state_detector = state_detector
+        self.overlay_detector = overlay_detector
         self.dispatcher = dispatcher
         self.actions = actions
         self.sleep = sleep
@@ -98,6 +109,28 @@ class CapabilityPilot:
         # the grace is this long.
         self.unknown_grace_s = unknown_grace_ms / 1000
 
+        # Full-frame and multi-region obstacle OCR is intentionally not part of
+        # the 300ms fast loop. It runs once before a menu action, or after an
+        # unknown screen has persisted. A positive result must repeat before it
+        # can authorize input; a negative result clears that screen visit.
+        overlay = config.overlay_ocr
+        self.overlay_guard_states = frozenset(
+            str(value) for value in overlay.get("guardStates", [])
+        )
+        self.overlay_scan_interval_s = int(overlay.get("scanIntervalMs", 900)) / 1000
+        self.overlay_unknown_grace_s = int(overlay.get("unknownGraceMs", 1500)) / 1000
+        self.overlay_unknown_retry_s = int(overlay.get("unknownRetryMs", 15000)) / 1000
+        self.overlay_active_retry_s = int(overlay.get("activeRetryMs", 3000)) / 1000
+        self.overlay_stable_observations = int(overlay.get("stableObservations", 2))
+        if self.overlay_stable_observations < 1:
+            raise ValueError("覆盖层 OCR 的 stableObservations 必须至少为 1")
+        if self.overlay_scan_interval_s <= 0:
+            raise ValueError("覆盖层 OCR 的 scanIntervalMs 必须大于 0")
+        if self.overlay_unknown_grace_s < 0:
+            raise ValueError("覆盖层 OCR 的 unknownGraceMs 不能小于 0")
+        if self.overlay_unknown_retry_s <= 0 or self.overlay_active_retry_s <= 0:
+            raise ValueError("覆盖层 OCR 的重试间隔必须大于 0")
+
         self._validate_actions()
 
         self.started = self.monotonic()
@@ -112,6 +145,14 @@ class CapabilityPilot:
         self._resolution_warned = False
         self._unknown_since: float | None = None
         self._unknown_captured = False
+        self._base_state: str | None = None
+        self._base_state_version = 0
+        self._base_unknown_since: float | None = None
+        self._overlay_checked_base_version: int | None = None
+        self._overlay_next_scan_at = 0.0
+        self._overlay_candidate: tuple[str, str, str] | None = None
+        self._overlay_candidate_count = 0
+        self._active_overlay: StateObservation | None = None
 
     def _validate_actions(self) -> None:
         """Fail before the first frame rather than mid-action.
@@ -132,8 +173,27 @@ class CapabilityPilot:
             if capability.kind == "click":
                 if not (isinstance(spec, (list, tuple)) and len(spec) == 2):
                     raise ValueError(f"动作 {capability.action} 不是一对点击坐标")
-            elif not isinstance(spec, int):
+            elif capability.kind == "key" and not isinstance(spec, int):
                 raise ValueError(f"动作 {capability.action} 不是一个扫描码")
+            elif capability.kind == "sequence":
+                self._validate_sequence(capability.action, spec)
+
+    def _validate_sequence(self, action_name: str, spec: object) -> None:
+        if not isinstance(spec, list) or not spec:
+            raise ValueError(f"动作序列 {action_name} 为空")
+        for index, raw_step in enumerate(spec, start=1):
+            if not isinstance(raw_step, dict):
+                raise ValueError(f"动作序列 {action_name} 第 {index} 步不是对象")
+            step_type = str(raw_step.get("type", ""))
+            if step_type not in {"tapKey", "wait"}:
+                raise ValueError(
+                    f"动作序列 {action_name} 第 {index} 步类型未知：{step_type}"
+                )
+            duration_ms = int(raw_step.get("durationMs", self.key_tap_ms))
+            if not 0 <= duration_ms <= 10_000:
+                raise ValueError(f"动作序列 {action_name} 第 {index} 步时长无效")
+            if step_type == "tapKey" and not isinstance(raw_step.get("scanCode"), int):
+                raise ValueError(f"动作序列 {action_name} 第 {index} 步没有扫描码")
 
     # ------------------------------------------------------------------ input
 
@@ -144,16 +204,47 @@ class CapabilityPilot:
         self.sender.release_all()
         self.recorder.log("INPUT_RELEASE_ALL", reason=reason)
 
+    def _reset_overlay_for_pause(self) -> None:
+        self._overlay_checked_base_version = None
+        self._overlay_next_scan_at = 0.0
+        self._overlay_candidate = None
+        self._overlay_candidate_count = 0
+        self._active_overlay = None
+
     def _execute(self, capability: Capability) -> dict[str, object]:
         spec = self.actions[capability.action]
         if capability.kind == "click":
             x, y = (int(value) for value in spec)
             self.sender.click(x, y)
             return {"x": x, "y": y}
-        scan_code = int(spec)
-        duration_ms = capability.hold_ms or self.key_tap_ms
-        self.sender.tap_scan_code(scan_code, duration_ms)
-        return {"scanCode": scan_code, "durationMs": duration_ms}
+        if capability.kind == "key":
+            scan_code = int(spec)
+            duration_ms = capability.hold_ms or self.key_tap_ms
+            self.sender.tap_scan_code(scan_code, duration_ms)
+            return {"scanCode": scan_code, "durationMs": duration_ms}
+
+        executed: list[dict[str, object]] = []
+        for raw_step in spec:
+            # A sequence can span several seconds. Re-check focus and abort
+            # immediately before every input, not merely before the sequence.
+            self.guard.ensure_target_foreground()
+            self.guard.ensure_not_aborted()
+            step_type = str(raw_step["type"])
+            duration_ms = int(raw_step.get("durationMs", self.key_tap_ms))
+            if step_type == "wait":
+                self.sleep(duration_ms / 1000)
+                executed.append({"type": step_type, "durationMs": duration_ms})
+                continue
+            scan_code = int(raw_step["scanCode"])
+            self.sender.tap_scan_code(scan_code, duration_ms)
+            executed.append(
+                {
+                    "type": step_type,
+                    "scanCode": scan_code,
+                    "durationMs": duration_ms,
+                }
+            )
+        return {"steps": executed}
 
     # ------------------------------------------------------------- pending
 
@@ -192,13 +283,143 @@ class CapabilityPilot:
 
     # ---------------------------------------------------------------- frame
 
-    def _observe(self, frame: np.ndarray) -> str | None:
+    def _base_observation(self, frame: np.ndarray, now: float) -> StateObservation:
         analysis = self.state_detector.analyze(frame)
         if analysis.error:
             self.counters["ocrError"] += 1
-            self.recorder.log("OCR_ERROR", error=analysis.error)
-            return None
-        state = None if analysis.decision is None else analysis.decision.state
+            self.recorder.log("OCR_ERROR", source="gameStates", error=analysis.error)
+            observation = StateObservation(None, "gameStates")
+        elif analysis.decision is None:
+            observation = StateObservation(None, "gameStates")
+        else:
+            observation = StateObservation(
+                analysis.decision.state,
+                "gameStates",
+                analysis.decision.rule_id,
+                analysis.decision.confidence,
+            )
+
+        if self._base_state_version == 0 or observation.state != self._base_state:
+            self._base_state = observation.state
+            self._base_state_version += 1
+            self._overlay_checked_base_version = None
+            self._base_unknown_since = now if observation.state is None else None
+            if self._active_overlay is not None:
+                # The page under an active overlay changed, which is the best
+                # cheap signal that a manual action or our dismissal worked.
+                self._overlay_next_scan_at = now
+            elif observation.state in self.overlay_guard_states:
+                self._overlay_next_scan_at = now
+            elif observation.state is None:
+                self._overlay_next_scan_at = now + self.overlay_unknown_grace_s
+            else:
+                self._overlay_candidate = None
+                self._overlay_candidate_count = 0
+        return observation
+
+    def _scan_overlay_detector(
+        self,
+        frame: np.ndarray,
+    ) -> tuple[StateObservation | None, bool]:
+        if self.overlay_detector is None:
+            return None, False
+        analysis = self.overlay_detector.analyze(frame)
+        decision = analysis.decision
+        self.recorder.log(
+            "OVERLAY_OCR_ANALYZED",
+            source="overlayOcr",
+            matchedRule=None if decision is None else decision.rule_id,
+            state=None if decision is None else decision.state,
+            error=analysis.error,
+        )
+        if analysis.error:
+            self.counters["overlayOcrError"] += 1
+            return None, True
+        if decision is None:
+            return None, False
+        return (
+            StateObservation(
+                decision.state,
+                "overlayOcr",
+                decision.rule_id,
+                decision.confidence,
+            ),
+            False,
+        )
+
+    def _resolve_overlay(
+        self,
+        frame: np.ndarray,
+        base: StateObservation,
+        now: float,
+    ) -> StateObservation:
+        if self.overlay_detector is None:
+            return base
+
+        guarded_visit = (
+            base.state in self.overlay_guard_states
+            and self._overlay_checked_base_version != self._base_state_version
+        )
+        unknown_due = (
+            base.state is None
+            and self._base_unknown_since is not None
+            and now - self._base_unknown_since >= self.overlay_unknown_grace_s
+        )
+        should_scan = self._active_overlay is not None or guarded_visit or unknown_due
+        if not should_scan:
+            return base
+        if now < self._overlay_next_scan_at:
+            # An active overlay remains authoritative between slow scans. A
+            # guarded menu visit that has not yet been checked stays inert.
+            return self._active_overlay or StateObservation(None, "overlayGate")
+
+        match, failed = self._scan_overlay_detector(frame)
+        finished = self.monotonic()
+        if failed:
+            self._overlay_next_scan_at = finished + self.overlay_scan_interval_s
+            return self._active_overlay or StateObservation(None, "overlayError")
+
+        if match is None:
+            self._overlay_candidate = None
+            self._overlay_candidate_count = 0
+            self._active_overlay = None
+            if base.state in self.overlay_guard_states:
+                self._overlay_checked_base_version = self._base_state_version
+            self._overlay_next_scan_at = finished + self.overlay_unknown_retry_s
+            return base
+
+        candidate = (match.source, match.state or "", match.rule_id or "")
+        if candidate == self._overlay_candidate:
+            self._overlay_candidate_count += 1
+        else:
+            self._overlay_candidate = candidate
+            self._overlay_candidate_count = 1
+        self.recorder.log(
+            "OVERLAY_CANDIDATE",
+            source=match.source,
+            state=match.state,
+            ruleId=match.rule_id,
+            observations=self._overlay_candidate_count,
+            required=self.overlay_stable_observations,
+        )
+        if self._overlay_candidate_count < self.overlay_stable_observations:
+            self._active_overlay = None
+            self._overlay_next_scan_at = finished + self.overlay_scan_interval_s
+            return StateObservation(None, "overlayCandidate")
+
+        self._active_overlay = match
+        self.counters[f"overlay:{match.state}"] += 1
+        actionable = bool(self.dispatcher.capabilities.for_state(match.state or ""))
+        retry_s = self.overlay_scan_interval_s if actionable else self.overlay_active_retry_s
+        self._overlay_next_scan_at = finished + retry_s
+        return match
+
+    def _record_observation(
+        self,
+        observation: StateObservation,
+        frame: np.ndarray,
+    ) -> str | None:
+        state = observation.state
         if state == self.observed_state:
             return state
 
@@ -214,14 +435,19 @@ class CapabilityPilot:
                 "STATE_DETECTED",
                 state=state,
                 previousState=previous,
-                source="gameStates",
-                ruleId=analysis.decision.rule_id,
-                confidence=round(analysis.decision.confidence, 4),
+                source=observation.source,
+                ruleId=observation.rule_id,
+                confidence=round(observation.confidence, 4),
                 observationVersion=self.state_version,
             )
             self.notify(f"[状态] {state}")
             self._snapshot(state, frame)
         return state
+
+    def _observe(self, frame: np.ndarray, now: float) -> tuple[str | None, str | None]:
+        base = self._base_observation(frame, now)
+        effective = self._resolve_overlay(frame, base, now)
+        return self._record_observation(effective, frame), base.state
 
     def _note_unknown(self, state: str | None, frame: np.ndarray, now: float) -> None:
         """Keep one frame of every screen that has no rule.
@@ -290,6 +516,7 @@ class CapabilityPilot:
                 # done anything to the game while the window was not ours.
                 self._release_all("FOREGROUND_LOST")
                 self.dispatcher.reset_for_pause()
+                self._reset_overlay_for_pause()
                 self.recorder.log("FOREGROUND_PAUSED")
                 self.notify("暂停：Apex 不在前台。")
             record["skipped"] = "NOT_FOREGROUND"
@@ -320,8 +547,12 @@ class CapabilityPilot:
             self.recorder.log("RESOLUTION_MISMATCH", got=[width, height], expected=list(expected))
             self.notify(f"警告：分辨率是 {width}x{height}，标定用的是 {expected[0]}x{expected[1]}。")
 
-        state = self._observe(frame)
+        state, base_state = self._observe(frame, now)
+        # Overlay OCR can take seconds. Retry windows and periodic actions must
+        # use the time after that work, not the stale timestamp from frame grab.
+        now = self.monotonic()
         record["state"] = state
+        record["baseState"] = base_state
         self._note_unknown(state, frame, now)
 
         self._settle_pending(state)

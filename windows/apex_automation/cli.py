@@ -22,7 +22,7 @@ from .control import TaskControl, TaskStopRequested
 from .control_server import LocalControlServer
 from .input_win32 import EmergencyStop, Win32InputSender, Win32SafetyGuard
 from .observer import ObservationSession
-from .ocr_obstacles import OcrObstacleDetector, RapidOcrProvider
+from .ocr_obstacles import FullFrameOcrProvider, OcrObstacleDetector, RapidOcrProvider
 from .pilot import CapabilityPilot
 from .ocr_states import OcrStateDetector
 from .recorder import RunRecorder
@@ -36,24 +36,46 @@ def _repository_path(value: object) -> Path:
     return path if path.is_absolute() else REPOSITORY_ROOT / path
 
 
-def _build_obstacle_detector(config: RunnerConfig) -> OcrObstacleDetector | None:
+def _build_obstacle_detector(
+    config: RunnerConfig,
+    provider: RapidOcrProvider | None = None,
+) -> OcrObstacleDetector | None:
     ocr = config.ocr
     if not bool(ocr.get("enabled", False)):
         return None
     rules = ocr.get("rules")
     if not rules:
         raise ValueError("OCR 已启用，但没有配置外置规则字典")
-    return OcrObstacleDetector.from_path(RapidOcrProvider(), _repository_path(rules))
+    return OcrObstacleDetector.from_path(provider or RapidOcrProvider(), _repository_path(rules))
 
 
-def _build_guided_detector(config: RunnerConfig) -> OcrStateDetector | None:
+def _build_guided_detector(
+    config: RunnerConfig,
+    provider: RapidOcrProvider | None = None,
+) -> OcrStateDetector | None:
     guided = config.guided_ocr
     if not bool(guided.get("enabled", False)):
         return None
     rules = guided.get("rules")
     if not rules:
         raise ValueError("教程 OCR 已启用，但没有配置状态字典")
-    return OcrStateDetector.from_path(RapidOcrProvider(), _repository_path(rules))
+    return OcrStateDetector.from_path(provider or RapidOcrProvider(), _repository_path(rules))
+
+
+def _build_overlay_detector(
+    config: RunnerConfig,
+    provider: RapidOcrProvider | None = None,
+) -> OcrStateDetector | None:
+    overlay = config.overlay_ocr
+    if not bool(overlay.get("enabled", False)):
+        return None
+    rules = overlay.get("rules")
+    if not rules:
+        raise ValueError("覆盖层 OCR 已启用，但没有配置状态字典")
+    return OcrStateDetector.from_path(
+        FullFrameOcrProvider(provider or RapidOcrProvider()),
+        _repository_path(rules),
+    )
 
 
 def validate(config_path: Path) -> int:
@@ -353,21 +375,100 @@ def run_play(config_path: Path, *, countdown: int, duration_s: float | None) -> 
 
     payload = json.loads(_repository_path(config.capability_set).read_text(encoding="utf-8"))
     capabilities = CapabilitySet.from_payload(payload)
+    ocr_provider = RapidOcrProvider()
     state_detector = OcrStateDetector.from_path(
-        RapidOcrProvider(), _repository_path(config.game_states["rules"])
+        ocr_provider, _repository_path(config.game_states["rules"])
+    )
+    overlay_detector = _build_overlay_detector(config, ocr_provider)
+    safety_rules = config.overlay_ocr.get("safetyRules")
+    safety_detector = (
+        None
+        if not safety_rules
+        else OcrObstacleDetector.from_path(ocr_provider, _repository_path(safety_rules))
     )
     # Every state a capability claims to handle has to be one the detector can
     # actually produce, or that capability is dead configuration that looks
     # alive. Checked here because this is the first command that acts on it.
+    known_states = set(state_detector.states)
+    if overlay_detector is not None:
+        known_states.update(overlay_detector.states)
     unknown = {
         state
         for capability in capabilities.capabilities
         for state in capability.states
-        if state not in state_detector.states
+        if state not in known_states
     }
     if unknown:
         print(f"能力集引用了识别不出的画面：{sorted(unknown)}", file=sys.stderr)
         return 2
+
+    guard_states = {str(value) for value in config.overlay_ocr.get("guardStates", [])}
+    invalid_guards = guard_states - state_detector.states
+    if invalid_guards:
+        print(f"覆盖层守卫引用了快速识别不存在的画面：{sorted(invalid_guards)}", file=sys.stderr)
+        return 2
+    if overlay_detector is not None:
+        handled_states = {
+            state
+            for capability in capabilities.capabilities
+            for state in capability.states
+        }
+        manual_states = {str(value) for value in config.overlay_ocr.get("manualStates", [])}
+        invalid_manual_states = manual_states - overlay_detector.states
+        if invalid_manual_states:
+            print(
+                f"人工覆盖层状态不在识别字典里：{sorted(invalid_manual_states)}",
+                file=sys.stderr,
+            )
+            return 2
+        unhandled = overlay_detector.states - handled_states - manual_states
+        if unhandled:
+            print(f"覆盖层状态既没有能力也未声明人工处理：{sorted(unhandled)}", file=sys.stderr)
+            return 2
+
+    # The old obstacle dictionary still owns the safety decision: only rules
+    # marked safePage and restricted to the keyboard allowlist can load. The
+    # capability set owns dispatch/retry semantics. Pin their shared fields so
+    # the two sources cannot silently drift apart.
+    if safety_detector is not None:
+        if overlay_detector is None:
+            print("配置了覆盖层安全字典，但没有启用覆盖层识别", file=sys.stderr)
+            return 2
+        overlay_rules = {
+            rule.state: rule for rule in overlay_detector.rules if rule.enabled
+        }
+        for rule in safety_detector.rules:
+            if not rule.enabled:
+                continue
+            overlay_rule = overlay_rules.get(rule.state)
+            if overlay_rule is None:
+                print(f"安全清障状态没有接入覆盖层识别：{rule.state}", file=sys.stderr)
+                return 2
+            safety_requirements = [
+                (item.region, item.any_terms, item.all_terms, item.min_confidence)
+                for item in rule.requirements
+            ]
+            overlay_requirements = [
+                (item.region, item.any_terms, item.all_terms, item.min_confidence)
+                for item in overlay_rule.requirements
+            ]
+            if overlay_requirements != safety_requirements:
+                print(f"覆盖层规则与安全清障字典不一致：{rule.state}", file=sys.stderr)
+                return 2
+            matches = [
+                capability
+                for capability in capabilities.for_state(rule.state)
+                if capability.action == rule.action.name
+                and capability.kind == rule.action.kind
+                and capability.confirm_ms == rule.action.confirm_ms
+                and capability.max_attempts == rule.action.max_attempts
+            ]
+            if not matches:
+                print(
+                    f"清障规则 {rule.rule_id} 与能力集动作不一致：{rule.state}",
+                    file=sys.stderr,
+                )
+                return 2
 
     guard = Win32SafetyGuard(config.environment["foregroundExecutables"])
     sender = Win32InputSender(
@@ -398,6 +499,7 @@ def run_play(config_path: Path, *, countdown: int, duration_s: float | None) -> 
                 guard,
                 recorder,
                 state_detector=state_detector,
+                overlay_detector=overlay_detector,
                 dispatcher=CapabilityDispatcher(capabilities),
                 actions=dict(payload.get("actions", {})),
                 notify=print,

@@ -23,5 +23,24 @@
     "enabled": true,
     "rules": "windows/config/game-states.zh-CN.json"
   },
+  "overlayOcr": {
+    "enabled": true,
+    "rules": "windows/config/play-overlays.zh-CN.json",
+    "safetyRules": "windows/config/obstacle-rules.zh-CN.json",
+    "stableObservations": 2,
+    "scanIntervalMs": 900,
+    "unknownGraceMs": 1500,
+    "unknownRetryMs": 15000,
+    "activeRetryMs": 3000,
+    "manualStates": ["AUTH_REQUIRED"],
+    "guardStates": [
+      "LOBBY_SELECT_REQUIRED",
+      "LOBBY_READY_TRAINING",
+      "LOBBY_READY_OTHER",
+      "LOBBY_READY_UNRANKED",
+      "MODE_PANEL_TARGET_VISIBLE",
+      "MODE_PANEL_TARGET_HOVERED"
+    ]
+  },
   "capabilitySet": "windows/config/enter-game.zh-CN.json"
 }

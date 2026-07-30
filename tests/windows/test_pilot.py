@@ -22,6 +22,7 @@ from apex_automation.pilot import CapabilityPilot
 PLAY_CONFIG = REPOSITORY_ROOT / "windows" / "config" / "play-2560x1440.zh-CN.json"
 CAPABILITIES = REPOSITORY_ROOT / "windows" / "config" / "enter-game.zh-CN.json"
 STATES = REPOSITORY_ROOT / "windows" / "config" / "game-states.zh-CN.json"
+OVERLAYS = REPOSITORY_ROOT / "windows" / "config" / "play-overlays.zh-CN.json"
 
 FRAME = np.zeros((1440, 2560, 3), dtype=np.uint8)
 
@@ -31,8 +32,11 @@ class ScriptedProvider:
 
     def __init__(self) -> None:
         self.readings: dict[str, tuple[str, float]] = {}
+        self.error: Exception | None = None
 
     def read(self, frame: np.ndarray, region) -> tuple[OcrToken, ...]:
+        if self.error is not None:
+            raise self.error
         item = self.readings.get(region.name)
         return () if item is None else (OcrToken(item[0], item[1]),)
 
@@ -93,10 +97,12 @@ class PilotTest(unittest.TestCase):
         self.temporary = tempfile.TemporaryDirectory()
         self.addCleanup(self.temporary.cleanup)
         self.provider = ScriptedProvider()
+        self.overlay_provider = ScriptedProvider()
         self.sender = FakeSender()
         self.guard = FakeGuard()
         self.recorder = FakeRecorder(Path(self.temporary.name))
         self.now = 0.0
+        self.sleeps: list[float] = []
         self.payload = json.loads(CAPABILITIES.read_text(encoding="utf-8"))
         self.pilot = CapabilityPilot(
             load_config(PLAY_CONFIG),
@@ -107,12 +113,30 @@ class PilotTest(unittest.TestCase):
             state_detector=OcrStateDetector.from_path(self.provider, STATES),
             dispatcher=CapabilityDispatcher(CapabilitySet.from_payload(self.payload)),
             actions=dict(self.payload["actions"]),
-            sleep=lambda _: None,
+            sleep=self.sleeps.append,
+            monotonic=lambda: self.now,
+        )
+
+    def enable_overlays(self) -> None:
+        self.pilot = CapabilityPilot(
+            load_config(PLAY_CONFIG),
+            FakeSource(),
+            self.sender,
+            self.guard,
+            self.recorder,
+            state_detector=OcrStateDetector.from_path(self.provider, STATES),
+            overlay_detector=OcrStateDetector.from_path(self.overlay_provider, OVERLAYS),
+            dispatcher=CapabilityDispatcher(CapabilitySet.from_payload(self.payload)),
+            actions=dict(self.payload["actions"]),
+            sleep=self.sleeps.append,
             monotonic=lambda: self.now,
         )
 
     def screen(self, **readings: tuple[str, float]) -> None:
         self.provider.readings = dict(readings)
+
+    def overlay_screen(self, text: str = "", confidence: float = 1.0) -> None:
+        self.overlay_provider.readings = {} if not text else {"fullFrame": (text, confidence)}
 
     def test_the_shipped_capability_set_is_executable_as_written(self) -> None:
         # Construction validates every action name and kind, so reaching this
@@ -140,8 +164,8 @@ class PilotTest(unittest.TestCase):
         self.assertEqual(self.sender.calls, [])
 
     def test_a_screen_with_no_rule_keeps_one_frame_of_itself(self) -> None:
-        # The post-match confirm page is the current example: four capture
-        # sessions never recorded it, so the runner has to bring it back.
+        # Future game updates can introduce a page no rule knows yet, so the
+        # runner must preserve one frame without clicking it blindly.
         self.screen()
         self.pilot.step()
         self.assertNotIn("SCREENSHOT_SAVED", self.recorder.names())
@@ -172,6 +196,76 @@ class PilotTest(unittest.TestCase):
         self.screen(lobbyPrimaryButton=("取消", 1.0))
         record = self.pilot.step()
         self.assertEqual(record["state"], "LOBBY_QUEUEING")
+        self.assertEqual(record["decision"]["reason"], "NO_CAPABILITY")
+        self.assertEqual(self.sender.calls, [])
+
+    def test_a_known_guide_overlay_blocks_the_lobby_and_uses_its_own_click(self) -> None:
+        self.enable_overlays()
+        # The underlying lobby still reads 训练 + 选择 under this overlay. The
+        # old linear runner clicked through it; overlay OCR must win first.
+        self.screen(lobbyPrimaryButton=("选择", 1.0), lobbyModeName=("训练", 1.0))
+        self.overlay_screen("账户 账号经验值 奖励进度 继续")
+
+        first = self.pilot.step()
+        self.assertIsNone(first["state"])
+        self.assertEqual(self.sender.calls, [])
+
+        self.now = 1.0
+        second = self.pilot.step()
+        self.assertEqual(second["state"], "GUIDE_ACCOUNT")
+        self.assertEqual(self.sender.calls, [("click", 610, 150)])
+
+    def test_a_generic_activity_page_is_stable_before_escape_is_sent(self) -> None:
+        self.enable_overlays()
+        self.screen()
+        self.overlay_provider.readings = {
+            "titleCenter": ("最新活动", 0.99),
+            "bottomRight": ("ESC 返回", 0.99),
+        }
+
+        self.pilot.step()
+        self.now = 1.5
+        candidate = self.pilot.step()
+        self.assertIsNone(candidate["state"])
+        self.assertEqual(self.sender.calls, [])
+
+        self.now = 2.5
+        confirmed = self.pilot.step()
+        self.assertEqual(confirmed["state"], "GENERIC_MODAL")
+        self.assertEqual(self.sender.calls, [("tap", 1, 80)])
+
+    def test_a_clear_overlay_scan_allows_the_lobby_action_immediately(self) -> None:
+        self.enable_overlays()
+        self.screen(lobbyPrimaryButton=("准备", 1.0), lobbyModeName=("未上榜", 1.0))
+
+        record = self.pilot.step()
+        self.assertEqual(record["state"], "LOBBY_READY_UNRANKED")
+        self.assertEqual(self.sender.calls, [("click", 1280, 1295)])
+
+    def test_overlay_ocr_failure_blocks_the_underlying_lobby_action(self) -> None:
+        self.enable_overlays()
+        self.screen(lobbyPrimaryButton=("准备", 1.0), lobbyModeName=("未上榜", 1.0))
+        self.overlay_provider.error = RuntimeError("offline OCR unavailable")
+
+        record = self.pilot.step()
+        self.assertIsNone(record["state"])
+        self.assertEqual(record["decision"]["reason"], "NO_STATE")
+        self.assertEqual(self.sender.calls, [])
+        error = next(payload for event, payload in self.recorder.events if event == "OVERLAY_OCR_ANALYZED")
+        self.assertEqual(error["source"], "overlayOcr")
+        self.assertIn("offline OCR unavailable", str(error["error"]))
+
+    def test_auth_overlay_is_recognised_but_never_automated(self) -> None:
+        self.enable_overlays()
+        self.screen()
+        self.overlay_screen("双重身份登录 输入您的代码 输入6位数代码")
+
+        self.pilot.step()
+        self.now = 1.5
+        self.pilot.step()
+        self.now = 2.5
+        record = self.pilot.step()
+        self.assertEqual(record["state"], "AUTH_REQUIRED")
         self.assertEqual(record["decision"]["reason"], "NO_CAPABILITY")
         self.assertEqual(self.sender.calls, [])
 
@@ -210,6 +304,34 @@ class PilotTest(unittest.TestCase):
         self.assertEqual(rejected["capability"], "lobby-start-match")
         self.assertEqual(rejected["evidenceState"], "POST_MATCH_SUMMARY")
 
+    def test_post_match_taps_tab_then_holds_space_before_waiting_for_lobby(self) -> None:
+        self.screen(postMatchHints=("SPACE继续 TAB返回大厅", 0.97))
+        record = self.pilot.step()
+
+        self.assertEqual(record["state"], "POST_MATCH_SUMMARY")
+        self.assertEqual(
+            self.sender.calls,
+            [("tap", 15, 80), ("tap", 57, 2000)],
+        )
+        self.assertEqual(self.sleeps, [0.8])
+        sent = next(p for e, p in self.recorder.events if e == "ACTION_SENT")
+        self.assertEqual(sent["capability"], "post-match-return-lobby")
+        self.assertEqual(
+            sent["steps"],
+            [
+                {"type": "tapKey", "scanCode": 15, "durationMs": 80},
+                {"type": "wait", "durationMs": 800},
+                {"type": "tapKey", "scanCode": 57, "durationMs": 2000},
+            ],
+        )
+
+        self.now = 4.0
+        self.screen(lobbyPrimaryButton=("准备", 1.0), lobbyModeName=("未上榜", 1.0))
+        self.pilot.step()
+        confirmed = next(p for e, p in self.recorder.events if e == "ACTION_CONFIRMED")
+        self.assertEqual(confirmed["capability"], "post-match-return-lobby")
+        self.assertEqual(confirmed["evidenceState"], "LOBBY_READY_UNRANKED")
+
     def test_a_capability_may_hold_its_key_longer_than_the_default_tap(self) -> None:
         # An 80ms tap of this same scan code crouches in the firing range but
         # did nothing on the dropship, so the duration has to be per action.
@@ -218,6 +340,7 @@ class PilotTest(unittest.TestCase):
         detach = next(
             c for c in self.pilot.dispatcher.capabilities.capabilities if c.id == "dropship-detach"
         )
+        self.assertEqual(detach.hold_ms, 2000)
         self.assertEqual(self.sender.calls, [("tap", 29, detach.hold_ms)])
         self.assertGreater(detach.hold_ms, self.pilot.key_tap_ms)
 

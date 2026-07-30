@@ -27,6 +27,10 @@ def normalize_ocr_text(value: str) -> str:
 class OcrToken:
     text: str
     confidence: float
+    # Absolute coordinates when the provider read a complete frame. Most
+    # callers only need text, so this stays optional and preserves the small
+    # fake providers used by the state-machine tests.
+    roi: Roi | None = None
 
     @property
     def normalized(self) -> str:
@@ -66,6 +70,10 @@ class OcrProvider(Protocol):
     def read(self, frame: np.ndarray, region: Region) -> tuple[OcrToken, ...]: ...
 
 
+class PositionedOcrProvider(Protocol):
+    def read_with_boxes(self, frame: np.ndarray) -> tuple[OcrToken, ...]: ...
+
+
 class RapidOcrProvider:
     """Lazy RapidOCR adapter so template-only startup stays inexpensive."""
 
@@ -100,6 +108,67 @@ class RapidOcrProvider:
             OcrToken(str(text), float(score))
             for text, score in zip(texts, scores, strict=False)
         )
+
+    def read_with_boxes(self, frame: np.ndarray) -> tuple[OcrToken, ...]:
+        """Read a complete frame and retain each text block's coordinates."""
+        result = self._get_engine()(frame)
+        texts = tuple(getattr(result, "txts", ()) or ())
+        scores = tuple(getattr(result, "scores", ()) or ())
+        raw_boxes = getattr(result, "boxes", None)
+        boxes = () if raw_boxes is None else tuple(raw_boxes)
+        if len(texts) != len(scores) or len(texts) != len(boxes):
+            raise RuntimeError("RapidOCR 没有为每个文字块返回位置，不能安全复用全屏结果")
+
+        tokens: list[OcrToken] = []
+        for text, score, box in zip(texts, scores, boxes, strict=True):
+            points = np.asarray(box, dtype=float).reshape(-1, 2)
+            if not len(points):
+                raise RuntimeError("RapidOCR 返回了空文字位置")
+            x1 = int(np.floor(points[:, 0].min()))
+            y1 = int(np.floor(points[:, 1].min()))
+            x2 = int(np.ceil(points[:, 0].max()))
+            y2 = int(np.ceil(points[:, 1].max()))
+            if x1 >= x2 or y1 >= y2:
+                raise RuntimeError("RapidOCR 返回了无效文字位置")
+            tokens.append(OcrToken(str(text), float(score), (x1, y1, x2, y2)))
+        return tuple(tokens)
+
+
+class FullFrameOcrProvider:
+    """Run detection once, then preserve region semantics by token position.
+
+    The play overlay dictionary mixes full-screen rules with the older safety
+    rules' title/button regions. Running RapidOCR once per named crop costs
+    several seconds each. This adapter detects the whole frame once and then
+    serves every region from the positioned token list, so performance does
+    not require loosening the safety dictionary's spatial evidence.
+    """
+
+    def __init__(self, provider: PositionedOcrProvider) -> None:
+        self.provider = provider
+        self._frame: np.ndarray | None = None
+        self._tokens: tuple[OcrToken, ...] | None = None
+
+    def begin_frame(self, frame: np.ndarray) -> None:
+        self._frame = frame
+        self._tokens = None
+
+    def read(self, frame: np.ndarray, region: Region) -> tuple[OcrToken, ...]:
+        if self._frame is not frame or self._tokens is None:
+            self._tokens = self.provider.read_with_boxes(frame)
+            self._frame = frame
+
+        x1, y1, x2, y2 = region.roi
+        selected: list[OcrToken] = []
+        for token in self._tokens:
+            if token.roi is None:
+                raise RuntimeError("全屏 OCR 文字块缺少位置，拒绝放宽区域证据")
+            tx1, ty1, tx2, ty2 = token.roi
+            center_x = (tx1 + tx2) / 2
+            center_y = (ty1 + ty2) / 2
+            if x1 <= center_x < x2 and y1 <= center_y < y2:
+                selected.append(token)
+        return tuple(selected)
 
 
 @dataclass(frozen=True)

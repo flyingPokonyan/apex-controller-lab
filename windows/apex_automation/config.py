@@ -38,6 +38,7 @@ class RunnerConfig:
     guided_offline_cases: tuple[tuple[Path, str], ...]
     ocr: dict[str, Any]
     guided_ocr: dict[str, Any]
+    overlay_ocr: dict[str, Any]
     task: dict[str, Any]
     control_api: dict[str, Any]
     game_states: dict[str, Any]
@@ -89,6 +90,7 @@ def load_config(path: Path | str = DEFAULT_CONFIG_PATH) -> RunnerConfig:
         guided_offline_cases=guided_offline_cases,
         ocr=dict(payload.get("ocr", {})),
         guided_ocr=dict(payload.get("guidedOcr", {})),
+        overlay_ocr=dict(payload.get("overlayOcr", {})),
         task=dict(payload.get("task", {})),
         control_api=dict(payload.get("controlApi", {})),
         game_states=dict(payload.get("gameStates", {})),

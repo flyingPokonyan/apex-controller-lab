@@ -17,13 +17,22 @@
 第一轮采集只按"有哪些画面"列清单，漏了第二类，结果是做到某条能力才发现少东西。
 以后每加一条能力，先在这张表里补一行，再决定要不要采集。
 
-## 现有能力（`windows/config/enter-game.zh-CN.json`）
+## 现有 20 条能力（`windows/config/enter-game.zh-CN.json`）
 
 | 优先级 | 能力 | 触发画面 | 动作 | 分级 | 后置画面 |
 |---|---|---|---|---|---|
+| 120 | dismiss-level-up | 升级语义 + 继续/跳过 | `ENTER` | idempotent | — |
+| 120 | dismiss-reward | 奖励语义 + 继续/领取 | `ENTER` | idempotent | — |
+| 120 | dismiss-announcement | 公告/新闻/活动 + 关闭/返回 | `ESC` | idempotent | — |
+| 115 | dismiss-news-welcome | NEWS_WELCOME | `ESC` | idempotent | — |
+| 115 | dismiss-news-memorial | NEWS_MEMORIAL | `ESC` | idempotent | — |
+| 110 | guide-account-continue | GUIDE_ACCOUNT | 点既有「继续」坐标 | idempotent | — |
+| 110 | guide-friends-continue | GUIDE_FRIENDS | 点既有「继续」坐标 | idempotent | — |
+| 110 | guide-settings-continue | GUIDE_SETTINGS | 点既有「继续」坐标 | idempotent | — |
+| 110 | guide-progress-continue | GUIDE_PROGRESS | 点既有「继续」坐标 | idempotent | — |
 | 90 | dismiss-climb-settings | CLIMB_SETTINGS_MODAL | 点「保持原样」 | idempotent | — |
 | 80 | title-continue | CONTINUE | 点「继续」 | idempotent | — |
-| 70 | post-match-return-lobby | POST_MATCH_SUMMARY | `TAB` | idempotent | 三种大厅态 / 攀爬弹窗 |
+| 70 | post-match-return-lobby | POST_MATCH_SUMMARY | `TAB` → 等待 800ms → 长按 `SPACE` 2000ms | idempotent | 三种大厅态 / 攀爬弹窗 |
 | 60 | lobby-open-mode-panel | LOBBY_SELECT_REQUIRED | 点主按钮（写着「选择」） | idempotent | 模式面板两态 |
 | 60 | lobby-change-mode | LOBBY_READY_TRAINING、LOBBY_READY_OTHER | 点左下模式卡片 | idempotent | 模式面板两态 |
 | 55 | mode-panel-focus-target | MODE_PANEL_TARGET_VISIBLE | 点未上榜卡片 | idempotent | 悬停态 / 大厅 |
@@ -33,7 +42,25 @@
 | 40 | dropship-launch | LAUNCH_READY | `E` | commit | FREEFALL / IN_MATCH_ALIVE |
 | 10 | in-match-melee | IN_MATCH_ALIVE | `V`，1–5 秒 | periodic | 周期动作无后置 |
 
-每条的触发帧和后置帧都已具备。
+欢迎、纪念和四个导览直接复用 `first-tutorial` 已有全屏样本与坐标；升级、奖励和通用
+公告复用原来的外置安全清障字典。后三类是双区域语义门控，不是假装有一张当前版本的
+精确页面模板；融合已经完成，仍需在下一次真实冷启动里确认游戏文案没有漂移。
+
+## 清障为什么分两层、只走一个调度器
+
+大厅、跳伞、近战继续用 12 个紧致单行 ROI，每 300ms 扫一次；欢迎页、活动页和导览
+需要全屏或多区域文字检测，实测单次可能要数秒，不能硬塞进这个热循环。`play` 因而采用：
+
+- 准备点击大厅/模式面板前，先做一次低频覆盖层扫描；未知画面持续 1.5 秒后也会扫描；
+- 覆盖层阳性必须连续两次一致才成为可执行状态；OCR 报错时关闭门闸，不点击底下大厅；
+- 专用欢迎/导览规则先匹配，通用公告/奖励规则兜底；验证码只识别并停住，绝不填写；
+- 10 类覆盖层共用一次全屏 OCR，再按文字块坐标过滤出标题区、底部和右下角；旧安全
+  字典在启动时逐项校验区域、文案、阈值和动作合同，不再额外扫描三个大区域；
+- 识别层只回答「是什么画面」，20 条动作全部交给同一个 `CapabilityDispatcher`，所以
+  重试预算、后置确认、环检测和输入记录只有一套。
+
+这比把旧 `start`、`tutorial` 和新 `play` 三个执行器串起来更可靠：旧素材被复用，旧的
+第二套动作引擎没有被带回来，也不会在覆盖层下面误点大厅的「准备」。
 
 ## 排队中（大厅按下「准备」之后）
 
@@ -149,19 +176,15 @@
 
 | 提示 | 实际要求 | 现状 |
 |---|---|---|
-| 跳伞机「LCTRL 单独发射」 | 长按 | `dropship-detach` 设了 `holdMs: 800`，**未实测** |
-| 结算页 TAB 之后弹出的页 | **长按 SPACE 才真的返回大厅** | **还没有能力，也没有证据帧** |
+| 跳伞机「LCTRL 单独发射」 | 长按 | `dropship-detach` 设了 `holdMs: 2000`，**未实测** |
+| 结算返回大厅 | `TAB` 后长按 `SPACE` | 已实现完整序列，**未实跑** |
 
 所以按键能力有了自己的 `holdMs`：默认的 `keyTapMs` 是给菜单点按用的，长按提示必须
 逐条声明。
 
-第二行是当前 `post-match-return-lobby` 的缺口：它只发 TAB，而 TAB 之后还有一页要
-长按 SPACE。四份采集里都没有这一页——`长按` 在数据里只出现在跳伞 HUD 的
-「长按5表情菜单」「长按…进入自由视角」。
-
-为了不再靠人去复现，`CapabilityPilot` 现在会**给自己不认识的画面留证**：状态连续
-8 秒是 `None` 就存一帧，每段只存一次（读条也会被拍到，这就是宽限给到 8 秒的原因）。
-下次跑到结算页，那一页会自己出现在 `screenshots/` 里。
+`post-match-return-lobby` 以已识别的结算页作为唯一触发条件，依次轻按 `TAB` 80ms、
+等待 800ms、长按 `SPACE` 2000ms，再以大厅态或攀爬设置弹窗确认完成。这个顺序来自
+操作者的实际操作确认，不再等待中间页截图；`SPACE` 也不会被注册成未知画面的通用动作。
 
 ## 闭环怎么跑起来的
 
@@ -191,20 +214,6 @@
 
 `toggle` 的安全性也是端到端验过的：跳伞机画面停着不动时，`LCTRL` 只会按一次，
 之后走 `ATTEMPTS_EXHAUSTED` 暂停，而不是按第二下把自己送回小队。
-
-## 有意不做能力的画面
-
-能自动过去的画面就让它自动过。能力越少，越不容易在计划外的画面上出错。
-
-| 画面 | 为什么不做 |
-|---|---|
-| 排队中 | 那上面只有「取消」，任何输入都只会退出刚加入的队列 |
-| 英雄选择 | 超时自动选，不需要输入 |
-| 娱乐模式开局选武器 | 实测超时会自动分配一套，照样进对局 |
-| 控制模式选出生点 | 同上，预计也会超时自动分配（待确认） |
-| 观战 / 死亡回放 | 此时任何输入都无意义；近战闸门刻意不覆盖它 |
-| 登录过场视频 | 约 60 秒后自行结束，主动长按空格探测不划算 |
-| 断连回到继续页 | 继续页已有能力，断连恢复是它的副产品 |
 
 ## 控制模式全程不被识别
 
@@ -247,17 +256,17 @@
 
 | 缺什么 | 挡住什么 |
 |---|---|
-| **结算页按 TAB 之后那一页** | `post-match-return-lobby` 只发了 TAB 就以为完事了；那一页要长按 SPACE。这是目前唯一挡住「一局接一局」的一环 |
+| **完整结算返回序列的真机后置确认** | 动作已经是 `TAB → 长按 SPACE`；仍需下一次 `play` 取得 `ACTION_CONFIRMED → LOBBY_*` |
 | **点模式卡片之后的那一帧** | 不挡运行，但 `lobby-change-mode` 的坐标目前只有量出来的位置，没有「点了确实开面板」的证据帧 |
 | **控制模式死亡 / 重生选点帧** | 控制模式里的「还活着」闸门，也就是 `in-match-melee` |
-| **登录后那串页面**（公告、纪念、欢迎、导览、奖励、升级） | 冷启动闭环。三次采集全是从大厅开始录的，这串页面一次都没进过样本 |
+| **融合后的冷启动清障串实跑** | 欢迎、纪念、四导览已有旧样本；公告、奖励、升级已有安全语义规则，现在缺的是在当前 `play` 路径上的整串实测，不是再录一套相同素材 |
 | 模式面板「自由式」栏的实时帧 | 选择娱乐模式 |
 | 娱乐模式大厅的模式名 | `lobby-ready-entertainment` |
 | 娱乐模式结算页 | 娱乐模式的 post-match（可能与匹配不同） |
 
-第二行是目前唯一影响「能不能全自动」的一条：`play` 从大厅起跑没问题，但从桌面
-双击 Apex 起跑会停在登录后的公告页上等人。要补它，得在**游戏启动那一刻**就开着
-`observe`，而不是进了大厅再开。
+已知冷启动页面已经不会因为“只存在于 tutorial”而留在 `play` 外面。下一次直接从
+「继续」起跑即可同时验证它们；若当前版本多出新页面，低频 OCR 不会命中，8 秒后
+`play` 会自动把全屏帧留在 `screenshots/`，仍然不需要另开一次 `observe`。
 
 无法主动制造、碰到再补：断连弹窗、匹配惩罚提示（必须归入人工暂停）。
 

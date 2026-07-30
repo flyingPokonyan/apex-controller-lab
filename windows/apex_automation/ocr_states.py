@@ -147,6 +147,12 @@ class OcrStateDetector:
         return True, min(matched_confidences or [token.confidence for token in eligible])
 
     def analyze(self, frame: np.ndarray) -> OcrStateAnalysis:
+        begin_frame = getattr(self.provider, "begin_frame", None)
+        if callable(begin_frame):
+            # Batch providers may reuse one expensive full-frame detection for
+            # several logical regions, but the cache must end with this
+            # analysis even if the capture backend reuses the same ndarray.
+            begin_frame(frame)
         required_regions = {
             requirement.region
             for rule in self.rules
