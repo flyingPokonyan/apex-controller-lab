@@ -261,7 +261,7 @@
     {
       "id": "dropship-launch",
       "priority": 40,
-      "states": ["LAUNCH_READY"],
+      "states": ["LAUNCH_READY", "DROPSHIP_SOLO_JUMPMASTER"],
       "action": "launchScanCode",
       "kind": "key",
       "actionClass": "commit",

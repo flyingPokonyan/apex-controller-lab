@@ -104,6 +104,16 @@
       ],
       "singleLine": true
     },
+    "dropshipLaunchPrompt": {
+      "roi": [
+        1150,
+        1196,
+        1420,
+        1252
+      ],
+      "singleLine": true,
+      "_note": "跳伞机提示的上面一行，也就是 E 那一行；下面一行是 LCTRL 那行（dropshipPrompt），两个框不重叠。实测这一行跟队时读到「建议」、脱离后读到「发射」、自由落体和对局里读到「长按…进入自由视角」。不看 E 的按键图标——它会被识别成「日」。"
+    },
     "freefallSpeedLabel": {
       "roi": [
         615,
@@ -207,6 +217,19 @@
           "region": "freefallSpeedLabel",
           "all": [
             "速度"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "dropship-solo-jumpmaster",
+      "state": "DROPSHIP_SOLO_JUMPMASTER",
+      "_note": "关掉「补满」之后是一人小队，跳伞指挥就是自己：没有小队可脱离，所以 LCTRL 那一行根本不出现，DROPSHIP_FOLLOWING 和 LAUNCH_READY 两条都不成立，运行器全程认不出跳伞机，只能等游戏在航线尽头强制投放。20260730-232551 实测这一段有 142 秒无状态。\n判据是 E 那一行读到「发射」，靠排在 dropship-launch-ready 和 freefall 之后来表达「不是脱离后的可发射态，也不是自由落体」——先匹配先赢是这套规则表达「非」的唯一手段。\n⚠️ 「发射」这个词取自 05-solo-launch-ready.png（脱离后的可发射态），**一人小队指挥自己看到的到底是不是这两个字还没有实测帧**。认不出的话结果和现在一样（等强制投放），不会误动作；下一次 play 会自动把那一帧存下来对照。",
+      "requirements": [
+        {
+          "region": "dropshipLaunchPrompt",
+          "all": [
+            "发射"
           ]
         }
       ]

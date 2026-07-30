@@ -17,6 +17,7 @@ from apex_automation.config import load_config
 from apex_automation.ocr_obstacles import OcrToken
 from apex_automation.ocr_states import OcrStateDetector
 from apex_automation.pilot import CapabilityPilot
+from apex_automation.safety import ForegroundLost
 
 
 PLAY_CONFIG = REPOSITORY_ROOT / "windows" / "config" / "play-2560x1440.zh-CN.json"
@@ -191,6 +192,78 @@ class PilotTest(unittest.TestCase):
         self.now = 80.0
         self.pilot.step()
         self.assertEqual(self.recorder.names().count("SCREENSHOT_SAVED"), 3)
+
+    def test_one_unknown_stretch_keeps_a_frame_of_each_screen_in_it(self) -> None:
+        # 20260730-232551 spent 142 seconds in a single unknown stretch that
+        # ran from the pre-match lobby through legend select and loading to
+        # the whole dropship flight. Keeping only its first frame lost the
+        # one screen that actually needed a rule.
+        frames = {"current": np.zeros((1440, 2560, 3), dtype=np.uint8)}
+
+        class ShiftingSource:
+            def grab(self) -> np.ndarray:
+                return frames["current"]
+
+        self.pilot.source = ShiftingSource()
+        self.screen()
+        self.pilot.step()
+        self.now = 20.0
+        self.pilot.step()
+        self.assertEqual(self.recorder.names().count("SCREENSHOT_SAVED"), 1)
+
+        # Same screen a sample later: nothing new to keep.
+        self.now = 45.0
+        self.pilot.step()
+        self.assertEqual(self.recorder.names().count("SCREENSHOT_SAVED"), 1)
+
+        # A different screen inside the same stretch must be kept.
+        frames["current"] = np.full((1440, 2560, 3), 200, dtype=np.uint8)
+        self.now = 70.0
+        self.pilot.step()
+        self.assertEqual(self.recorder.names().count("SCREENSHOT_SAVED"), 2)
+        self.assertEqual(self.pilot.counters["unknownScreens"], 1)
+        self.assertEqual(self.pilot.counters["unknownSamples"], 1)
+
+    def test_losing_the_foreground_mid_action_pauses_instead_of_ending_the_run(self) -> None:
+        # 20260730-232551 finished as FAILED with no summary because alt-tab
+        # between the frame's foreground check and the send raised out of the
+        # loop. Handing the window back has to be enough to carry on.
+        self.screen(lobbyPrimaryButton=("准备", 1.0), lobbyModeName=("未上榜", 1.0))
+        self.guard.ensure_target_foreground = self._raise_foreground_lost
+
+        record = self.pilot.step()
+
+        self.assertEqual(record["skipped"], "NOT_FOREGROUND")
+        self.assertIn("FOREGROUND_PAUSED", self.recorder.names())
+        self.assertNotIn(("click", 1280, 1295), self.sender.calls)
+        self.assertIsNone(self.pilot.dispatcher.pending)
+
+    @staticmethod
+    def _raise_foreground_lost() -> None:
+        raise ForegroundLost("前台程序不是 Apex")
+
+    def test_a_solo_jumpmaster_still_launches_itself(self) -> None:
+        # Without fill the squad is one player, so nobody can be followed or
+        # detached from and neither dropship state can ever match. The launch
+        # prompt is the only thing left to key on.
+        self.screen(dropshipLaunchPrompt=("发射", 0.98))
+        record = self.pilot.step()
+
+        self.assertEqual(record["state"], "DROPSHIP_SOLO_JUMPMASTER")
+        self.assertEqual(record["decision"]["capability"], "dropship-launch")
+        self.assertEqual(self.sender.calls, [("tap", 18, 80)])
+
+    def test_a_following_dropship_still_detaches_before_launching(self) -> None:
+        # The solo rule must not shadow the squad path: a followed dropship
+        # shows both lines, and LCTRL has to come first.
+        self.screen(
+            dropshipPrompt=("LCTRL单独发射", 0.91),
+            dropshipLaunchPrompt=("建议", 0.98),
+        )
+        record = self.pilot.step()
+
+        self.assertEqual(record["state"], "DROPSHIP_FOLLOWING")
+        self.assertEqual(self.sender.calls, [("tap", 29, 2000)])
 
     def test_a_queueing_lobby_waits_because_it_owns_no_capability(self) -> None:
         self.screen(lobbyPrimaryButton=("取消", 1.0))

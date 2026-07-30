@@ -12,6 +12,7 @@ import numpy as np
 from .capabilities import Capability, CapabilityDispatcher, Decision
 from .config import RunnerConfig
 from .ocr_states import OcrStateDetector
+from .safety import ForegroundLost
 
 
 # A capability set that reached this module has already been validated for
@@ -85,6 +86,8 @@ class CapabilityPilot:
         key_tap_ms: int | None = None,
         max_screenshots: int = 400,
         unknown_grace_ms: int = 8000,
+        unknown_sample_ms: int = 20_000,
+        unknown_static_epsilon: float = 0.02,
     ) -> None:
         self.config = config
         self.source = source
@@ -108,6 +111,20 @@ class CapabilityPilot:
         # captured too; one shot per episode is cheap and they are the reason
         # the grace is this long.
         self.unknown_grace_s = unknown_grace_ms / 1000
+        # One shot per episode turned out to be far too coarse. In
+        # `20260730-232551` a single unknown stretch ran 142 seconds and
+        # covered the pre-match lobby, legend select, loading and the entire
+        # dropship flight; only the first frame survived, and the dropship —
+        # the one screen that needed a rule — was lost. So keep sampling while
+        # the stretch lasts.
+        self.unknown_sample_s = unknown_sample_ms / 1000
+        # Deliberately not a "did the screen change" test. Measured on that
+        # run's frames, the same lobby differs by up to 0.203 between shots
+        # while genuinely different screens start at 0.097 — the two
+        # distributions overlap, so no threshold can classify them. This one
+        # is far below both and only suppresses a frame that is essentially
+        # identical to the last kept one, which is what a loading wipe is.
+        self.unknown_static_epsilon = unknown_static_epsilon
 
         # Full-frame and multi-region obstacle OCR is intentionally not part of
         # the 300ms fast loop. It runs once before a menu action, or after an
@@ -153,6 +170,8 @@ class CapabilityPilot:
         self._resolution_warned = False
         self._unknown_since: float | None = None
         self._unknown_captured = False
+        self._unknown_signature: np.ndarray | None = None
+        self._unknown_next_sample = 0.0
         self._base_state: str | None = None
         self._base_state_version = 0
         self._base_unknown_since: float | None = None
@@ -469,26 +488,64 @@ class CapabilityPilot:
         effective = self._resolve_overlay(frame, base, now)
         return self._record_observation(effective, frame), base.state
 
+    @staticmethod
+    def _frame_signature(frame: np.ndarray) -> np.ndarray | None:
+        """A 64x36 mean-pooled luminance thumbnail, cheap enough per frame."""
+        rows, cols = 36, 64
+        height, width = frame.shape[:2]
+        if height < rows or width < cols:
+            return None
+        trimmed = frame[: height - height % rows, : width - width % cols]
+        values = trimmed.mean(axis=2) if trimmed.ndim == 3 else trimmed.astype(float)
+        return (
+            values.reshape(rows, values.shape[0] // rows, cols, values.shape[1] // cols)
+            .mean(axis=(1, 3))
+            / 255.0
+        )
+
+    def _capture_unknown(self, frame: np.ndarray, now: float, reason: str) -> None:
+        self._snapshot("unknown", frame)
+        self._unknown_signature = self._frame_signature(frame)
+        self._unknown_next_sample = now + self.unknown_sample_s
+        self.notify(f"  ↳ 这个画面没有规则，已存证（{reason}）")
+
     def _note_unknown(self, state: str | None, frame: np.ndarray, now: float) -> None:
-        """Keep one frame of every screen that has no rule.
+        """Keep frames of the screens that have no rule.
 
         This is how the next missing rule gets found without asking anyone to
         go and reproduce it: whatever the runner stalls on ends up in the run
-        directory by itself.
+        directory by itself. One frame per stretch is not enough, because a
+        stretch is defined by "no rule matched" and can span several unrelated
+        screens in a row.
         """
         if state is not None:
             self._unknown_since = None
             self._unknown_captured = False
+            self._unknown_signature = None
             return
         if self._unknown_since is None:
             self._unknown_since = now
             return
-        if self._unknown_captured or now - self._unknown_since < self.unknown_grace_s:
+        if not self._unknown_captured:
+            if now - self._unknown_since < self.unknown_grace_s:
+                return
+            self._unknown_captured = True
+            self.counters["unknownScreens"] += 1
+            self._capture_unknown(frame, now, f"停了 {now - self._unknown_since:.0f} 秒")
             return
-        self._unknown_captured = True
-        self.counters["unknownScreens"] += 1
-        self._snapshot("unknown", frame)
-        self.notify(f"  ↳ 这个画面没有规则，已存证（停了 {now - self._unknown_since:.0f} 秒）")
+        if now < self._unknown_next_sample:
+            return
+        signature = self._frame_signature(frame)
+        if (
+            signature is not None
+            and self._unknown_signature is not None
+            and float(np.abs(signature - self._unknown_signature).mean())
+            < self.unknown_static_epsilon
+        ):
+            self._unknown_next_sample = now + self.unknown_sample_s
+            return
+        self.counters["unknownSamples"] += 1
+        self._capture_unknown(frame, now, "同一段里画面又变了")
 
     def _snapshot(self, stage: str, frame: np.ndarray) -> None:
         if self.screenshot_count >= self.max_screenshots:
@@ -523,6 +580,18 @@ class CapabilityPilot:
         )
         self.notify(f"  ↳ 已执行：{capability.id}（{capability.action}）")
 
+    def _pause_for_foreground(self) -> None:
+        if not self._foreground:
+            return
+        self._foreground = False
+        # A pause invalidates the pending action: the operator may have done
+        # anything to the game while the window was not ours.
+        self._release_all("FOREGROUND_LOST")
+        self.dispatcher.reset_for_pause()
+        self._reset_overlay_for_pause()
+        self.recorder.log("FOREGROUND_PAUSED")
+        self.notify("暂停：Apex 不在前台。")
+
     def step(self) -> dict[str, Any]:
         now = self.monotonic()
         self.guard.ensure_not_aborted()
@@ -530,15 +599,7 @@ class CapabilityPilot:
 
         foreground = self.guard.target_is_foreground()
         if not foreground:
-            if self._foreground:
-                self._foreground = False
-                # A pause invalidates the pending action: the operator may have
-                # done anything to the game while the window was not ours.
-                self._release_all("FOREGROUND_LOST")
-                self.dispatcher.reset_for_pause()
-                self._reset_overlay_for_pause()
-                self.recorder.log("FOREGROUND_PAUSED")
-                self.notify("暂停：Apex 不在前台。")
+            self._pause_for_foreground()
             record["skipped"] = "NOT_FOREGROUND"
             return record
         if not self._foreground:
@@ -583,7 +644,15 @@ class CapabilityPilot:
 
         if decision.kind == "fire" and state is not None:
             record["decision"]["capability"] = decision.capability.id
-            self._act(decision, state, frame)
+            try:
+                self._act(decision, state, frame)
+            except ForegroundLost:
+                # The window went away between the check at the top of this
+                # frame and the send. That is the same recoverable pause as
+                # any other alt-tab, not a reason to end a session that may
+                # have been running unattended for twenty minutes.
+                self._pause_for_foreground()
+                record["skipped"] = "NOT_FOREGROUND"
         elif decision.kind == "pause":
             # The dispatcher decides when a pause lifts (a cycle ages out of
             # its window, an attempt budget resets on the next visit). All

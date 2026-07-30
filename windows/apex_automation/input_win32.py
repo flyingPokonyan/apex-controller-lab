@@ -7,6 +7,8 @@ import sys
 import time
 from typing import Iterable
 
+from .safety import EmergencyStop, ForegroundLost
+
 
 VK_F8 = 0x77
 INPUT_MOUSE = 0
@@ -61,8 +63,9 @@ if sys.platform == "win32":
         _fields_ = [("type", wintypes.DWORD), ("union", INPUT_UNION)]
 
 
-class EmergencyStop(RuntimeError):
-    pass
+# Re-exported so existing imports keep working; the definitions live in
+# `safety` because the capability loop needs them off Windows too.
+__all__ = ["EmergencyStop", "ForegroundLost", "Win32SafetyGuard", "Win32InputSender"]
 
 
 class Win32SafetyGuard:
@@ -123,7 +126,9 @@ class Win32SafetyGuard:
         executable = self.foreground_executable()
         if executable not in self.expected:
             expected = ", ".join(sorted(self.expected))
-            raise RuntimeError(f"前台程序不是 Apex（实际 {executable or '未知'}，期望 {expected}），拒绝发送输入")
+            raise ForegroundLost(
+                f"前台程序不是 Apex（实际 {executable or '未知'}，期望 {expected}），拒绝发送输入"
+            )
 
     def target_is_foreground(self) -> bool:
         """Return foreground state without turning a recoverable pause into an error."""
