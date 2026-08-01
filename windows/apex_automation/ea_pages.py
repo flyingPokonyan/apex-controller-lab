@@ -110,6 +110,11 @@ LOGIN_ERROR_TERMS = (
 
 SUBMIT_TERMS = ("next", "continue", "signin", "login", "下一步", "继续", "登录")
 
+SIGN_OUT_TERMS = ("signout", "logout", "退出登录", "登出", "注销")
+
+# The confirmation EA can raise between the menu item and the login page.
+SIGN_OUT_CONFIRM_TERMS = ("signout", "logout", "confirm", "yes", "确认", "确定")
+
 # RapidOCR reliably confuses these glyph pairs on the EA App's condensed font.
 # Folding both sides of a comparison keeps a real account id from being
 # rejected, and stays far away from the fuzzy matching that could accept a

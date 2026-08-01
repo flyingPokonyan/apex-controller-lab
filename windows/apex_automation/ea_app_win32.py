@@ -30,6 +30,8 @@ from .ea_pages import (
     ACCOUNT_FIELD_TERMS,
     PASSWORD_FIELD_TERMS,
     PASSWORD_LINK_TERMS,
+    SIGN_OUT_CONFIRM_TERMS,
+    SIGN_OUT_TERMS,
     SUBMIT_TERMS,
     EaPage,
     classify_page,
@@ -60,6 +62,7 @@ MOUSEEVENTF_LEFTDOWN = 0x0002
 MOUSEEVENTF_LEFTUP = 0x0004
 VK_TAB = 0x09
 VK_RETURN = 0x0D
+VK_ESCAPE = 0x1B
 VK_BACK = 0x08
 VK_CONTROL = 0x11
 VK_A = 0x41
@@ -977,6 +980,64 @@ class WindowsEaHybridDriver:
             self.sleep(1.0)
         return ApexExitEvidence(requested, False)
 
+    def _account_menu_triggers(
+        self,
+        observation: EaObservation,
+        identity: EaIdentityFact,
+    ) -> list[tuple[str, tuple[int, int]]]:
+        """Every control that opens the account menu, best first.
+
+        Two of these are known to work on the real client: the chevron right
+        of the signed-in name ("Log out"), and the hamburger at the top left
+        ("Sign out", second from the bottom). The badge name itself is not one
+        of them — clicking it left the menu shut and the account signed in.
+        """
+
+        left, top, right, bottom = observation.rect
+        width = max(1, right - left)
+        height = max(1, bottom - top)
+        badge = self._anchor(
+            observation,
+            (identity.ea_account_id,),
+            y_range=(0.0, 0.20),
+        )
+        triggers: list[tuple[str, tuple[int, int]]] = []
+        if badge is not None:
+            triggers.append(("chevron", (right - round(width * 0.012), badge[1])))
+        triggers.append(
+            ("hamburger", (left + round(width * 0.011), top + round(height * 0.018)))
+        )
+        if badge is not None:
+            badge_x, badge_y = badge
+            triggers.append(("badge", (badge_x, badge_y)))
+            triggers.append(
+                ("avatar", (max(left, badge_x - round(width * 0.055)), badge_y))
+            )
+        triggers.append(
+            ("ratio", (left + round(width * 0.89), top + round(height * 0.075)))
+        )
+        return triggers
+
+    def _open_account_menu(
+        self,
+        hwnd: int,
+        identity: EaIdentityFact,
+    ) -> tuple[EaObservation, tuple[int, int]] | None:
+        for name, point in self._account_menu_triggers(self._observe(hwnd), identity):
+            self._click_point(hwnd, *point)
+            self.sleep(1.2)
+            menu = self._observe(hwnd)
+            item = self._anchor(menu, SIGN_OUT_TERMS)
+            if item is not None:
+                self._record("signout-menu", menu, trigger=name)
+                return menu, item
+            self._record("signout-menu-missing", menu, trigger=name)
+            # Close whatever that click did open before trying the next one.
+            self._focus(hwnd)
+            self._tap(VK_ESCAPE)
+            self.sleep(0.5)
+        return None
+
     def sign_out(self) -> bool:
         hwnd = self._ea_window()
         identity = None
@@ -989,38 +1050,26 @@ class WindowsEaHybridDriver:
             self.sleep(1.0)
         if identity is None:
             return False
-        # The account menu hangs off the signed-in badge, and the badge is a
-        # token we have just read. Clicking the text beats a corner ratio that
-        # only fits one window size.
-        badge = self._anchor(
-            self._observe(hwnd),
-            (identity.ea_account_id,),
-            y_range=(0.0, 0.20),
-        )
-        if badge is None:
-            self._click(hwnd, 0.89, 0.075)
-        else:
-            self._click_point(hwnd, *badge)
-        self.sleep(1.0)
-        menu = self._observe(hwnd)
-        targets = ("signout", "logout", "退出登录", "登出")
-        matches = [
-            token
-            for token in menu.tokens
-            if token.roi is not None
-            and token.normalized in targets
-            and token.confidence >= 0.70
-        ]
-        if len(matches) != 1:
-            self._record("signout-menu-missing", menu, candidates=len(matches))
+        opened = self._open_account_menu(hwnd, identity)
+        if opened is None:
             return False
-        x1, y1, x2, y2 = matches[0].roi or (0, 0, 0, 0)
-        self._click_point(hwnd, (x1 + x2) // 2, (y1 + y2) // 2)
-        deadline = time.monotonic() + 20.0
+        _, item = opened
+        self._click_point(hwnd, *item)
+        deadline = time.monotonic() + 25.0
+        confirmed = False
         while time.monotonic() < deadline:
             self.sleep(1.0)
-            if self._state(hwnd) is EaUiState.LOGIN:
-                self._record("signed-out", self._observe(hwnd))
+            observation = self._observe(hwnd)
+            if observation.page in (EaPage.EMAIL, EaPage.PASSWORD):
+                self._record("signed-out", observation)
                 return True
+            if confirmed:
+                continue
+            # EA can ask once more before it drops the session.
+            confirm = self._anchor(observation, SIGN_OUT_CONFIRM_TERMS)
+            if confirm is not None and confirm != item:
+                self._record("signout-confirm", observation)
+                self._click_point(hwnd, *confirm)
+                confirmed = True
         self._record("signout-timeout", self._observe(hwnd))
         return False
