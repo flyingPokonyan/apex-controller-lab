@@ -82,6 +82,61 @@ class CaptureRecoveryTest(unittest.TestCase):
             with self.assertRaisesRegex(RuntimeError, "没有返回画面帧"):
                 capture.grab()
 
+    def test_a_vanished_output_index_falls_back_to_the_first_one(self) -> None:
+        # DXGI enumerates attached outputs only, so a monitor powering off
+        # shifts every index behind it down by one.
+        frame = np.ones((2, 2, 4), dtype=np.uint8)
+        asked: list[int] = []
+        messages: list[str] = []
+
+        def factory(*, output_idx: int, **_: object) -> FakeCamera | None:
+            asked.append(output_idx)
+            return FakeCamera([frame]) if output_idx == 0 else None
+
+        source = DxcamFrameSource(
+            output_index=1,
+            camera_factory=factory,
+            sleep=lambda _: None,
+            notify=messages.append,
+        )
+        with source as capture:
+            self.assertTrue(np.array_equal(capture.grab(), frame))
+
+        self.assertEqual(asked, [1, 0])
+        self.assertEqual(source.output_index, 0)
+        self.assertTrue(any("输出 0" in message for message in messages))
+
+    def test_a_raising_output_index_also_falls_back(self) -> None:
+        frame = np.ones((2, 2, 4), dtype=np.uint8)
+
+        def factory(*, output_idx: int, **_: object) -> FakeCamera:
+            if output_idx != 0:
+                raise IndexError("no such output")
+            return FakeCamera([frame])
+
+        source = DxcamFrameSource(
+            output_index=2,
+            camera_factory=factory,
+            sleep=lambda _: None,
+            notify=lambda _: None,
+        )
+        with source as capture:
+            self.assertTrue(np.array_equal(capture.grab(), frame))
+        self.assertEqual(source.output_index, 0)
+
+    def test_output_zero_failing_is_not_swallowed(self) -> None:
+        def factory(**_: object) -> FakeCamera:
+            raise IndexError("no outputs at all")
+
+        source = DxcamFrameSource(
+            output_index=0,
+            camera_factory=factory,
+            sleep=lambda _: None,
+            notify=lambda _: None,
+        )
+        with self.assertRaises(IndexError):
+            source.__enter__()
+
     def test_grabbing_before_start_is_refused(self) -> None:
         source, _ = self.source(FakeCamera([]))
         with self.assertRaisesRegex(RuntimeError, "尚未启动"):

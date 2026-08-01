@@ -57,20 +57,45 @@ class DxcamFrameSource:
         self._camera: Any = None
         self._started = False
 
-    def _create(self) -> Any:
-        factory = self.camera_factory
-        if factory is None:
-            try:
-                import dxcam
-            except ImportError as error:
-                raise RuntimeError("缺少 dxcam，请先运行 windows\\setup.ps1") from error
-            factory = dxcam.create
-        return factory(
+    def _factory(self) -> Callable[..., Any]:
+        if self.camera_factory is not None:
+            return self.camera_factory
+        try:
+            import dxcam
+        except ImportError as error:
+            raise RuntimeError("缺少 dxcam，请先运行 windows\\setup.ps1") from error
+        return dxcam.create
+
+    def _create_at(self, output_index: int) -> Any:
+        return self._factory()(
             backend=self.backend,
-            output_idx=self.output_index,
+            output_idx=output_index,
             output_color="BGRA",
             processor_backend="numpy",
         )
+
+    def _create(self) -> Any:
+        """Build a camera, tolerating an output index that has moved.
+
+        DXGI only enumerates *attached* outputs, so a display going away
+        shifts every index behind it down by one. After a monitor powers off,
+        the index this runner was configured with may point at nothing.
+        """
+
+        try:
+            camera = self._create_at(self.output_index)
+        except Exception as error:
+            if self.output_index == 0:
+                raise
+            self.notify(f"输出 {self.output_index} 不可用（{type(error).__name__}），改用输出 0")
+            camera = None
+        if camera is None and self.output_index != 0:
+            self.notify(f"输出 {self.output_index} 已不存在，改用输出 0")
+            camera = self._create_at(0)
+            self.output_index = 0
+        if camera is None:
+            raise RuntimeError("DXcam 无法在任何输出上创建捕获源")
+        return camera
 
     def __enter__(self) -> "DxcamFrameSource":
         sys.unraisablehook = _ignore_known_dxcam_release_warning
