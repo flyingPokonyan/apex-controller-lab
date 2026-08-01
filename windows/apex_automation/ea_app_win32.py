@@ -377,12 +377,14 @@ class WindowsEaHybridDriver:
         self._dismiss_expired_session(hwnd)
         if self._state(hwnd) is not EaUiState.LOGIN:
             raise EaAppAutomationError("EA App 当前不是登录页")
-        self._click(hwnd, 0.50, 0.50)
-        self._clear_focused_field()
-        self._type_secret(credentials.login_identifier)
-        self._click(hwnd, 0.50, 0.69)
-        if not self._wait_for_text(hwnd, ("password", "密码")):
-            raise EaAppAutomationError("EA App 提交账号后未出现密码页")
+        compact = "".join(token.normalized for token in self._tokens(hwnd))
+        if not any(term in compact for term in ("password", "密码")):
+            self._click(hwnd, 0.50, 0.50)
+            self._clear_focused_field()
+            self._type_secret(credentials.login_identifier)
+            self._click(hwnd, 0.50, 0.69)
+            if not self._wait_for_text(hwnd, ("password", "密码")):
+                raise EaAppAutomationError("EA App 提交账号后未出现密码页")
         self._click(hwnd, 0.50, 0.50)
         self._clear_focused_field()
         self._type_secret(credentials.password)
