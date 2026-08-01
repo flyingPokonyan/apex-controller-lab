@@ -11,7 +11,7 @@ import uuid
 import json
 
 from . import __version__
-from .account_orchestrator import AccountOrchestrator
+from .account_orchestrator import AccountCycleOutcome, AccountOrchestrator
 from .account_provider import (
     DEFAULT_TASK_TYPE,
     AccountLease,
@@ -644,6 +644,7 @@ def run_account_cycle(
     *,
     runner_config_path: Path | None = None,
     idle_s: float = 30.0,
+    once: bool = False,
     provider: AccountProvider | None = None,
     ea_driver: EaAppDriver | None = None,
     play_session: PlaySessionRunner | None = None,
@@ -726,6 +727,20 @@ def run_account_cycle(
                 recover_report_drain=play_session.recover_report_drain,
                 notify=print,
             )
+            if once:
+                # One account, one attempt, then stop. Verifying a stage
+                # against the loop means every failure immediately claims the
+                # next real account and asks the same unanswered question.
+                result = orchestrator.run_once()
+                details = [f"结果={result.outcome.value}"]
+                if result.lease_id:
+                    details.append(f"租约={result.lease_id}")
+                if result.run_id:
+                    details.append(f"runId={result.run_id}")
+                if result.error_code:
+                    details.append(f"原因={result.error_code}")
+                print("单次托管运行结束：" + "，".join(details))
+                return 1 if result.outcome is AccountCycleOutcome.PAUSED else 0
             return orchestrator.run_forever(idle_s=max(1.0, idle_s))
     except (EmergencyStop, KeyboardInterrupt):
         return 0
@@ -1198,6 +1213,11 @@ def build_parser() -> argparse.ArgumentParser:
         default=30.0,
         help="服务端暂无账号时的最小轮询间隔",
     )
+    account_cycle.add_argument(
+        "--once",
+        action="store_true",
+        help="只跑一个账号一轮就退出，不进入持续领号循环",
+    )
     account_cycle_check = subparsers.add_parser(
         "account-cycle-check",
         help="只验证托管配置、网络和 Provider 鉴权，不领取账号",
@@ -1267,6 +1287,7 @@ def main(argv: list[str] | None = None) -> int:
             args.config,
             runner_config_path=args.runner_config,
             idle_s=args.idle_s,
+            once=args.once,
         )
     if command == "account-cycle-check":
         return run_account_cycle_check(runner_config_path=args.runner_config)

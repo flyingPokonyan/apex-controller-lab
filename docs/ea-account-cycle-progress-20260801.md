@@ -27,7 +27,7 @@
 | EA 顶层窗口发现和登录前检查 | 已验证 | 可以发现 EA App 窗口并识别登录界面；窗口移动不影响基于窗口范围和 OCR 的定位原则 |
 | EA 自动填写账号和密码 | 已验证 | 20:53 实测：邮箱页到密码页、密码提交全部通过，两次提交都由回车触发，输入框由 OCR 锚点定位，未用到比例兜底。证据见 `windows/runs/ea-login/20260801-205258/` |
 | EA 身份核对 | 已验证 | 21:12 实测：登录后 16 秒读到徽标 `f4vb...gvlb`（置信度 1.000）并与租约下发的稳定 EA ID 匹配。证据见 `windows/runs/ea-login/20260801-211215/` |
-| EA 登出 | 未验证 | 账号菜单没能点开：点的是徽标名字文本，真正的入口是名字右侧的 ⌄（Log out）或左上角三个杠（Sign out，倒数第二项）。登出失败时清理证据不完整，租约按设计不会关闭 |
+| EA 登出并释放租约 | 已验证 | 21:23 和 21:24 连续两次自动登出，`trigger=chevron`，均以 `signed-out / page=EMAIL` 收尾，租约自动关闭。证据见 `windows/runs/ea-login/20260801-212313/` 和 `.../20260801-212412/` |
 | 自动启动 Apex | 部分验证 | 较早的一次实测看到 Apex 进程启动；最新代码未重新完成验证 |
 | Apex 大厅识别、等级/XP 解析 | 未验证 | 托管账号闭环尚未到达稳定大厅，不能确认当前实机解析结果 |
 | `LOBBY_PROGRESS` / `RUN_FINISHED` 远程上报 | 未验证 | 协议和代码已接线，但本轮没有成功游戏流程作为真实上报证据 |
@@ -167,15 +167,17 @@ Windows 运行 `account-cycle.cmd` 后，已经真实走通以下链路：
 
 ### 3. 分阶段放行
 
-验收顺序应固定为：
+验收顺序固定为：
 
-1. 邮箱页提交后可靠进入密码页；
-2. 连续两次一次性登录成功并匹配 EA ID；
-3. 单次托管运行成功启动 Apex；
+1. ✅ 邮箱页提交后可靠进入密码页——21:12、21:23、21:24 三次全部通过，两次提交都由回车触发；
+2. ✅ 连续两次一次性登录成功并匹配 EA ID——21:23 和 21:24，各约 45 秒，含自动登出和自动关闭租约；
+3. 单次托管运行成功启动 Apex——用 `windows\account-cycle-once.cmd`，不要用会持续领号的 `account-cycle.cmd`；
 4. 识别大厅并连续取得稳定等级/XP；
 5. 服务端收到 `LOBBY_PROGRESS` 和 `RUN_FINISHED`；
 6. 按 F8 后退出 Apex、登出 EA 并正确释放租约；
 7. 最后再验证两个账号连续自动切换。
+
+第 1、2 步已收口。注意两次登录领到的是同一个账号（`RELEASED` 不加冷却，放回池子后立即可再领），所以“换号”仍未验证，那是第 7 步的事。
 
 任何一步失败，都应保留该步证据并停止，不自动进入下一账号。
 
@@ -208,8 +210,10 @@ Windows 运行 `account-cycle.cmd` 后，已经真实走通以下链路：
 
 ### 运行入口和本地证据
 
-- `windows/account-cycle.cmd`：托管账号循环入口，会一直领下一个账号，不适合用来调登录。
+- `windows/account-cycle.cmd`：托管账号循环入口，会一直领下一个账号，不适合用来分阶段验收。
+- `windows/account-cycle-once.cmd`：只跑一个账号一轮就退出，用于验收第 3 到第 6 步。
 - `windows/ea-login-check.cmd`：一次性登录验证入口，只领一个租约、不启动 Apex。
+- `windows/ea-preflight.cmd`：只读预检，不领号、不输入凭据。
 - `windows/run.ps1`：Windows 命令分发入口，包含 `account-cycle`、`account-cycle-check`、`ea-preflight` 和 `ea-login-check`。
 - `windows/apex_automation/account_orchestrator.py`：领取账号、EA 登录、游戏会话和租约收口的主编排。
 - `windows/apex_automation/ea_app_win32.py`：Win32 加 OCR 的 EA 混合驱动。
