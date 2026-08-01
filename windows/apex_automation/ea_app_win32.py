@@ -320,7 +320,7 @@ class WindowsEaHybridDriver:
         self._click(hwnd, 0.50, 0.50)
         self._clear_focused_field()
         self._type_secret(credentials.password)
-        self._click(hwnd, 0.50, 0.69)
+        self._click(hwnd, 0.50, 0.58)
 
         deadline = time.monotonic() + 60.0
         while time.monotonic() < deadline:

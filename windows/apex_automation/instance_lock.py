@@ -41,8 +41,7 @@ class SingleInstanceLock:
             ) from error
 
         handle.seek(0)
-        handle.truncate()
-        handle.write(str(os.getpid()).encode("ascii"))
+        handle.write(f"{os.getpid():020d}".encode("ascii"))
         handle.flush()
         self._handle = handle
 
