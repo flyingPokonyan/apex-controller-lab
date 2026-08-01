@@ -2,13 +2,13 @@ from __future__ import annotations
 
 import ctypes
 from ctypes import wintypes
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-import re
 import subprocess
 import sys
 import time
-from typing import Callable
+from typing import Callable, Sequence
 import uuid
 
 import numpy as np
@@ -17,13 +17,36 @@ from .account_provider import OtpCode, SecretCredentials
 from .ea_app import (
     ApexExitEvidence,
     EaAppAutomationError,
+    EaApexStartFailed,
     EaCaptchaRequired,
     EaIdentityFact,
     EaIdentityMismatch,
+    EaLoginRejected,
     EaUiState,
     OtpChallenge,
 )
-from .ocr_obstacles import RapidOcrProvider, Region, normalize_ocr_text
+from .ea_evidence import EaLoginEvidence
+from .ea_pages import (
+    ACCOUNT_FIELD_TERMS,
+    PASSWORD_FIELD_TERMS,
+    PASSWORD_LINK_TERMS,
+    SUBMIT_TERMS,
+    EaPage,
+    classify_page,
+    identity_candidates,
+    identity_matches,
+    is_login_error,
+    mask_identity,
+    page_markers,
+    password_page_blocker,
+)
+from .ocr_obstacles import (
+    OcrPositionUnavailable,
+    OcrToken,
+    RapidOcrProvider,
+    Region,
+    normalize_ocr_text,
+)
 
 
 EA_EXECUTABLE = "eadesktop.exe"
@@ -40,6 +63,17 @@ VK_RETURN = 0x0D
 VK_BACK = 0x08
 VK_CONTROL = 0x11
 VK_A = 0x41
+
+# Ratios stay as the last resort behind the OCR anchors. They are the only
+# targeting this driver ever had, and one earlier run did reach the signed-in
+# surface with them, so they are kept rather than replaced outright.
+ACCOUNT_FIELD_RATIO = (0.50, 0.50)
+ACCOUNT_SUBMIT_RATIO = (0.50, 0.69)
+PASSWORD_FIELD_RATIO = (0.50, 0.50)
+PASSWORD_SUBMIT_RATIO = (0.50, 0.58)
+OTP_FIELD_RATIO = (0.50, 0.50)
+OTP_SUBMIT_RATIO = (0.50, 0.69)
+IDENTITY_BAND = (0.75, 0.00, 1.00, 0.17)
 
 
 if sys.platform == "win32":
@@ -72,6 +106,32 @@ if sys.platform == "win32":
         _fields_ = [("type", wintypes.DWORD), ("union", INPUT_UNION)]
 
 
+@dataclass(eq=False)
+class EaObservation:
+    """One frame, its window-clipped OCR tokens and the page they describe.
+
+    Every gate in a login step reads the same observation. The transition bugs
+    this driver kept hitting came from asking two questions about two different
+    frames captured a second apart.
+    """
+
+    rect: tuple[int, int, int, int]
+    frame: np.ndarray
+    tokens: tuple[OcrToken, ...]
+    page: EaPage
+
+    @property
+    def normalized(self) -> tuple[str, ...]:
+        return tuple(token.normalized for token in self.tokens)
+
+    @property
+    def markers(self) -> tuple[str, ...]:
+        return page_markers(self.normalized)
+
+    def has_login_error(self) -> bool:
+        return is_login_error("".join(self.normalized))
+
+
 class WindowsEaHybridDriver:
     """Win32/OCR fallback for the EA CEF surface that exposes no inner UIA tree."""
 
@@ -81,12 +141,16 @@ class WindowsEaHybridDriver:
         capture_source: object,
         ocr: RapidOcrProvider | None = None,
         sleep: Callable[[float], None] = time.sleep,
+        evidence: EaLoginEvidence | None = None,
+        notify: Callable[[str], None] = lambda message: None,
     ) -> None:
         if sys.platform != "win32":
             raise RuntimeError("EA 混合驱动只能在 Windows 上运行")
         self.capture_source = capture_source
         self.ocr = ocr or RapidOcrProvider()
         self.sleep = sleep
+        self.evidence = evidence
+        self.notify = notify
         self.user32 = ctypes.windll.user32
         self.kernel32 = ctypes.windll.kernel32
         self.user32.GetForegroundWindow.restype = wintypes.HWND
@@ -184,10 +248,7 @@ class WindowsEaHybridDriver:
         if self.user32.SendInput(len(payload), pointer, ctypes.sizeof(INPUT)) != len(payload):
             raise EaAppAutomationError("EA App 输入事件发送不完整")
 
-    def _click(self, hwnd: int, x_ratio: float, y_ratio: float) -> None:
-        left, top, right, bottom = self._rect(hwnd)
-        x = round(left + (right - left) * x_ratio)
-        y = round(top + (bottom - top) * y_ratio)
+    def _click_point(self, hwnd: int, x: int, y: int) -> None:
         self._focus(hwnd)
         if not self.user32.SetCursorPos(x, y):
             raise EaAppAutomationError("EA App 鼠标定位失败")
@@ -200,34 +261,90 @@ class WindowsEaHybridDriver:
         )
         self.sleep(0.5)
 
-    def _click_ocr_text(
-        self,
-        hwnd: int,
-        targets: set[str],
-        *,
-        x_range: tuple[float, float],
-        y_range: tuple[float, float],
-    ) -> bool:
+    def _click(self, hwnd: int, x_ratio: float, y_ratio: float) -> None:
         left, top, right, bottom = self._rect(hwnd)
-        width = right - left
-        height = bottom - top
-        matches: list[tuple[float, float, float]] = []
-        for token in self.ocr.read_with_boxes(self._frame()):
-            if token.roi is None or token.normalized not in targets:
+        self._click_point(
+            hwnd,
+            round(left + (right - left) * x_ratio),
+            round(top + (bottom - top) * y_ratio),
+        )
+
+    @staticmethod
+    def _anchor(
+        observation: EaObservation,
+        terms: Sequence[str],
+        *,
+        x_range: tuple[float, float] = (0.0, 1.0),
+        y_range: tuple[float, float] = (0.0, 1.0),
+        exclude: Sequence[str] = (),
+    ) -> tuple[int, int] | None:
+        """Centre of the best on-screen token that carries one of `terms`.
+
+        Earlier terms win over later ones before confidence is considered, so
+        a page holding both "Next" and "Sign in" gets the control the caller
+        asked for first.
+        """
+
+        left, top, right, bottom = observation.rect
+        width = max(1, right - left)
+        height = max(1, bottom - top)
+        matches: list[tuple[int, float, int, int]] = []
+        for token in observation.tokens:
+            if token.roi is None:
+                continue
+            text = token.normalized
+            if any(term in text for term in exclude):
+                continue
+            rank = next(
+                (index for index, term in enumerate(terms) if term in text),
+                None,
+            )
+            if rank is None:
                 continue
             x1, y1, x2, y2 = token.roi
-            x_ratio = ((x1 + x2) / 2 - left) / width
-            y_ratio = ((y1 + y2) / 2 - top) / height
+            x = (x1 + x2) // 2
+            y = (y1 + y2) // 2
+            x_ratio = (x - left) / width
+            y_ratio = (y - top) / height
             if (
                 x_range[0] <= x_ratio <= x_range[1]
                 and y_range[0] <= y_ratio <= y_range[1]
             ):
-                matches.append((token.confidence, x_ratio, y_ratio))
+                matches.append((rank, -token.confidence, x, y))
         if not matches:
-            return False
-        _, x_ratio, y_ratio = max(matches)
-        self._click(hwnd, x_ratio, y_ratio)
-        return True
+            return None
+        _, _, x, y = min(matches)
+        return x, y
+
+    def _click_target(
+        self,
+        hwnd: int,
+        observation: EaObservation,
+        terms: Sequence[str],
+        ratio: tuple[float, float],
+        *,
+        x_range: tuple[float, float] = (0.0, 1.0),
+        y_range: tuple[float, float] = (0.0, 1.0),
+        exclude: Sequence[str] = (),
+    ) -> str:
+        """Click an OCR anchor when there is one, the ratio otherwise.
+
+        The return value names which one was used so the evidence log can say
+        why a click landed where it did.
+        """
+
+        point = self._anchor(
+            observation,
+            terms,
+            x_range=x_range,
+            y_range=y_range,
+            exclude=exclude,
+        )
+        if point is None:
+            self._click(hwnd, *ratio)
+            return "ratio"
+        self._click_point(hwnd, *point)
+        return "anchor"
 
     def _type_secret(self, value: str) -> None:
         inputs: list[INPUT] = []
@@ -276,35 +393,112 @@ class WindowsEaHybridDriver:
             raise EaAppAutomationError("EA App 截图为空")
         return frame
 
-    def _tokens(self, hwnd: int, *, identity_only: bool = False):
-        frame = self._frame()
+    def _clip_rect(self, hwnd: int, frame: np.ndarray) -> tuple[int, int, int, int]:
+        """The window rectangle, clipped to what the capture source can see."""
+
         left, top, right, bottom = self._rect(hwnd)
         height, width = frame.shape[:2]
         left, right = max(0, left), min(width, right)
         top, bottom = max(0, top), min(height, bottom)
-        if identity_only:
-            window_width = right - left
-            window_height = bottom - top
-            region = Region(
-                "eaIdentity",
-                (
-                    left + round(window_width * 0.78),
-                    top + round(window_height * 0.02),
-                    right - round(window_width * 0.02),
-                    top + round(window_height * 0.15),
-                ),
+        if right - left < 2 or bottom - top < 2:
+            raise EaAppAutomationError("EA App 窗口不在当前捕获画面内")
+        return left, top, right, bottom
+
+    def _observe(self, hwnd: int, *, retries: int = 3) -> EaObservation:
+        """Read the window once and answer every page question from that read."""
+
+        observation: EaObservation | None = None
+        for attempt in range(max(1, retries)):
+            frame = self._frame()
+            left, top, right, bottom = self._clip_rect(hwnd, frame)
+            crop = np.ascontiguousarray(frame[top:bottom, left:right])
+            try:
+                tokens = tuple(
+                    OcrToken(
+                        token.text,
+                        token.confidence,
+                        None
+                        if token.roi is None
+                        else (
+                            token.roi[0] + left,
+                            token.roi[1] + top,
+                            token.roi[2] + left,
+                            token.roi[3] + top,
+                        ),
+                    )
+                    for token in self.ocr.read_with_boxes(crop)
+                )
+            except OcrPositionUnavailable:
+                tokens = self.ocr.read(
+                    frame,
+                    Region("eaWindow", (left, top, right, bottom)),
+                )
+            observation = EaObservation(
+                rect=(left, top, right, bottom),
+                frame=frame,
+                tokens=tokens,
+                page=classify_page(token.normalized for token in tokens),
             )
-        else:
-            region = Region("eaWindow", (left, top, right, bottom))
-        return self.ocr.read(frame, region)
+            # The CEF surface hands back a fully blank OCR pass while it is
+            # otherwise interactive. Retrying beats treating it as a page.
+            if tokens:
+                return observation
+            if attempt + 1 < max(1, retries):
+                self.sleep(1.0)
+        assert observation is not None
+        return observation
+
+    def _record(
+        self,
+        step: str,
+        observation: EaObservation | None = None,
+        **detail: object,
+    ) -> None:
+        """Evidence is diagnostic only: never let it break a login."""
+
+        if self.evidence is None:
+            return
+        try:
+            if observation is None:
+                self.evidence.step(step, page="NONE", **detail)
+            else:
+                self.evidence.step(
+                    step,
+                    page=observation.page.value,
+                    markers=observation.markers,
+                    frame=observation.frame,
+                    tokens=observation.tokens,
+                    rect=observation.rect,
+                    **detail,
+                )
+        except Exception as error:  # pragma: no cover - diagnostics only
+            self.notify(f"EA 登录证据写入失败：{type(error).__name__}")
 
     def _identity(self, hwnd: int) -> EaIdentityFact | None:
+        """Read the signed-in badge from its own tight crop.
+
+        This stays a separate OCR pass on purpose: the badge text is small,
+        and a whole-window pass regularly fails to recognise it at all.
+        """
+
+        frame = self._frame()
+        left, top, right, bottom = self._clip_rect(hwnd, frame)
+        window_width = right - left
+        window_height = bottom - top
+        x1, y1, x2, y2 = IDENTITY_BAND
+        region = Region(
+            "eaIdentity",
+            (
+                left + round(window_width * x1),
+                top + round(window_height * y1),
+                min(right, left + round(window_width * x2)),
+                top + round(window_height * y2),
+            ),
+        )
         candidates: list[tuple[float, str]] = []
-        for token in self._tokens(hwnd, identity_only=True):
-            normalized = normalize_ocr_text(token.text)
-            for candidate in re.findall(r"[a-z0-9]{8,20}", normalized):
-                if any(character.isalpha() for character in candidate):
-                    candidates.append((token.confidence, candidate))
+        for token in self.ocr.read(frame, region):
+            for candidate in identity_candidates([normalize_ocr_text(token.text)]):
+                candidates.append((token.confidence, candidate))
         if not candidates:
             return None
         confidence, account_id = max(candidates)
@@ -314,133 +508,347 @@ class WindowsEaHybridDriver:
             verified=confidence >= 0.75,
         )
 
-    def _state(self, hwnd: int) -> EaUiState:
-        if self._identity(hwnd) is not None:
-            return EaUiState.SIGNED_IN
-        text = " ".join(token.normalized for token in self._tokens(hwnd))
-        if any(term in text for term in ("captcha", "hcaptcha", "验证码图片")):
+    def _matching_identity(
+        self,
+        observation: EaObservation,
+        expected: str,
+    ) -> EaIdentityFact | None:
+        """Find the expected account id anywhere in the window.
+
+        The badge is only one place the signed-in id shows up, and requiring
+        it to land inside one corner crop is what made a successful login look
+        like a timeout. Whole tokens are compared too, so an id that is not
+        eight to twenty alphanumerics can still be verified.
+        """
+
+        wanted = normalize_ocr_text(expected)
+        for token in observation.tokens:
+            text = token.normalized
+            found = identity_matches(wanted, text) or any(
+                identity_matches(wanted, candidate)
+                for candidate in identity_candidates([text])
+            )
+            if found:
+                return EaIdentityFact(
+                    ea_account_id=expected,
+                    source=f"ea-window-ocr:{token.confidence:.3f}",
+                    verified=token.confidence >= 0.70,
+                )
+        return None
+
+    def _state(
+        self,
+        hwnd: int,
+        observation: EaObservation | None = None,
+    ) -> EaUiState:
+        observation = observation or self._observe(hwnd)
+        page = observation.page
+        if page is EaPage.CAPTCHA:
             raise EaCaptchaRequired("EA App 出现 Captcha，已暂停")
-        if any(term in text for term in ("verificationcode", "securitycode", "安全代码")):
+        if page is EaPage.OTP:
             return EaUiState.OTP
-        if any(term in text for term in ("signin", "eaaccount", "emailoreaid", "登录")):
+        # Login evidence outranks a stray account-id shaped word: reading the
+        # login page as "signed in as somebody else" sent the orchestrator off
+        # to sign out of a session that was never there.
+        if page in (EaPage.EMAIL, EaPage.PASSWORD, EaPage.EXPIRED_SESSION):
             return EaUiState.LOGIN
+        if page is EaPage.SIGNED_IN or self._identity(hwnd) is not None:
+            return EaUiState.SIGNED_IN
         return EaUiState.UNKNOWN
 
     def _dismiss_expired_session(self, hwnd: int) -> bool:
-        compact = "".join(token.normalized for token in self._tokens(hwnd))
-        if not any(
-            term in compact
-            for term in ("sessionhasexpired", "backtosignin", "会话已过期")
-        ):
+        observation = self._observe(hwnd)
+        if observation.page is not EaPage.EXPIRED_SESSION:
             return False
+        self._record("expired-session", observation)
         self._click(hwnd, 0.50, 0.35)
         self.sleep(2.0)
         return True
 
-    def _wait_for_text(
+    def _wait_for_page(
         self,
         hwnd: int,
-        terms: tuple[str, ...],
+        pages: Sequence[EaPage],
         *,
-        timeout_s: float = 15.0,
-    ) -> bool:
-        deadline = time.monotonic() + timeout_s
-        while time.monotonic() < deadline:
-            compact = "".join(token.normalized for token in self._tokens(hwnd))
-            if any(term in compact for term in terms):
-                return True
-            self.sleep(1.0)
-        return False
+        timeout_s: float,
+    ) -> EaObservation:
+        """Poll until the window shows one of `pages`, or the time runs out."""
 
-    def _wait_for_password_page(
-        self,
-        hwnd: int,
-        *,
-        timeout_s: float = 15.0,
-    ) -> bool:
         deadline = time.monotonic() + timeout_s
-        while time.monotonic() < deadline:
-            compact = "".join(token.normalized for token in self._tokens(hwnd))
-            has_password = any(term in compact for term in ("password", "密码"))
-            # The email page contains "Forgot your password", so the word
-            # password alone is not transition evidence.  The account field
-            # must have disappeared as well.
-            has_account_field = any(
-                term in compact for term in ("emailoreaid", "邮箱或eaid")
-            )
-            if has_password and not has_account_field:
-                return True
+        observation = self._observe(hwnd)
+        while True:
+            if observation.page in pages:
+                return observation
+            if time.monotonic() >= deadline:
+                return observation
             self.sleep(1.0)
-        return False
+            observation = self._observe(hwnd)
 
     def preflight(self) -> EaUiState:
         hwnd = self._ea_window()
         self._dismiss_expired_session(hwnd)
+        observation: EaObservation | None = None
         for _ in range(8):
-            state = self._state(hwnd)
+            observation = self._observe(hwnd)
+            state = self._state(hwnd, observation)
             if state is not EaUiState.UNKNOWN:
+                self._record("preflight", observation, state=state.value)
                 return state
             self.sleep(1.0)
+        self._record("preflight-unknown", observation)
         raise EaAppAutomationError("EA App 页面无法识别，领号前预检失败")
 
     def ensure_started(self) -> EaUiState:
         return self.preflight()
 
     def current_identity(self) -> EaIdentityFact | None:
-        return self._identity(self._ea_window())
+        hwnd = self._ea_window()
+        # A login page never carries a current identity, whatever the corner
+        # crop happens to recognise there.
+        if self._observe(hwnd).page in (
+            EaPage.EMAIL,
+            EaPage.PASSWORD,
+            EaPage.OTP,
+            EaPage.CAPTCHA,
+            EaPage.EXPIRED_SESSION,
+        ):
+            return None
+        return self._identity(hwnd)
+
+    def _submit(
+        self,
+        hwnd: int,
+        observation: EaObservation,
+        ratio: tuple[float, float],
+    ) -> str:
+        """Send the form.
+
+        Enter goes first: it needs no geometry at all and cannot land on the
+        wrong control. The OCR anchor and the ratio stay behind it for the
+        pages that do not submit on Enter.
+        """
+
+        self._focus(hwnd)
+        self._tap(VK_RETURN)
+        self.sleep(3.0)
+        after_enter = self._observe(hwnd)
+        if after_enter.page is not observation.page:
+            return "enter"
+        return self._click_target(
+            hwnd,
+            after_enter,
+            SUBMIT_TERMS,
+            ratio,
+            y_range=(0.35, 0.95),
+        )
+
+    def _submit_login_identifier(
+        self,
+        hwnd: int,
+        observation: EaObservation,
+        credentials: SecretCredentials,
+        *,
+        timeout_s: float = 25.0,
+    ) -> EaObservation:
+        target = self._click_target(
+            hwnd,
+            observation,
+            ACCOUNT_FIELD_TERMS,
+            ACCOUNT_FIELD_RATIO,
+            y_range=(0.20, 0.80),
+        )
+        self._clear_focused_field()
+        self._type_secret(credentials.login_identifier)
+        typed = self._observe(hwnd)
+        # Whether the identifier actually landed in a field separates "the
+        # click missed the input" from "the submit never fired". Only the fact
+        # is kept; the identifier itself never reaches disk.
+        echoed = self._identifier_echoed(typed, credentials.login_identifier)
+        self._record(
+            "account-typed",
+            typed,
+            fieldTarget=target,
+            identifierEchoed=echoed,
+        )
+        submit = self._submit(hwnd, typed, ACCOUNT_SUBMIT_RATIO)
+        transitioned = self._wait_for_page(
+            hwnd,
+            (EaPage.PASSWORD, EaPage.OTP, EaPage.SIGNED_IN, EaPage.CAPTCHA),
+            timeout_s=timeout_s,
+        )
+        self._record(
+            "account-submitted",
+            transitioned,
+            submitTarget=submit,
+            identifierEchoed=echoed,
+        )
+        if transitioned.page is EaPage.CAPTCHA:
+            raise EaCaptchaRequired("EA App 出现 Captcha，已暂停")
+        if transitioned.has_login_error():
+            raise EaLoginRejected("EA App 拒绝了登录标识")
+        if transitioned.page in (EaPage.PASSWORD, EaPage.OTP, EaPage.SIGNED_IN):
+            return transitioned
+        blocker = password_page_blocker(transitioned.normalized)
+        raise EaAppAutomationError(
+            "EA App 提交账号后未出现密码页"
+            f"（{blocker}，账号已回显={echoed}，提交方式={submit}，"
+            f"输入定位={target}）"
+        )
+
+    @staticmethod
+    def _identifier_echoed(observation: EaObservation, identifier: str) -> bool:
+        expected = normalize_ocr_text(identifier)
+        if not expected:
+            return False
+        return any(expected in token.normalized for token in observation.tokens)
+
+    def _submit_password(
+        self,
+        hwnd: int,
+        observation: EaObservation,
+        credentials: SecretCredentials,
+    ) -> str:
+        # Never let the anchor land on "Forgot your password": that link is on
+        # the same page and it navigates away from the login entirely.
+        target = self._click_target(
+            hwnd,
+            observation,
+            PASSWORD_FIELD_TERMS,
+            PASSWORD_FIELD_RATIO,
+            y_range=(0.20, 0.80),
+            exclude=PASSWORD_LINK_TERMS,
+        )
+        self._clear_focused_field()
+        self._type_secret(credentials.password)
+        self._record("password-typed", self._observe(hwnd), fieldTarget=target)
+        return self._submit(hwnd, observation, PASSWORD_SUBMIT_RATIO)
 
     def sign_in(
         self,
         credentials: SecretCredentials,
         otp_supplier: Callable[[OtpChallenge], OtpCode],
     ) -> EaIdentityFact:
+        if self.evidence is not None:
+            self.notify(f"EA 登录证据目录：{self.evidence.rotate()}")
+            self.evidence.protect(credentials.login_identifier)
         hwnd = self._ea_window()
         self._dismiss_expired_session(hwnd)
-        if self._state(hwnd) is not EaUiState.LOGIN:
-            raise EaAppAutomationError("EA App 当前不是登录页")
-        compact = "".join(token.normalized for token in self._tokens(hwnd))
-        if not any(term in compact for term in ("password", "密码")):
-            self._click(hwnd, 0.50, 0.50)
-            self._clear_focused_field()
-            self._type_secret(credentials.login_identifier)
-            self._click(hwnd, 0.50, 0.69)
-            if not self._wait_for_password_page(hwnd):
-                raise EaAppAutomationError("EA App 提交账号后未出现密码页")
-        self._click(hwnd, 0.50, 0.50)
-        self._clear_focused_field()
-        self._type_secret(credentials.password)
-        self._click(hwnd, 0.50, 0.58)
+        observation = self._observe(hwnd)
+        self._record("signin-start", observation)
+        if observation.page is EaPage.CAPTCHA:
+            raise EaCaptchaRequired("EA App 出现 Captcha，已暂停")
+        if observation.page is EaPage.EMAIL:
+            observation = self._submit_login_identifier(hwnd, observation, credentials)
+        if observation.page is EaPage.PASSWORD:
+            # Only a page that shows a password field and no account field
+            # gets the password typed into it. Guessing here once meant typing
+            # the password into the account box.
+            submit = self._submit_password(hwnd, observation, credentials)
+            self.notify(f"EA 密码已提交（{submit}）")
+        elif observation.page not in (EaPage.OTP, EaPage.SIGNED_IN):
+            self._record("signin-wrong-page", observation)
+            raise EaAppAutomationError(
+                f"EA App 当前不是可登录页面（{observation.page.value}）"
+            )
+        return self._await_identity(hwnd, otp_supplier)
 
-        deadline = time.monotonic() + 60.0
+    def _await_identity(
+        self,
+        hwnd: int,
+        otp_supplier: Callable[[OtpChallenge], OtpCode],
+        *,
+        timeout_s: float = 90.0,
+    ) -> EaIdentityFact:
+        deadline = time.monotonic() + timeout_s
+        observation: EaObservation | None = None
         while time.monotonic() < deadline:
             self.sleep(2.0)
-            identity = self._identity(hwnd)
-            if identity is not None:
-                return identity
-            state = self._state(hwnd)
-            if state is EaUiState.OTP:
+            observation = self._observe(hwnd)
+            if observation.page is EaPage.CAPTCHA:
+                self._record("captcha", observation)
+                raise EaCaptchaRequired("EA App 出现 Captcha，已暂停")
+            if observation.has_login_error():
+                self._record("login-rejected", observation)
+                raise EaLoginRejected("EA App 报告登录信息有误")
+            if observation.page is EaPage.OTP:
                 challenge = OtpChallenge(uuid.uuid4().hex, datetime.now(timezone.utc))
                 otp = otp_supplier(challenge)
-                self._click(hwnd, 0.50, 0.50)
+                self._click_target(
+                    hwnd,
+                    observation,
+                    ("code", "验证码", "安全代码"),
+                    OTP_FIELD_RATIO,
+                    y_range=(0.20, 0.80),
+                )
                 self._clear_focused_field()
                 self._type_secret(otp.code)
-                self._click(hwnd, 0.50, 0.69)
-        raise EaAppAutomationError("EA App 登录后未在时限内出现可验证身份")
+                self._submit(hwnd, observation, OTP_SUBMIT_RATIO)
+                self._record("otp-submitted", self._observe(hwnd))
+                continue
+            # A login page still on screen is not a badge to read, whatever a
+            # corner crop makes of the text sitting there.
+            if observation.page in (EaPage.EMAIL, EaPage.PASSWORD):
+                continue
+            identity = self._identity(hwnd)
+            if identity is not None:
+                self._record(
+                    "signed-in",
+                    observation,
+                    identity=mask_identity(identity.ea_account_id),
+                    identitySource=identity.source,
+                )
+                return identity
+        self._record("signin-timeout", observation)
+        page = "NONE" if observation is None else observation.page.value
+        raise EaAppAutomationError(
+            f"EA App 登录后未在 {timeout_s:.0f} 秒内出现可验证身份（最后页面 {page}）"
+        )
 
     def verify_identity(self, expected_ea_account_id: str) -> EaIdentityFact:
-        deadline = time.monotonic() + 15.0
+        deadline = time.monotonic() + 20.0
+        seen: list[str] = []
+        observation: EaObservation | None = None
         while time.monotonic() < deadline:
-            identity = self._identity(self._ea_window())
-            if identity is None:
-                self.sleep(1.0)
-                continue
-            if identity.ea_account_id != expected_ea_account_id:
-                raise EaIdentityMismatch("EA App 当前稳定 EA ID 与租约不一致")
-            if not identity.verified:
-                self.sleep(1.0)
-                continue
-            return identity
-        raise EaIdentityMismatch("EA App 页面没有可验证的稳定 EA ID")
+            hwnd = self._ea_window()
+            observation = self._observe(hwnd)
+            match = self._matching_identity(observation, expected_ea_account_id)
+            if match is not None and match.verified:
+                self._record(
+                    "identity-verified",
+                    observation,
+                    identity=mask_identity(match.ea_account_id),
+                )
+                return match
+            identity = self._identity(hwnd)
+            if identity is not None:
+                if identity_matches(expected_ea_account_id, identity.ea_account_id):
+                    if identity.verified:
+                        self._record(
+                            "identity-verified",
+                            observation,
+                            identity=mask_identity(expected_ea_account_id),
+                        )
+                        return EaIdentityFact(
+                            ea_account_id=expected_ea_account_id,
+                            source=identity.source,
+                            verified=True,
+                        )
+                elif match is None:
+                    seen.append(mask_identity(identity.ea_account_id))
+                    # A badge that reads as a different account is only a
+                    # mismatch once the expected id is nowhere in the window.
+                    if len(seen) >= 3:
+                        self._record("identity-mismatch", observation, observed=seen)
+                        raise EaIdentityMismatch(
+                            "EA App 当前稳定 EA ID 与租约不一致"
+                            f"（观察到 {seen[-1]}）"
+                        )
+            self.sleep(1.0)
+        self._record("identity-timeout", observation, observed=seen or None)
+        raise EaIdentityMismatch(
+            "EA App 页面没有可验证的稳定 EA ID"
+            + (f"（观察到 {seen[-1]}）" if seen else "")
+        )
 
     @staticmethod
     def _process_running(executable: str) -> bool:
@@ -462,34 +870,44 @@ class WindowsEaHybridDriver:
         # occasionally yields an empty OCR frame while it is otherwise fully
         # interactive.  Wait for the actual launch control instead.
         for _ in range(15):
-            if self._click_ocr_text(
-                hwnd,
-                {"apexlegends"},
+            observation = self._observe(hwnd)
+            point = self._anchor(
+                observation,
+                ("apexlegends",),
                 x_range=(0.0, 0.30),
                 y_range=(0.15, 0.90),
-            ):
+            )
+            if point is not None:
+                self._record("apex-entry", observation)
+                self._click_point(hwnd, *point)
                 break
             self.sleep(1.0)
         else:
-            raise EaAppAutomationError("EA App 未找到左侧 Apex Legends 游戏入口")
+            self._record("apex-entry-missing", self._observe(hwnd))
+            raise EaApexStartFailed("EA App 未找到左侧 Apex Legends 游戏入口")
         self.sleep(2.0)
         for _ in range(8):
-            if self._click_ocr_text(
-                hwnd,
-                {"play", "launch", "开始游戏"},
+            observation = self._observe(hwnd)
+            point = self._anchor(
+                observation,
+                ("play", "launch", "开始游戏"),
                 x_range=(0.35, 0.75),
                 y_range=(0.30, 0.70),
-            ):
+            )
+            if point is not None:
+                self._record("apex-play", observation)
+                self._click_point(hwnd, *point)
                 break
             self.sleep(1.0)
         else:
-            raise EaAppAutomationError("EA App Apex 页面未找到 Play 按钮")
+            self._record("apex-play-missing", self._observe(hwnd))
+            raise EaApexStartFailed("EA App Apex 页面未找到 Play 按钮")
         deadline = time.monotonic() + 90.0
         while time.monotonic() < deadline:
             if any(self._process_running(name) for name in APEX_EXECUTABLES):
                 return
             self.sleep(2.0)
-        raise EaAppAutomationError("点击 EA Play 后未发现 Apex 进程")
+        raise EaApexStartFailed("点击 EA Play 后未发现 Apex 进程")
 
     def stop_apex(self) -> ApexExitEvidence:
         requested = False
@@ -523,28 +941,25 @@ class WindowsEaHybridDriver:
             return False
         self._click(hwnd, 0.89, 0.075)
         self.sleep(1.0)
-        frame = self._frame()
-        targets = {"signout", "logout", "退出登录", "登出"}
+        menu = self._observe(hwnd)
+        targets = ("signout", "logout", "退出登录", "登出")
         matches = [
             token
-            for token in self.ocr.read_with_boxes(frame)
-            if token.roi is not None and token.normalized in targets and token.confidence >= 0.70
+            for token in menu.tokens
+            if token.roi is not None
+            and token.normalized in targets
+            and token.confidence >= 0.70
         ]
         if len(matches) != 1:
+            self._record("signout-menu-missing", menu, candidates=len(matches))
             return False
         x1, y1, x2, y2 = matches[0].roi or (0, 0, 0, 0)
-        self._focus(hwnd)
-        self.user32.SetCursorPos((x1 + x2) // 2, (y1 + y2) // 2)
-        self.sleep(0.15)
-        self._send(
-            [
-                INPUT(type=INPUT_MOUSE, mi=MOUSEINPUT(0, 0, 0, MOUSEEVENTF_LEFTDOWN, 0, 0)),
-                INPUT(type=INPUT_MOUSE, mi=MOUSEINPUT(0, 0, 0, MOUSEEVENTF_LEFTUP, 0, 0)),
-            ]
-        )
+        self._click_point(hwnd, (x1 + x2) // 2, (y1 + y2) // 2)
         deadline = time.monotonic() + 20.0
         while time.monotonic() < deadline:
             self.sleep(1.0)
             if self._state(hwnd) is EaUiState.LOGIN:
+                self._record("signed-out", self._observe(hwnd))
                 return True
+        self._record("signout-timeout", self._observe(hwnd))
         return False

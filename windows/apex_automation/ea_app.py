@@ -20,6 +20,16 @@ class EaIdentityMismatch(EaAppAutomationError):
     reason_code = "IDENTITY_MISMATCH"
 
 
+class EaLoginRejected(EaAppAutomationError):
+    """EA answered the credentials with a visible error."""
+
+    reason_code = "LOGIN_INVALID"
+
+
+class EaApexStartFailed(EaAppAutomationError):
+    reason_code = "APEX_START_FAILED"
+
+
 class EaUiState(str, Enum):
     STOPPED = "STOPPED"
     LOGIN = "LOGIN"

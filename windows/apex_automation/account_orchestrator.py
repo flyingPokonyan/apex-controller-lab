@@ -379,6 +379,7 @@ class AccountOrchestrator:
             current = None
         if current is None:
             self._update_checkpoint(workflow_phase=WorkflowPhase.EA_SIGNING_IN)
+            self.notify("EA 开始自动登录")
             with self._provider_operation_lock:
                 operation_id = self._begin_operation(
                     PendingOperation.CREDENTIALS
@@ -394,6 +395,7 @@ class AccountOrchestrator:
         self._update_checkpoint(
             workflow_phase=WorkflowPhase.EA_IDENTITY_VERIFYING
         )
+        self.notify("EA 登录动作完成，开始核对稳定 EA ID")
         identity = self.ea_driver.verify_identity(expected)
         if not identity.verified or identity.ea_account_id != expected:
             raise EaAppAutomationError("EA App 登录身份无法与租约账号匹配")
@@ -790,13 +792,23 @@ class AccountOrchestrator:
         except LeaseProviderError as error:
             return self._pause(error.code, manual=not error.retryable)
         except EaAppAutomationError as error:
+            # The reason code alone cannot tell two different EA failures
+            # apart, and the message is the only place that says which gate
+            # gave up. Dropping it here is what made repeated real runs
+            # unreadable.
+            self.notify(
+                f"EA 自动化失败：{error.reason_code} @ {self._phase()}：{error}"
+            )
             if "lease" in locals() and lease is not None:
                 return self._cleanup_and_close_preplay_failure(
                     lease,
                     error.reason_code,
                 )
             return self._pause(error.reason_code, manual=True)
-        except Exception:
+        except Exception as error:
+            self.notify(
+                f"账号编排异常：{type(error).__name__} @ {self._phase()}：{error}"
+            )
             return self._pause("ORCHESTRATOR_FAILED", manual=True)
 
     def run_forever(self, *, idle_s: float = 30.0) -> int:

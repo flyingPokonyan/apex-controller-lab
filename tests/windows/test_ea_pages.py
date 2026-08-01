@@ -1,0 +1,271 @@
+from __future__ import annotations
+
+from pathlib import Path
+import json
+import sys
+import tempfile
+import unittest
+
+
+import numpy as np
+
+
+REPOSITORY_ROOT = Path(__file__).resolve().parents[2]
+sys.path.insert(0, str(REPOSITORY_ROOT / "windows"))
+
+from apex_automation.ea_app_win32 import EaObservation, WindowsEaHybridDriver
+from apex_automation.ea_evidence import (
+    EaLoginEvidence,
+    SecretHints,
+    is_sensitive_text,
+)
+from apex_automation.ea_pages import (
+    PASSWORD_FIELD_TERMS,
+    PASSWORD_LINK_TERMS,
+    SUBMIT_TERMS,
+    EaPage,
+    classify_page,
+    identity_candidates,
+    identity_matches,
+    is_login_error,
+    mask_identity,
+    page_markers,
+    password_page_blocker,
+)
+from apex_automation.ocr_obstacles import OcrToken, normalize_ocr_text
+
+
+def tokens(*texts: str) -> tuple[str, ...]:
+    return tuple(normalize_ocr_text(text) for text in texts)
+
+
+# Real EA surfaces, transcribed as OCR returns them: one text block per line.
+EMAIL_PAGE = tokens(
+    "Sign in",
+    "Email or EA ID",
+    "Forgot your password?",
+    "Next",
+    "Create an account",
+)
+
+PASSWORD_PAGE = tokens(
+    "Sign in",
+    "player@example.test",
+    "Password",
+    "Forgot your password?",
+    "Sign in",
+)
+
+OTP_PAGE = tokens("Verify your identity", "Enter the code", "Security code", "Verify")
+
+SIGNED_IN_PAGE = tokens(
+    "Store",
+    "Library",
+    "Browse",
+    "Search",
+    "maraninovo253",
+    "Apex Legends",
+)
+
+
+class PageClassificationTest(unittest.TestCase):
+    def test_forgot_password_link_does_not_make_the_email_page_a_password_page(
+        self,
+    ) -> None:
+        self.assertIs(classify_page(EMAIL_PAGE), EaPage.EMAIL)
+
+    def test_password_page_is_recognised_while_the_email_is_still_displayed(
+        self,
+    ) -> None:
+        self.assertIs(classify_page(PASSWORD_PAGE), EaPage.PASSWORD)
+
+    def test_account_field_wins_a_transition_frame(self) -> None:
+        transition = EMAIL_PAGE + tokens("Password")
+        self.assertIs(classify_page(transition), EaPage.EMAIL)
+        self.assertEqual(
+            password_page_blocker(transition),
+            "ACCOUNT_LABEL_STILL_VISIBLE",
+        )
+
+    def test_blockers_name_the_two_stalled_states_apart(self) -> None:
+        self.assertEqual(password_page_blocker(EMAIL_PAGE), "STILL_ON_ACCOUNT_PAGE")
+        self.assertEqual(password_page_blocker(PASSWORD_PAGE), "")
+        self.assertEqual(password_page_blocker(tokens("Loading")), "NO_PASSWORD_FIELD")
+
+    def test_otp_and_captcha_outrank_the_login_fields(self) -> None:
+        self.assertIs(classify_page(OTP_PAGE), EaPage.OTP)
+        self.assertIs(
+            classify_page(EMAIL_PAGE + tokens("hCaptcha")),
+            EaPage.CAPTCHA,
+        )
+
+    def test_signed_in_needs_more_than_one_marker(self) -> None:
+        self.assertIs(classify_page(SIGNED_IN_PAGE), EaPage.SIGNED_IN)
+        self.assertIs(classify_page(tokens("Store")), EaPage.UNKNOWN)
+
+    def test_expired_session_is_its_own_page(self) -> None:
+        self.assertIs(
+            classify_page(tokens("Your session has expired", "Back to sign in")),
+            EaPage.EXPIRED_SESSION,
+        )
+
+    def test_login_errors_are_visible_to_the_caller(self) -> None:
+        self.assertTrue(
+            is_login_error("".join(tokens("Your credentials are incorrect")))
+        )
+        self.assertFalse(is_login_error("".join(EMAIL_PAGE)))
+
+    def test_markers_describe_a_frame_without_quoting_it(self) -> None:
+        markers = page_markers(PASSWORD_PAGE)
+        self.assertIn("password", markers)
+        self.assertIn("passwordLink", markers)
+        self.assertNotIn("account", markers)
+
+
+class IdentityMatchTest(unittest.TestCase):
+    def test_candidates_keep_account_shaped_runs_only(self) -> None:
+        found = identity_candidates(tokens("maraninovo253", "Play", "1234567890"))
+        self.assertIn("maraninovo253", found)
+        self.assertNotIn("play", found)
+        self.assertNotIn("1234567890", found)
+
+    def test_known_ocr_confusions_still_match(self) -> None:
+        self.assertTrue(identity_matches("ubyh3jlp5fr1", "ubyh3j1p5fr1"))
+        self.assertTrue(identity_matches("maraninovo253", "maraninov0253"))
+
+    def test_a_different_account_never_matches(self) -> None:
+        self.assertFalse(identity_matches("maraninovo253", "maraninovo254"))
+        self.assertFalse(identity_matches("maraninovo253", ""))
+
+    def test_masking_keeps_both_ends_only(self) -> None:
+        self.assertEqual(mask_identity("maraninovo253"), "mara...o253")
+
+
+class AnchorTargetingTest(unittest.TestCase):
+    """`_anchor` is a static rule over OCR boxes, so it runs off Windows."""
+
+    WINDOW = (100, 100, 700, 900)
+
+    def observation(self, *placed: tuple[str, int, int, float]) -> EaObservation:
+        tokens = tuple(
+            OcrToken(text, confidence, (x - 40, y - 8, x + 40, y + 8))
+            for text, x, y, confidence in placed
+        )
+        return EaObservation(
+            rect=self.WINDOW,
+            frame=np.zeros((1, 1), dtype=np.uint8),
+            tokens=tokens,
+            page=classify_page(token.normalized for token in tokens),
+        )
+
+    def test_password_anchor_never_lands_on_the_reset_link(self) -> None:
+        observation = self.observation(
+            ("Forgot your password?", 400, 640, 0.99),
+            ("Password", 400, 500, 0.80),
+        )
+        point = WindowsEaHybridDriver._anchor(
+            observation,
+            PASSWORD_FIELD_TERMS,
+            y_range=(0.20, 0.80),
+            exclude=PASSWORD_LINK_TERMS,
+        )
+        self.assertEqual(point, (400, 500))
+
+    def test_submit_anchor_prefers_the_first_named_term(self) -> None:
+        observation = self.observation(
+            ("Sign in", 400, 300, 0.99),
+            ("Next", 400, 650, 0.70),
+        )
+        point = WindowsEaHybridDriver._anchor(
+            observation,
+            SUBMIT_TERMS,
+            y_range=(0.35, 0.95),
+        )
+        self.assertEqual(point, (400, 650))
+
+    def test_tokens_outside_the_band_are_ignored(self) -> None:
+        observation = self.observation(("Next", 400, 150, 0.99))
+        self.assertIsNone(
+            WindowsEaHybridDriver._anchor(
+                observation,
+                SUBMIT_TERMS,
+                y_range=(0.35, 0.95),
+            )
+        )
+
+    def test_identifier_echo_survives_ocr_dropping_punctuation(self) -> None:
+        observation = self.observation(("player@example.test", 400, 500, 0.90))
+        self.assertTrue(
+            WindowsEaHybridDriver._identifier_echoed(
+                observation,
+                "player@example.test",
+            )
+        )
+        self.assertFalse(
+            WindowsEaHybridDriver._identifier_echoed(
+                self.observation(("Email or EA ID", 400, 500, 0.90)),
+                "player@example.test",
+            )
+        )
+
+
+class EvidenceRedactionTest(unittest.TestCase):
+    def test_emails_and_codes_are_sensitive(self) -> None:
+        self.assertTrue(is_sensitive_text("player@example.test"))
+        self.assertTrue(is_sensitive_text("482913"))
+        self.assertFalse(is_sensitive_text("Password"))
+
+    def test_hints_catch_the_identifier_even_when_ocr_drops_punctuation(self) -> None:
+        hints = SecretHints.for_login("player.one@example.test")
+        self.assertTrue(hints.hits("playerone examp1e"[:9]))
+        self.assertTrue(hints.hits("PLAYER.ONE"))
+        self.assertFalse(hints.hits("Sign in"))
+
+    def test_steps_are_written_and_sensitive_values_are_refused(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            evidence = EaLoginEvidence(Path(directory), save_screenshots=False)
+            evidence.step(
+                "account-typed",
+                page="EMAIL",
+                markers=("account", "submit"),
+                fieldTarget="anchor",
+                identifierEchoed=True,
+            )
+            record = json.loads(evidence.steps_path.read_text(encoding="utf-8"))
+            self.assertEqual(record["step"], "account-typed")
+            self.assertEqual(record["page"], "EMAIL")
+            self.assertTrue(record["identifierEchoed"])
+            with self.assertRaises(ValueError):
+                evidence.step("leak", page="EMAIL", note="player@example.test")
+            with self.assertRaises(ValueError):
+                evidence.step("leak", page="EMAIL", loginIdentifier="masked")
+
+    def test_rotating_starts_a_new_attempt(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            evidence = EaLoginEvidence(Path(directory), save_screenshots=False)
+            evidence.step("first", page="EMAIL")
+            first = evidence.dir
+            second = evidence.rotate()
+            evidence.step("second", page="PASSWORD")
+            self.assertNotEqual(first, second)
+            self.assertEqual(
+                json.loads((first / "steps.jsonl").read_text(encoding="utf-8"))["seq"],
+                1,
+            )
+            record = json.loads(evidence.steps_path.read_text(encoding="utf-8"))
+            self.assertEqual((record["seq"], record["step"]), (1, "second"))
+
+    def test_pruning_keeps_the_recent_attempts(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            for name in ("20260101-000000", "20260102-000000", "20260103-000000"):
+                (root / name).mkdir(parents=True)
+            evidence = EaLoginEvidence(root, keep_attempts=2, save_screenshots=False)
+            evidence.prune()
+            remaining = sorted(path.name for path in root.iterdir())
+            self.assertIn(evidence.dir.name, remaining)
+            self.assertNotIn("20260101-000000", remaining)
+
+
+if __name__ == "__main__":
+    unittest.main()
