@@ -171,7 +171,8 @@ class WindowsEaHybridDriver:
     def _send(self, inputs: list["INPUT"]) -> None:
         array_type = INPUT * len(inputs)
         payload = array_type(*inputs)
-        if self.user32.SendInput(len(payload), payload, ctypes.sizeof(INPUT)) != len(payload):
+        pointer = ctypes.cast(payload, ctypes.POINTER(INPUT))
+        if self.user32.SendInput(len(payload), pointer, ctypes.sizeof(INPUT)) != len(payload):
             raise EaAppAutomationError("EA App 输入事件发送不完整")
 
     def _click(self, hwnd: int, x_ratio: float, y_ratio: float) -> None:

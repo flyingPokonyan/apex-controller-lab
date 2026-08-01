@@ -153,7 +153,8 @@ class Win32InputSender:
     def _send(self, inputs: list["INPUT"]) -> None:
         array_type = INPUT * len(inputs)
         payload = array_type(*inputs)
-        sent = self.user32.SendInput(len(payload), payload, ctypes.sizeof(INPUT))
+        pointer = ctypes.cast(payload, ctypes.POINTER(INPUT))
+        sent = self.user32.SendInput(len(payload), pointer, ctypes.sizeof(INPUT))
         if sent != len(payload):
             raise OSError(f"SendInput 只发送了 {sent}/{len(payload)} 个事件")
 
