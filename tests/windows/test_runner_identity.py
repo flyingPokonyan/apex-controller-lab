@@ -95,6 +95,23 @@ class RunnerSettingsTest(unittest.TestCase):
                 }
             )
 
+    def test_plain_http_private_ip_is_allowed_for_lan_validation(self) -> None:
+        settings = load_runner_settings(
+            managed=True,
+            environ={
+                "APEX_REPORT_URL": "http://192.168.31.200/v1/runner/reports",
+                "APEX_REPORT_TOKEN": "report-token",
+                "APEX_DEVICE_ID": "dev_lan",
+                "APEX_LEASE_URL": "http://192.168.31.200/v1/runner/account-leases",
+                "APEX_PROVIDER_TOKEN": "provider-token",
+            },
+        )
+
+        self.assertEqual(
+            settings.lease_url,
+            "http://192.168.31.200/v1/runner/account-leases",
+        )
+
     def test_managed_reporting_binds_device_but_not_a_static_account(self) -> None:
         settings = load_runner_settings(
             managed=True,

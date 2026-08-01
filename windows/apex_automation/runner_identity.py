@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+import ipaddress
 import json
 import os
 from pathlib import Path
@@ -121,9 +122,21 @@ def _validate_https_url(value: str, name: str) -> str:
         raise RunnerConfigurationError(f"{name} 必须是完整的接口 URL")
     if parsed.scheme == "https":
         return value
-    if parsed.scheme == "http" and parsed.hostname in {"localhost", "127.0.0.1", "::1"}:
+    if parsed.scheme == "http" and _is_private_test_host(parsed.hostname):
         return value
-    raise RunnerConfigurationError(f"{name} 必须使用 HTTPS（本机联调地址除外）")
+    raise RunnerConfigurationError(f"{name} 必须使用 HTTPS（本机或私网联调地址除外）")
+
+
+def _is_private_test_host(hostname: str | None) -> bool:
+    if hostname == "localhost":
+        return True
+    if hostname is None:
+        return False
+    try:
+        address = ipaddress.ip_address(hostname)
+    except ValueError:
+        return False
+    return address.is_loopback or address.is_private
 
 
 def _lease_url_from_base(value: str) -> str:

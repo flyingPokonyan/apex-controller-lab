@@ -4,6 +4,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from email.utils import parsedate_to_datetime
 from enum import Enum
+import ipaddress
 import json
 from typing import Callable, Mapping, Protocol
 from urllib.error import HTTPError, URLError
@@ -13,6 +14,18 @@ from urllib.request import HTTPRedirectHandler, Request, build_opener
 
 DEFAULT_TASK_TYPE = "LEVEL_TO_TARGET"
 MAX_PROVIDER_RESPONSE_BYTES = 1024 * 1024
+
+
+def _is_private_test_host(hostname: str | None) -> bool:
+    if hostname == "localhost":
+        return True
+    if hostname is None:
+        return False
+    try:
+        address = ipaddress.ip_address(hostname)
+    except ValueError:
+        return False
+    return address.is_loopback or address.is_private
 
 
 class LeaseProviderError(RuntimeError):
@@ -300,11 +313,7 @@ class HttpAccountProvider:
         transport: ProviderHttpTransport | None = None,
     ) -> None:
         parsed = urlparse(str(lease_url))
-        local_http = parsed.scheme == "http" and parsed.hostname in {
-            "localhost",
-            "127.0.0.1",
-            "::1",
-        }
+        local_http = parsed.scheme == "http" and _is_private_test_host(parsed.hostname)
         if (
             not parsed.netloc
             or parsed.query
@@ -313,7 +322,7 @@ class HttpAccountProvider:
             or parsed.password
             or (parsed.scheme != "https" and not local_http)
         ):
-            raise ValueError("leaseUrl 必须是 HTTPS 完整接口 URL（本机联调除外）")
+            raise ValueError("leaseUrl 必须是 HTTPS 完整接口 URL（本机或私网联调除外）")
         token = str(provider_token)
         if not 1 <= len(token) <= 512:
             raise ValueError("providerToken 长度必须在 1 到 512 之间")

@@ -87,6 +87,21 @@ class HttpAccountProviderTest(unittest.TestCase):
             transport=transport,
         )
 
+    def test_private_ip_http_is_allowed_but_public_http_is_rejected(self) -> None:
+        provider = HttpAccountProvider(
+            "http://192.168.31.200/v1/runner/account-leases",
+            "provider-secret-token",
+            client_version="0.5.0",
+            transport=FakeTransport(response(None, status=204)),
+        )
+        self.assertEqual(provider.lease_url, "http://192.168.31.200/v1/runner/account-leases")
+        with self.assertRaisesRegex(ValueError, "HTTPS"):
+            HttpAccountProvider(
+                "http://runner.example/v1/runner/account-leases",
+                "provider-secret-token",
+                client_version="0.5.0",
+            )
+
     def test_claim_uses_contract_and_keeps_token_out_of_repr(self) -> None:
         transport = FakeTransport(response(lease_payload()))
         provider = self.provider(transport)
