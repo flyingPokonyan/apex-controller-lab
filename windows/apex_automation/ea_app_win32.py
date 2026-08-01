@@ -37,6 +37,9 @@ MOUSEEVENTF_LEFTDOWN = 0x0002
 MOUSEEVENTF_LEFTUP = 0x0004
 VK_TAB = 0x09
 VK_RETURN = 0x0D
+VK_BACK = 0x08
+VK_CONTROL = 0x11
+VK_A = 0x41
 
 
 if sys.platform == "win32":
@@ -217,6 +220,18 @@ class WindowsEaHybridDriver:
             ]
         )
 
+    def _clear_focused_field(self) -> None:
+        self._send(
+            [
+                INPUT(type=INPUT_KEYBOARD, ki=KEYBDINPUT(VK_CONTROL, 0, 0, 0, 0)),
+                INPUT(type=INPUT_KEYBOARD, ki=KEYBDINPUT(VK_A, 0, 0, 0, 0)),
+                INPUT(type=INPUT_KEYBOARD, ki=KEYBDINPUT(VK_A, 0, KEYEVENTF_KEYUP, 0, 0)),
+                INPUT(type=INPUT_KEYBOARD, ki=KEYBDINPUT(VK_CONTROL, 0, KEYEVENTF_KEYUP, 0, 0)),
+                INPUT(type=INPUT_KEYBOARD, ki=KEYBDINPUT(VK_BACK, 0, 0, 0, 0)),
+                INPUT(type=INPUT_KEYBOARD, ki=KEYBDINPUT(VK_BACK, 0, KEYEVENTF_KEYUP, 0, 0)),
+            ]
+        )
+
     def _frame(self) -> np.ndarray:
         grab = getattr(self.capture_source, "grab", None)
         if not callable(grab):
@@ -298,10 +313,12 @@ class WindowsEaHybridDriver:
         if self._state(hwnd) is not EaUiState.LOGIN:
             raise EaAppAutomationError("EA App 当前不是登录页")
         self._click(hwnd, 0.50, 0.50)
+        self._clear_focused_field()
         self._type_secret(credentials.login_identifier)
         self._click(hwnd, 0.50, 0.69)
         self.sleep(2.0)
         self._click(hwnd, 0.50, 0.50)
+        self._clear_focused_field()
         self._type_secret(credentials.password)
         self._click(hwnd, 0.50, 0.69)
 
@@ -316,6 +333,7 @@ class WindowsEaHybridDriver:
                 challenge = OtpChallenge(uuid.uuid4().hex, datetime.now(timezone.utc))
                 otp = otp_supplier(challenge)
                 self._click(hwnd, 0.50, 0.50)
+                self._clear_focused_field()
                 self._type_secret(otp.code)
                 self._click(hwnd, 0.50, 0.69)
         raise EaAppAutomationError("EA App 登录后未在时限内出现可验证身份")
