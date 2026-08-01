@@ -352,6 +352,27 @@ class WindowsEaHybridDriver:
             self.sleep(1.0)
         return False
 
+    def _wait_for_password_page(
+        self,
+        hwnd: int,
+        *,
+        timeout_s: float = 15.0,
+    ) -> bool:
+        deadline = time.monotonic() + timeout_s
+        while time.monotonic() < deadline:
+            compact = "".join(token.normalized for token in self._tokens(hwnd))
+            has_password = any(term in compact for term in ("password", "密码"))
+            # The email page contains "Forgot your password", so the word
+            # password alone is not transition evidence.  The account field
+            # must have disappeared as well.
+            has_account_field = any(
+                term in compact for term in ("emailoreaid", "邮箱或eaid")
+            )
+            if has_password and not has_account_field:
+                return True
+            self.sleep(1.0)
+        return False
+
     def preflight(self) -> EaUiState:
         hwnd = self._ea_window()
         self._dismiss_expired_session(hwnd)
@@ -383,7 +404,7 @@ class WindowsEaHybridDriver:
             self._clear_focused_field()
             self._type_secret(credentials.login_identifier)
             self._click(hwnd, 0.50, 0.69)
-            if not self._wait_for_text(hwnd, ("password", "密码")):
+            if not self._wait_for_password_page(hwnd):
                 raise EaAppAutomationError("EA App 提交账号后未出现密码页")
         self._click(hwnd, 0.50, 0.50)
         self._clear_focused_field()
