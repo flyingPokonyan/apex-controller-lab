@@ -20,6 +20,28 @@ if CV2_AVAILABLE:
 
 @unittest.skipUnless(CV2_AVAILABLE, "account-cycle CLI requires the Windows OpenCV runtime")
 class AccountCycleCliTest(unittest.TestCase):
+    def test_check_reads_current_lease_without_claiming(self) -> None:
+        settings = RunnerSettings(
+            enabled=True,
+            device_id="device_1",
+            report_url="https://runner.example/v1/runner/reports",
+            report_token="report-token",
+            lease_url="https://runner.example/v1/runner/account-leases",
+            provider_token="provider-token",
+        )
+        provider = Mock()
+        provider.current.return_value = None
+
+        with (
+            patch.object(cli, "load_runner_settings", return_value=settings),
+            patch.object(cli, "HttpAccountProvider", return_value=provider),
+        ):
+            exit_code = cli.run_account_cycle_check()
+
+        self.assertEqual(exit_code, 0)
+        provider.current.assert_called_once_with()
+        provider.claim.assert_not_called()
+
     def test_missing_ea_uia_stops_before_provider_can_claim(self) -> None:
         settings = RunnerSettings(
             enabled=True,

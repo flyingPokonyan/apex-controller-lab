@@ -9,8 +9,8 @@ $PrefixArgs = @()
 if ($args.Count -ge 1) {
     $Command = [string]$args[0]
 }
-if (@("validate", "observe", "live", "start", "play", "account-cycle", "probe-input") -notcontains $Command) {
-    throw "Unknown command: $Command (supported: validate, observe, live, start, play, account-cycle, probe-input)"
+if (@("validate", "observe", "live", "start", "play", "account-cycle", "account-cycle-check", "probe-input") -notcontains $Command) {
+    throw "Unknown command: $Command (supported: validate, observe, live, start, play, account-cycle, account-cycle-check, probe-input)"
 }
 if ($args.Count -gt 1) {
     for ($Index = 1; $Index -lt $args.Count; $Index++) {

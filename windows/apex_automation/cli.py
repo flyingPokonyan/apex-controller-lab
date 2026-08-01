@@ -11,7 +11,7 @@ import json
 
 from . import __version__
 from .account_orchestrator import AccountOrchestrator
-from .account_provider import AccountProvider, HttpAccountProvider
+from .account_provider import AccountProvider, HttpAccountProvider, LeaseProviderError
 from .capabilities import CapabilityDispatcher, CapabilitySet
 from .capture import DxcamFrameSource
 from .config import (
@@ -669,7 +669,7 @@ def run_account_cycle(
                 settings,
                 runs_root,
             )
-    except (OSError, ValueError, RunnerConfigurationError) as error:
+    except (OSError, ValueError, RunnerConfigurationError, LeaseProviderError) as error:
         print(f"account-cycle 配置错误：{error}", file=sys.stderr)
         return 2
 
@@ -722,6 +722,32 @@ def run_account_cycle(
             lock.release()
         except Exception as error:
             print(f"运行锁释放失败：{error}", file=sys.stderr)
+
+
+def run_account_cycle_check(*, runner_config_path: Path | None = None) -> int:
+    """Validate managed network and Provider auth without claiming an account."""
+    try:
+        settings = load_runner_settings(
+            explicit_path=runner_config_path,
+            default_path=REPOSITORY_ROOT / "windows" / "account-cycle.private.json",
+            managed=True,
+        )
+        if settings.lease_url is None or settings.provider_token is None:
+            raise RunnerConfigurationError("托管模式必须配置 leaseUrl/providerToken")
+        provider = HttpAccountProvider(
+            settings.lease_url,
+            settings.provider_token,
+            client_version=__version__,
+        )
+        lease = provider.current()
+    except (OSError, ValueError, RunnerConfigurationError, LeaseProviderError) as error:
+        print(f"account-cycle-check 失败：{error}", file=sys.stderr)
+        return 2
+    if lease is None:
+        print("Runner 配置与 Provider 鉴权正常；当前没有活动租约。")
+    else:
+        print(f"Runner 配置与 Provider 鉴权正常；发现活动租约 {lease.lease_id}。")
+    return 0
 
 
 def run_start(
@@ -890,6 +916,15 @@ def build_parser() -> argparse.ArgumentParser:
         default=30.0,
         help="服务端暂无账号时的最小轮询间隔",
     )
+    account_cycle_check = subparsers.add_parser(
+        "account-cycle-check",
+        help="只验证托管配置、网络和 Provider 鉴权，不领取账号",
+    )
+    account_cycle_check.add_argument(
+        "--runner-config",
+        type=Path,
+        help="托管设备私有配置；默认读取 windows/account-cycle.private.json",
+    )
     probe = subparsers.add_parser(
         "probe-input",
         help="向游戏发几个明显动作，用来确认 SendInput 到底进不进得去",
@@ -938,6 +973,8 @@ def main(argv: list[str] | None = None) -> int:
             runner_config_path=args.runner_config,
             idle_s=args.idle_s,
         )
+    if command == "account-cycle-check":
+        return run_account_cycle_check(runner_config_path=args.runner_config)
     if command == "start":
         return run_start(
             args.config,
