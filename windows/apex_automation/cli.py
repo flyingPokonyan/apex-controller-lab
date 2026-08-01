@@ -645,6 +645,7 @@ def run_account_cycle(
     runner_config_path: Path | None = None,
     idle_s: float = 30.0,
     once: bool = False,
+    resume: bool = False,
     provider: AccountProvider | None = None,
     ea_driver: EaAppDriver | None = None,
     play_session: PlaySessionRunner | None = None,
@@ -727,6 +728,8 @@ def run_account_cycle(
                 recover_report_drain=play_session.recover_report_drain,
                 notify=print,
             )
+            if resume:
+                orchestrator.resume()
             if once:
                 # One account, one attempt, then stop. Verifying a stage
                 # against the loop means every failure immediately claims the
@@ -740,7 +743,14 @@ def run_account_cycle(
                 if result.error_code:
                     details.append(f"原因={result.error_code}")
                 print("单次托管运行结束：" + "，".join(details))
-                return 1 if result.outcome is AccountCycleOutcome.PAUSED else 0
+                if result.outcome is AccountCycleOutcome.PAUSED:
+                    print(
+                        "本地仍处于暂停状态。确认暂停原因已解决后，"
+                        "用 account-cycle-resume.cmd（或加 --resume）继续。",
+                        file=sys.stderr,
+                    )
+                    return 1
+                return 0
             return orchestrator.run_forever(idle_s=max(1.0, idle_s))
     except (EmergencyStop, KeyboardInterrupt):
         return 0
@@ -1218,6 +1228,11 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="只跑一个账号一轮就退出，不进入持续领号循环",
     )
+    account_cycle.add_argument(
+        "--resume",
+        action="store_true",
+        help="清除本地人工暂停状态后再运行；暂停原因必须先确认已解决",
+    )
     account_cycle_check = subparsers.add_parser(
         "account-cycle-check",
         help="只验证托管配置、网络和 Provider 鉴权，不领取账号",
@@ -1288,6 +1303,7 @@ def main(argv: list[str] | None = None) -> int:
             runner_config_path=args.runner_config,
             idle_s=args.idle_s,
             once=args.once,
+            resume=args.resume,
         )
     if command == "account-cycle-check":
         return run_account_cycle_check(runner_config_path=args.runner_config)

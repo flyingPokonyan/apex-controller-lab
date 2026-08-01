@@ -737,6 +737,36 @@ class AccountOrchestratorTest(unittest.TestCase):
                     [],
                 )
 
+    def test_resume_clears_a_manual_pause_the_operator_has_resolved(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            store = AtomicCheckpointStore(
+                Path(directory) / "account-cycle-status.json"
+            )
+            store.save(
+                OrchestrationCheckpoint(
+                    device_id="device_1",
+                    run_state=OrchestratorRunState.PAUSED_MANUAL,
+                    last_error_code="RUNNER_PAUSED",
+                )
+            )
+            orchestrator = AccountOrchestrator(
+                provider=FakeAccountProvider(),
+                ea_driver=object(),
+                play_session=object(),
+                checkpoint_store=store,
+                device_id="device_1",
+                capture_source=object(),
+                notify=lambda _: None,
+            )
+
+            self.assertTrue(orchestrator.resume())
+            reloaded = store.load()
+            self.assertEqual(reloaded.run_state, OrchestratorRunState.ACTIVE)
+            self.assertIsNone(reloaded.last_error_code)
+            self.assertIsNone(reloaded.resume_phase)
+            # Nothing to clear on an already active checkpoint.
+            self.assertFalse(orchestrator.resume())
+
     def test_manual_pause_survives_restart_and_retryable_pause_recovers(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             store = AtomicCheckpointStore(

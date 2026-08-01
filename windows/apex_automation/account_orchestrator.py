@@ -811,6 +811,26 @@ class AccountOrchestrator:
             )
             return self._pause("ORCHESTRATOR_FAILED", manual=True)
 
+    def resume(self) -> bool:
+        """Clear a manual pause after the operator has dealt with its cause.
+
+        A manual pause is sticky on purpose — the next cycle must not walk
+        past an orphan run or a stale lease. But the pause outlives whatever
+        caused it, so a server-side hold that has since been lifted keeps
+        answering with the same stale reason code until this is called.
+        """
+
+        if self._checkpoint.run_state is OrchestratorRunState.ACTIVE:
+            return False
+        previous = self._checkpoint.last_error_code
+        self._update_checkpoint(
+            run_state=OrchestratorRunState.ACTIVE,
+            resume_phase=None,
+            last_error_code=None,
+        )
+        self.notify(f"已清除本地暂停状态（原因 {previous or '未记录'}）")
+        return True
+
     def run_forever(self, *, idle_s: float = 30.0) -> int:
         while not self._stop.is_set():
             result = self.run_once()
