@@ -2,15 +2,23 @@
 
 ## 一句话状态
 
-七步验收过了六步。**只剩最后一步：达到目标等级后自动换到下一个账号。**
+**七步验收全部通过，托管切号闭环打通。**
 
-托管运行 `20260801-230808-48fa12db` 用一个账号连续跑完了：EA 登录 → 新设备验证 →
-核对 EA ID → 启动 Apex → 大厅读出等级 → 上报服务端 → 打完一局回大厅 → 自动开下一局 →
-按 F8 后停 Apex、登出 EA、释放租约。全程 17 分钟，服务端接收 110 个事件。
+- `20260801-230808-48fa12db`：一个账号 17 分钟连续跑完 EA 登录 → 新设备验证 → 核对 EA ID →
+  启动 Apex → 大厅读出等级 → 上报服务端 → 打完一局回大厅 → 自动开下一局 → F8 干净收口。
+  服务端接收 110 个事件。
+- `20260801-234225-f4119100`：账号 A 进大厅读到 `level=10 >= target_level=10`，直接判达标，
+  上报 `RUN_FINISHED(TARGET_REACHED)`，租约 `COMPLETED / TARGET_REACHED /
+  TARGET_LEVEL_CONFIRMED`，profile 的 `stage` 自动从 `leveling` 变成 `ready_for_sale` 退出账号池。
+- `20260801-234504-f3a44c2f`：循环随即领取账号 B（`acct_e1d7a346…`，fence=2），重新登录、
+  启动 Apex、读出 `level=8`、进入匹配。**A 收口到 B 开打间隔 80 秒，全自动。**
 
-## 明天第一件事
+剩下的都不是闭环问题，见[已知没做的](#已知没做的)：长跑稳定性、只有邮箱验证码的账号、
+以及若干识别不出的画面。
 
-验证第 7 步：**自然达标 + 自动换号**。
+## 复现这一步的方法
+
+第 7 步（自然达标 + 自动换号）的验证方式，留档备用：
 
 ### 前置
 
@@ -25,10 +33,13 @@
 
 ```sql
 -- 库在 /Users/jie/Desktop/Gpt_register/gpt_forge/backend/data/gptforge.db
--- A = 今晚跑通那一轮用的账号，服务端已记录 current_level=10、level_trust=trusted
-UPDATE apex_profiles SET target_level = 10
-WHERE public_id = 'acct_1febebef1cca4119bcd646c66d796472';
+-- 挑一个服务端已记录 current_level 且 level_trust=trusted 的账号
+UPDATE apex_profiles SET target_level = <该账号的 current_level>
+WHERE public_id = '<accountId>';
 ```
+
+2026-08-01 那次用的是 `acct_1febebef1cca4119bcd646c66d796472`（`current_level=10`），
+它现在已经是 `ready_for_sale`，不能再用来复现。
 
 `TargetLevelPolicy` 在安全大厅里读到 `level >= target_level` 就直接判 `TARGET_REACHED`，
 不需要打完一局（`progression_policy.py:111`）。`eligibility()` 不检查等级是否已达标，
@@ -98,7 +109,7 @@ WHERE r.client_run_id = '<runId>' GROUP BY type;
   邮箱凭据和 Outlook/IMAP 处理器在 `gpt_forge` 里是现成的（注册流程已经在读 EA 验证码邮件），
   需要的是在租约 API 上补一个接口，并且**只接受 `challengeStartedAt` 之后收到的邮件**。
   客户端协议不用改：`OtpChallenge` 那套本来就是为这个设计的。
-- **两个账号连续切换**：即第 7 步。
+- ~~两个账号连续切换~~：已于 2026-08-01 23:45 验证通过。
 - **长时间稳定性**：目前最长一次运行 17 分钟。打到 20 级要几小时，期间会遇到 Apex 更新、
   EA 弹窗、网络抖动、匹配失败等还没碰过的情况。
 - **未知画面**（本轮 6 张）：都是启动闪屏或被提示浮层遮住的局内画面，程序的反应是等待，
