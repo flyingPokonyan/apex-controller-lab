@@ -71,12 +71,18 @@ Windows 第一次克隆后，进入 `windows` 目录运行 `setup.ps1`。以后�
 调度器发送；识别不出、验证码或 OCR 异常都会停住并留证，不会点击覆盖层下面的大厅。
 同一台机器重复双击时只有第一个会话能取得运行锁。
 
-自动切号入口预留为 `windows\account-cycle.cmd`。会话抽取、20 级停止策略、租约
-checkpoint、续租、终态恢复和真实 Provider HTTP 已经实现；EA App UIA 驱动仍待目标
-Windows 控件树勘察，因此当前入口会明确拒绝领取账号，不会尝试登录或发送输入。实施状态
-见 [EA App 自动登录与 20 级切号编排设计](docs/ea-account-orchestrator-design.md#19-当前实现状态)。
-回到目标机后先让 EA App 停在登录页，双击 `windows\probe-ea-uia.cmd`；脱敏控件树会
-保存到 `windows\runs\ea-uia-*.txt`，用于完成真实 UIA 驱动。
+自动切号入口是 `windows\account-cycle.cmd`。会话抽取、20 级停止策略、租约
+checkpoint、续租、终态恢复和真实 Provider HTTP 已经实现；EA App 没有对外暴露内部 UIA
+控件树，所以登录走 Win32 加 OCR 的混合驱动。实施状态见
+[EA App 自动登录与 20 级切号编排设计](docs/ea-account-orchestrator-design.md#19-当前实现状态)，
+当前实测进度见 [EA 自动切号进度](docs/ea-account-cycle-progress-20260801.md)。
+
+调试登录不要用 `account-cycle.cmd`：它是持续循环，一次失败清理完就会去领下一个真实
+账号。改用 `windows\ea-login-check.cmd`，它只领一个租约、只验证登录、不启动 Apex，
+无论成功失败都会关闭租约并退出，并把每一步的页面判定、点击定位方式和脱敏截图留在
+`windows\runs\ea-login\<时间戳>\`。证据里不含邮箱全文、密码、Token 或 OTP。
+需要控件树时，让 EA App 停在登录页后双击 `windows\probe-ea-uia.cmd`，脱敏结果保存到
+`windows\runs\ea-uia-*.txt`。
 
 两个入口使用不同的私有配置：固定账号的 `play.cmd` 读取
 `windows\runner.private.json`；动态领号的 `account-cycle.cmd` 读取

@@ -6,12 +6,21 @@ from pathlib import Path
 import sys
 import time
 from typing import Callable
+import uuid
 
 import json
 
 from . import __version__
 from .account_orchestrator import AccountOrchestrator
-from .account_provider import AccountProvider, HttpAccountProvider, LeaseProviderError
+from .account_provider import (
+    DEFAULT_TASK_TYPE,
+    AccountLease,
+    AccountProvider,
+    CleanupEvidence,
+    HttpAccountProvider,
+    LeaseProviderError,
+    OtpCode,
+)
 from .capabilities import CapabilityDispatcher, CapabilitySet
 from .capture import DxcamFrameSource
 from .config import (
@@ -24,10 +33,13 @@ from .config import (
 )
 from .control import TaskControl, TaskStopRequested
 from .control_server import LocalControlServer
-from .ea_app import EaAppDriver
+from .ea_app import EaAppAutomationError, EaAppDriver, OtpChallenge
 from .ea_app_win32 import WindowsEaHybridDriver
+from .ea_evidence import EaLoginEvidence, default_evidence_root
+from .ea_pages import mask_identity
 from .input_win32 import EmergencyStop, Win32InputSender, Win32SafetyGuard
 from .instance_lock import AlreadyRunningError, SingleInstanceLock
+from .lease_keeper import LeaseKeeper
 from .observer import ObservationSession
 from .ocr_obstacles import FullFrameOcrProvider, OcrObstacleDetector, RapidOcrProvider
 from .ocr_states import OcrStateDetector
@@ -688,7 +700,16 @@ def run_account_cycle(
             output_index=int(config.environment["outputIndex"]),
         ) as source:
             if ea_driver is None:
-                ea_driver = WindowsEaHybridDriver(capture_source=source)
+                # The managed loop moves on to the next account as soon as it
+                # cleans up, so a login failure has to leave its own frames
+                # behind or the run that hit it is unreviewable.
+                evidence = EaLoginEvidence(default_evidence_root(runs_root))
+                evidence.prune()
+                ea_driver = WindowsEaHybridDriver(
+                    capture_source=source,
+                    evidence=evidence,
+                    notify=print,
+                )
             preflight = getattr(ea_driver, "preflight", None)
             if callable(preflight):
                 state = preflight()
@@ -747,6 +768,217 @@ def run_account_cycle_check(*, runner_config_path: Path | None = None) -> int:
     else:
         print(f"Runner 配置与 Provider 鉴权正常；发现活动租约 {lease.lease_id}。")
     return 0
+
+
+def run_ea_login_check(
+    config_path: Path,
+    *,
+    runner_config_path: Path | None = None,
+) -> int:
+    """Claim one lease, prove the EA login, close it again. No Apex.
+
+    The managed loop claims the next account the moment a failure is cleaned
+    up, so debugging login against `account-cycle` burns real accounts on the
+    same question. This command answers it once and stops.
+    """
+
+    if sys.platform != "win32":
+        print("ea-login-check 模式只能在 Windows 上运行。", file=sys.stderr)
+        return 2
+
+    if config_path.expanduser().resolve() == DEFAULT_CONFIG_PATH.resolve():
+        config_path = PLAY_CONFIG_PATH
+    try:
+        config = load_config(config_path)
+        settings = load_runner_settings(
+            explicit_path=runner_config_path,
+            default_path=REPOSITORY_ROOT / "windows" / "account-cycle.private.json",
+            managed=True,
+        )
+        if settings.lease_url is None or settings.provider_token is None:
+            raise RunnerConfigurationError("托管模式必须配置 leaseUrl/providerToken")
+        provider = HttpAccountProvider(
+            settings.lease_url,
+            settings.provider_token,
+            client_version=__version__,
+        )
+    except (OSError, ValueError, RunnerConfigurationError, LeaseProviderError) as error:
+        print(f"ea-login-check 配置错误：{error}", file=sys.stderr)
+        return 2
+
+    runs_root = REPOSITORY_ROOT / "windows" / "runs"
+    lock = SingleInstanceLock(runs_root / "play.lock")
+    try:
+        lock.acquire()
+    except AlreadyRunningError as error:
+        print(str(error), file=sys.stderr)
+        return 2
+
+    evidence = EaLoginEvidence(default_evidence_root(runs_root))
+    lease: AccountLease | None = None
+    keeper: LeaseKeeper | None = None
+    driver: WindowsEaHybridDriver | None = None
+    reason_code = "OPERATOR_STOPPED"
+    outcome = "RELEASED"
+    exit_code = 0
+    try:
+        with DxcamFrameSource(
+            backend=str(config.environment["captureBackend"]),
+            output_index=int(config.environment["outputIndex"]),
+        ) as source:
+            driver = WindowsEaHybridDriver(
+                capture_source=source,
+                evidence=evidence,
+                notify=print,
+            )
+            state = driver.preflight()
+            print(f"EA 领号前预检通过：{state.value}")
+
+            # Never touch a lease this command did not open: it may belong to
+            # a paused account-cycle checkpoint that still owns the account.
+            existing = provider.current()
+            if existing is not None and not existing.terminal:
+                print(
+                    f"设备已有活动租约 {existing.lease_id}（{existing.state.value}）。"
+                    "请先用 account-cycle 收口或在运营页安全释放后再跑登录检查。",
+                    file=sys.stderr,
+                )
+                return 2
+
+            lease = provider.claim(uuid.uuid4().hex, DEFAULT_TASK_TYPE)
+            if lease is None:
+                print("服务端当前没有可领取的账号，未执行登录。")
+                return 0
+            print(f"已领取租约 {lease.lease_id}（fence={lease.lease_fence}）")
+            keeper = LeaseKeeper(
+                provider,
+                lease,
+                phase=lambda: "EA_SIGNING_IN",
+                run_id=lambda: None,
+            )
+            keeper.start()
+
+            expected = lease.expected_ea_account_id
+            if not expected:
+                raise EaAppAutomationError("租约缺少可验证的 EA 稳定账号 ID")
+            credentials = provider.credentials(
+                lease.lease_id,
+                lease.lease_fence,
+                uuid.uuid4().hex,
+            )
+
+            def supply_otp(challenge: OtpChallenge) -> OtpCode:
+                return provider.request_otp(
+                    lease.lease_id,
+                    lease.lease_fence,
+                    uuid.uuid4().hex,
+                    challenge.challenge_id,
+                    challenge.started_at,
+                )
+
+            driver.sign_in(credentials, supply_otp)
+            identity = driver.verify_identity(expected)
+            print(
+                "EA 登录检查通过："
+                f"identity={mask_identity(identity.ea_account_id)}, "
+                f"source={identity.source}"
+            )
+    except EaAppAutomationError as error:
+        print(f"EA 登录检查失败：{error.reason_code}：{error}", file=sys.stderr)
+        reason_code = error.reason_code
+        outcome = "FAILED"
+        exit_code = 1
+    except (LeaseProviderError, RunnerConfigurationError) as error:
+        print(f"EA 登录检查中止：{error}", file=sys.stderr)
+        reason_code = "OPERATOR_STOPPED"
+        outcome = "FAILED"
+        exit_code = 1
+    except (EmergencyStop, KeyboardInterrupt):
+        reason_code = "OPERATOR_STOPPED"
+        outcome = "FAILED"
+        exit_code = 1
+    except Exception as error:
+        print(
+            f"EA 登录检查异常：{type(error).__name__}：{error}",
+            file=sys.stderr,
+        )
+        reason_code = "EA_UI_UNKNOWN"
+        outcome = "FAILED"
+        exit_code = 1
+    finally:
+        if keeper is not None:
+            try:
+                keeper.stop()
+            except Exception as error:
+                print(f"租约续期线程停止失败：{error}", file=sys.stderr)
+        if lease is not None:
+            released = _release_login_check_lease(
+                provider,
+                lease,
+                driver,
+                outcome=outcome,
+                reason_code=reason_code,
+            )
+            if not released:
+                exit_code = max(exit_code, 1)
+        try:
+            evidence.prune()
+        except OSError as error:
+            print(f"清理旧证据失败：{error}", file=sys.stderr)
+        print(f"证据目录：{evidence.dir}")
+        try:
+            lock.release()
+        except Exception as error:
+            print(f"运行锁释放失败：{error}", file=sys.stderr)
+    return exit_code
+
+
+def _release_login_check_lease(
+    provider: AccountProvider,
+    lease: AccountLease,
+    driver: WindowsEaHybridDriver | None,
+    *,
+    outcome: str,
+    reason_code: str,
+) -> bool:
+    """Always hand the account back, and say so when that is impossible."""
+
+    apex_exited = True
+    signed_out = False
+    try:
+        if driver is not None:
+            apex_exited = driver.stop_apex().all_processes_exited
+            signed_out = driver.sign_out()
+    except EaAppAutomationError as error:
+        print(f"EA 清理失败：{error}", file=sys.stderr)
+    cleanup = CleanupEvidence(
+        input_released=True,
+        apex_exited=apex_exited,
+        ea_signed_out=signed_out,
+    )
+    if not cleanup.complete:
+        print(
+            "无法确认清理完成，租约未关闭。请在运营页确认 Apex 已退出、EA 已登出后"
+            f"再安全释放租约 {lease.lease_id}。",
+            file=sys.stderr,
+        )
+        return False
+    try:
+        status = provider.close(
+            lease.lease_id,
+            lease.lease_fence,
+            uuid.uuid4().hex,
+            outcome,
+            None,
+            None,
+            reason_code,
+            cleanup,
+        )
+    except LeaseProviderError as error:
+        print(f"关闭租约失败：{error}", file=sys.stderr)
+        return False
+    print(f"租约 {lease.lease_id} 已关闭：{status.state.value}（{reason_code}）")
+    return True
 
 
 def run_ea_preflight(config_path: Path) -> int:
@@ -954,6 +1186,15 @@ def build_parser() -> argparse.ArgumentParser:
         "ea-preflight",
         help="只读识别 EA 窗口、页面状态和稳定账号 ID，不领取账号",
     )
+    ea_login_check = subparsers.add_parser(
+        "ea-login-check",
+        help="只领取一个租约验证 EA 登录，留下脱敏证据后关闭租约，不启动 Apex",
+    )
+    ea_login_check.add_argument(
+        "--runner-config",
+        type=Path,
+        help="托管设备私有配置；默认读取 windows/account-cycle.private.json",
+    )
     probe = subparsers.add_parser(
         "probe-input",
         help="向游戏发几个明显动作，用来确认 SendInput 到底进不进得去",
@@ -1006,6 +1247,11 @@ def main(argv: list[str] | None = None) -> int:
         return run_account_cycle_check(runner_config_path=args.runner_config)
     if command == "ea-preflight":
         return run_ea_preflight(args.config)
+    if command == "ea-login-check":
+        return run_ea_login_check(
+            args.config,
+            runner_config_path=args.runner_config,
+        )
     if command == "start":
         return run_start(
             args.config,
