@@ -29,10 +29,12 @@
 | EA 身份核对 | 已验证 | 21:12 实测：登录后 16 秒读到徽标 `f4vb...gvlb`（置信度 1.000）并与租约下发的稳定 EA ID 匹配。证据见 `windows/runs/ea-login/20260801-211215/` |
 | EA 新设备验证（验证器） | 已验证 | 23:03 实测：识别「Verify your identity」选择页 → 选 App Authenticator → 落到验证器码页 → 取 TOTP 填入 → 登录成功，全程 54 秒。邮箱验证码尚不支持，服务端只能生成 TOTP。证据见 `windows/runs/ea-login/20260801-230321/` |
 | EA 登出并释放租约 | 已验证 | 21:23 和 21:24 连续两次自动登出，`trigger=chevron`，均以 `signed-out / page=EMAIL` 收尾，租约自动关闭。证据见 `windows/runs/ea-login/20260801-212313/` 和 `.../20260801-212412/` |
-| 自动启动 Apex | 部分验证 | 较早的一次实测看到 Apex 进程启动；最新代码未重新完成验证 |
-| Apex 大厅识别、等级/XP 解析 | 未验证 | 托管账号闭环尚未到达稳定大厅，不能确认当前实机解析结果 |
-| `LOBBY_PROGRESS` / `RUN_FINISHED` 远程上报 | 未验证 | 协议和代码已接线，但本轮没有成功游戏流程作为真实上报证据 |
-| 成功退出、EA 登出、释放租约 | 未验证 | 成功路径尚未走通；失败路径已验证 |
+| 自动启动 Apex | 已验证 | 23:08 托管运行：EA 内定位 Apex 入口并启动，进标题页后自动点“继续”、关闭欢迎公告 |
+| Apex 大厅识别、等级/XP 解析 | 已验证 | 大厅解析 `level=9, xp=7.87K/8.15K`，等级置信度 0.99，`readStatus=OK` |
+| `LOBBY_PROGRESS` / `RUN_FINISHED` 远程上报 | 已验证 | 服务端 `accepted_through=110`，`LOBBY_PROGRESS` 载荷完整；`RUN_FINISHED` 以 `STOPPED` 收尾 |
+| 完整对局循环 | 已验证 | `roundsStarted=1, roundsReturnedToLobby=1`：选模式→匹配→跳伞→对局→阵亡观战→回大厅→自动开下一局 |
+| 成功退出、EA 登出、释放租约 | 已验证 | F8 后停 Apex、EA 登出、租约 `RELEASED / OPERATOR_STOPPED`，服务端 `completed_at` 已写入 |
+| 租约续期（长跑） | 已验证 | 17 分钟运行期间按 `renewAfter` 每 2 分钟续租，无中断 |
 | 失败时停止 Apex、EA 登出、关闭租约 | 已验证 | 最近失败租约均以 `FAILED / EA_UI_UNKNOWN` 收口，并记录清理完成 |
 | 自动切换到下一个账号 | 未验证 | 还没有完成两个账号连续运行的实机验收 |
 
@@ -172,11 +174,11 @@ Windows 运行 `account-cycle.cmd` 后，已经真实走通以下链路：
 
 1. ✅ 邮箱页提交后可靠进入密码页——21:12、21:23、21:24 三次全部通过，两次提交都由回车触发；
 2. ✅ 连续两次一次性登录成功并匹配 EA ID——21:23 和 21:24，各约 45 秒，含自动登出和自动关闭租约；
-3. 单次托管运行成功启动 Apex——用 `windows\account-cycle-once.cmd`，不要用会持续领号的 `account-cycle.cmd`；
-4. 识别大厅并连续取得稳定等级/XP；
-5. 服务端收到 `LOBBY_PROGRESS` 和 `RUN_FINISHED`；
-6. 按 F8 后退出 Apex、登出 EA 并正确释放租约；
-7. 最后再验证两个账号连续自动切换。
+3. ✅ 单次托管运行成功启动 Apex——`20260801-230808-48fa12db`；
+4. ✅ 识别大厅并取得稳定等级/XP——`level=9`，置信度 0.99；
+5. ✅ 服务端收到 `LOBBY_PROGRESS` 和 `RUN_FINISHED`——110 个事件全部接收；
+6. ✅ 按 F8 后退出 Apex、登出 EA 并正确释放租约——`RELEASED / OPERATOR_STOPPED`；
+7. 最后再验证两个账号连续自动切换——**唯一剩下的一层**。
 
 第 1、2 步已收口。注意两次登录领到的是同一个账号（`RELEASED` 不加冷却，放回池子后立即可再领），所以“换号”仍未验证，那是第 7 步的事。
 
