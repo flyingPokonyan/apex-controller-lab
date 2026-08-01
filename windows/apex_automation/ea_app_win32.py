@@ -436,18 +436,20 @@ class WindowsEaHybridDriver:
         if any(self._process_running(name) for name in APEX_EXECUTABLES):
             return
         hwnd = self._ea_window()
-        for _ in range(10):
-            if self._state(hwnd) is EaUiState.SIGNED_IN:
+        # The orchestrator verifies the stable EA identity immediately before
+        # entering this method.  Do not repeat that check here: the CEF surface
+        # occasionally yields an empty OCR frame while it is otherwise fully
+        # interactive.  Wait for the actual launch control instead.
+        for _ in range(15):
+            if self._click_ocr_text(
+                hwnd,
+                {"apexlegends"},
+                x_range=(0.0, 0.30),
+                y_range=(0.15, 0.90),
+            ):
                 break
             self.sleep(1.0)
         else:
-            raise EaAppAutomationError("EA App 未处于已登录状态，拒绝启动 Apex")
-        if not self._click_ocr_text(
-            hwnd,
-            {"apexlegends"},
-            x_range=(0.0, 0.30),
-            y_range=(0.15, 0.90),
-        ):
             raise EaAppAutomationError("EA App 未找到左侧 Apex Legends 游戏入口")
         self.sleep(2.0)
         for _ in range(8):
