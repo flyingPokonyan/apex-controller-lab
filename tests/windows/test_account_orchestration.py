@@ -30,6 +30,7 @@ from apex_automation.account_orchestrator import (
 )
 from apex_automation.ea_app import (
     ApexExitEvidence,
+    EaAppAutomationError,
     EaIdentityFact,
     EaUiState,
     OtpChallenge,
@@ -331,6 +332,47 @@ class FakeManagedSession:
 
 
 class AccountOrchestratorTest(unittest.TestCase):
+    def test_ea_login_failure_cleans_up_closes_lease_and_clears_checkpoint(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            lease = replace(
+                FakeAccountProvider.lease("acct_1"),
+                expected_ea_account_id="ea_1",
+            )
+            provider = FakeAccountProvider(
+                [lease],
+                credentials={
+                    "acct_1": SecretCredentials("login@example.test", "password")
+                },
+            )
+            log: list[str] = []
+
+            class LoginFailureDriver(FakeEaDriver):
+                def sign_in(self, credentials, otp_supplier):
+                    self.log.append("ea.sign_in")
+                    raise EaAppAutomationError("login failed")
+
+            store = AtomicCheckpointStore(
+                Path(directory) / "account-cycle-status.json"
+            )
+            result = AccountOrchestrator(
+                provider=provider,
+                ea_driver=LoginFailureDriver(log, "ea_1"),
+                play_session=object(),
+                checkpoint_store=store,
+                device_id="device_1",
+                capture_source=object(),
+                operation_id_factory=iter(
+                    ["claim_1", "renew_1", "credentials_1", "close_1"]
+                ).__next__,
+                notify=lambda _: None,
+            ).run_once()
+
+            self.assertEqual(result.outcome, AccountCycleOutcome.COMPLETED)
+            close_call = [item for item in provider.calls if item[0] == "close"][-1]
+            self.assertEqual(close_call[1][3], "FAILED")
+            self.assertLess(log.index("apex.stop"), log.index("ea.sign_out"))
+            self.assertFalse(store.load().has_lease)
+
     def test_happy_path_orders_cleanup_before_close_and_clears_lease(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             now = datetime.now(timezone.utc)

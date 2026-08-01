@@ -202,6 +202,11 @@ class AccountOrchestrator:
             last_error_code=None,
         )
 
+    def _clear_lease_checkpoint(self) -> None:
+        completed = self.checkpoint_store.clear_completed_lease(self._checkpoint)
+        with self._checkpoint_lock:
+            self._checkpoint = completed
+
     def _obtain_lease(self) -> AccountLease | None:
         checkpoint = self._checkpoint
         remote = self.provider.current()
@@ -218,10 +223,8 @@ class AccountOrchestrator:
                     checkpoint.lease_fence or 0,
                 )
                 if status.terminal:
-                    return self.provider.recover(
-                        status.lease_id,
-                        status.lease_fence,
-                    )
+                    self._clear_lease_checkpoint()
+                    return None
                 raise LeaseStaleError(
                     "本地 checkpoint 有租约，但服务端 current() 没有对应占用"
                 )
@@ -505,6 +508,45 @@ class AccountOrchestrator:
 
         return self._submit_close(lease, result, evidence, cleanup)
 
+    def _cleanup_and_close_preplay_failure(
+        self,
+        lease: AccountLease,
+        reason_code: str,
+    ) -> AccountCycleResult:
+        exit_evidence = self.ea_driver.stop_apex()
+        if not exit_evidence.all_processes_exited:
+            return self._pause("APEX_EXIT_TIMEOUT", manual=True)
+        self._update_checkpoint(workflow_phase=WorkflowPhase.EA_SIGNING_OUT)
+        signed_out = self.ea_driver.sign_out()
+        cleanup = CleanupEvidence(True, True, signed_out)
+        if not cleanup.complete:
+            return self._pause("EA_SIGNOUT_FAILED", manual=True)
+        self._update_checkpoint(workflow_phase=WorkflowPhase.LEASE_COMPLETING)
+        with self._provider_operation_lock:
+            operation_id = self._begin_operation(PendingOperation.CLOSE)
+            status = self.provider.close(
+                lease.lease_id,
+                lease.lease_fence,
+                operation_id,
+                "FAILED",
+                None,
+                None,
+                reason_code,
+                cleanup,
+            )
+            self._finish_operation()
+        if not status.terminal:
+            return self._pause("LEASE_CLOSE_PENDING", manual=True)
+        if self._lease_keeper is not None:
+            self._lease_keeper.stop()
+            self._lease_keeper = None
+        self._clear_lease_checkpoint()
+        return AccountCycleResult(
+            AccountCycleOutcome.COMPLETED,
+            lease_id=lease.lease_id,
+            error_code=reason_code,
+        )
+
     def _submit_close(
         self,
         lease: AccountLease,
@@ -653,11 +695,7 @@ class AccountOrchestrator:
                 if self._lease_keeper is not None:
                     self._lease_keeper.stop()
                     self._lease_keeper = None
-                completed = self.checkpoint_store.clear_completed_lease(
-                    self._checkpoint
-                )
-                with self._checkpoint_lock:
-                    self._checkpoint = completed
+                self._clear_lease_checkpoint()
                 if result.status == "STOPPED":
                     return AccountCycleResult(
                         outcome=AccountCycleOutcome.STOPPED,
@@ -746,6 +784,11 @@ class AccountOrchestrator:
         except LeaseProviderError as error:
             return self._pause(error.code, manual=not error.retryable)
         except EaAppAutomationError as error:
+            if "lease" in locals() and lease is not None:
+                return self._cleanup_and_close_preplay_failure(
+                    lease,
+                    error.reason_code,
+                )
             return self._pause(error.reason_code, manual=True)
         except Exception:
             return self._pause("ORCHESTRATOR_FAILED", manual=True)
