@@ -42,7 +42,7 @@ class AccountCycleCliTest(unittest.TestCase):
         provider.current.assert_called_once_with()
         provider.claim.assert_not_called()
 
-    def test_missing_ea_uia_stops_before_provider_can_claim(self) -> None:
+    def test_hybrid_preflight_failure_stops_before_provider_can_claim(self) -> None:
         settings = RunnerSettings(
             enabled=True,
             device_id="device_1",
@@ -53,6 +53,11 @@ class AccountCycleCliTest(unittest.TestCase):
         )
         provider = Mock()
         play_session = Mock()
+        capture = Mock()
+        capture.__enter__ = Mock(return_value=Mock())
+        capture.__exit__ = Mock(return_value=False)
+        driver = Mock()
+        driver.preflight.side_effect = RuntimeError("preflight failed")
 
         with (
             patch.object(cli.sys, "platform", "win32"),
@@ -66,10 +71,12 @@ class AccountCycleCliTest(unittest.TestCase):
                 "_build_play_session_runner",
                 return_value=(play_session, object()),
             ) as build_session,
+            patch.object(cli, "DxcamFrameSource", return_value=capture),
+            patch.object(cli, "WindowsEaHybridDriver", return_value=driver),
         ):
             exit_code = cli.run_account_cycle(Path("managed.json"))
 
-        self.assertEqual(exit_code, 2)
+        self.assertEqual(exit_code, 1)
         settings_loader.assert_called_once_with(
             explicit_path=None,
             default_path=cli.REPOSITORY_ROOT
@@ -83,6 +90,7 @@ class AccountCycleCliTest(unittest.TestCase):
             client_version=cli.__version__,
         )
         build_session.assert_called_once()
+        driver.preflight.assert_called_once_with()
         provider.claim.assert_not_called()
         provider.current.assert_not_called()
 

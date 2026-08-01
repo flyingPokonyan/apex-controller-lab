@@ -25,6 +25,7 @@ from .config import (
 from .control import TaskControl, TaskStopRequested
 from .control_server import LocalControlServer
 from .ea_app import EaAppDriver
+from .ea_app_win32 import WindowsEaHybridDriver
 from .input_win32 import EmergencyStop, Win32InputSender, Win32SafetyGuard
 from .instance_lock import AlreadyRunningError, SingleInstanceLock
 from .observer import ObservationSession
@@ -673,14 +674,6 @@ def run_account_cycle(
         print(f"account-cycle 配置错误：{error}", file=sys.stderr)
         return 2
 
-    if ea_driver is None:
-        print(
-            "账号租约 HTTP、远程上报和游戏内闭环均已配置；"
-            "EA App UIA 驱动仍需目标 Windows 实机控件树，已拒绝领取账号。",
-            file=sys.stderr,
-        )
-        return 2
-
     lock = SingleInstanceLock(runs_root / "play.lock")
     try:
         lock.acquire()
@@ -694,6 +687,12 @@ def run_account_cycle(
             backend=str(config.environment["captureBackend"]),
             output_index=int(config.environment["outputIndex"]),
         ) as source:
+            if ea_driver is None:
+                ea_driver = WindowsEaHybridDriver(capture_source=source)
+            preflight = getattr(ea_driver, "preflight", None)
+            if callable(preflight):
+                state = preflight()
+                print(f"EA 领号前预检通过：{state.value}")
             orchestrator = AccountOrchestrator(
                 provider=provider,
                 ea_driver=ea_driver,
@@ -748,6 +747,32 @@ def run_account_cycle_check(*, runner_config_path: Path | None = None) -> int:
     else:
         print(f"Runner 配置与 Provider 鉴权正常；发现活动租约 {lease.lease_id}。")
     return 0
+
+
+def run_ea_preflight(config_path: Path) -> int:
+    """Read-only EA window/state/identity validation before any lease claim."""
+    if sys.platform != "win32":
+        print("ea-preflight 模式只能在 Windows 上运行。", file=sys.stderr)
+        return 2
+    try:
+        config = load_config(config_path)
+        with DxcamFrameSource(
+            backend=str(config.environment["captureBackend"]),
+            output_index=int(config.environment["outputIndex"]),
+        ) as source:
+            driver = WindowsEaHybridDriver(capture_source=source)
+            state = driver.preflight()
+            identity = driver.current_identity()
+        display_identity = (
+            "none"
+            if identity is None
+            else f"{identity.ea_account_id[:4]}...{identity.ea_account_id[-4:]}"
+        )
+        print(f"EA 只读预检通过：state={state.value}, identity={display_identity}")
+        return 0
+    except Exception as error:
+        print(f"EA 只读预检失败：{error}", file=sys.stderr)
+        return 1
 
 
 def run_start(
@@ -925,6 +950,10 @@ def build_parser() -> argparse.ArgumentParser:
         type=Path,
         help="托管设备私有配置；默认读取 windows/account-cycle.private.json",
     )
+    subparsers.add_parser(
+        "ea-preflight",
+        help="只读识别 EA 窗口、页面状态和稳定账号 ID，不领取账号",
+    )
     probe = subparsers.add_parser(
         "probe-input",
         help="向游戏发几个明显动作，用来确认 SendInput 到底进不进得去",
@@ -975,6 +1004,8 @@ def main(argv: list[str] | None = None) -> int:
         )
     if command == "account-cycle-check":
         return run_account_cycle_check(runner_config_path=args.runner_config)
+    if command == "ea-preflight":
+        return run_ea_preflight(args.config)
     if command == "start":
         return run_start(
             args.config,
