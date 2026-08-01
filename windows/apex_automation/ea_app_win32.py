@@ -74,6 +74,7 @@ PASSWORD_SUBMIT_RATIO = (0.50, 0.58)
 OTP_FIELD_RATIO = (0.50, 0.50)
 OTP_SUBMIT_RATIO = (0.50, 0.69)
 IDENTITY_BAND = (0.75, 0.00, 1.00, 0.17)
+INPUT_SETTLE_S = 0.8
 
 
 if sys.platform == "win32":
@@ -180,6 +181,11 @@ class WindowsEaHybridDriver:
             ctypes.c_int,
         ]
         self.user32.SendInput.restype = wintypes.UINT
+        self.user32.IsWindow.argtypes = [wintypes.HWND]
+        self.user32.IsWindow.restype = wintypes.BOOL
+        self.user32.IsWindowVisible.argtypes = [wintypes.HWND]
+        self.user32.IsWindowVisible.restype = wintypes.BOOL
+        self._hwnd: int | None = None
         try:
             self.user32.SetProcessDpiAwarenessContext(ctypes.c_void_p(-4))
         except (AttributeError, OSError):
@@ -223,10 +229,35 @@ class WindowsEaHybridDriver:
 
             self.user32.EnumWindows(collect, 0)
             if matches:
-                return max(matches)[1]
+                self._hwnd = max(matches)[1]
+                return self._hwnd
             if time.monotonic() >= deadline:
                 raise EaAppAutomationError("没有发现可见的 EA App 主窗口")
             self.sleep(0.5)
+
+    def _alive(self, hwnd: int | None) -> bool:
+        return bool(
+            hwnd
+            and self.user32.IsWindow(hwnd)
+            and self.user32.IsWindowVisible(hwnd)
+        )
+
+    def _live(self, hwnd: int) -> int:
+        """A handle that is still a window.
+
+        EA destroys its login window the instant the sign-in succeeds and
+        raises the main window in its place, so the handle every step of the
+        login flow is carrying dies exactly once, at the least convenient
+        moment. Re-discovering beats propagating a dead handle.
+        """
+
+        if self._alive(hwnd):
+            return hwnd
+        if hwnd != self._hwnd and self._alive(self._hwnd):
+            assert self._hwnd is not None
+            return self._hwnd
+        self._hwnd = None
+        return self._ea_window()
 
     def _rect(self, hwnd: int) -> tuple[int, int, int, int]:
         rect = wintypes.RECT()
@@ -235,6 +266,7 @@ class WindowsEaHybridDriver:
         return rect.left, rect.top, rect.right, rect.bottom
 
     def _focus(self, hwnd: int) -> None:
+        hwnd = self._live(hwnd)
         self.user32.ShowWindow(hwnd, SW_RESTORE)
         self.user32.SetForegroundWindow(hwnd)
         self.sleep(0.4)
@@ -262,6 +294,7 @@ class WindowsEaHybridDriver:
         self.sleep(0.5)
 
     def _click(self, hwnd: int, x_ratio: float, y_ratio: float) -> None:
+        hwnd = self._live(hwnd)
         left, top, right, bottom = self._rect(hwnd)
         self._click_point(
             hwnd,
@@ -409,8 +442,18 @@ class WindowsEaHybridDriver:
 
         observation: EaObservation | None = None
         for attempt in range(max(1, retries)):
-            frame = self._frame()
-            left, top, right, bottom = self._clip_rect(hwnd, frame)
+            hwnd = self._live(hwnd)
+            try:
+                frame = self._frame()
+                left, top, right, bottom = self._clip_rect(hwnd, frame)
+            except EaAppAutomationError:
+                # The window can die between the liveness check and the rect
+                # read. Drop the handle and let the next attempt re-find it.
+                if attempt + 1 >= max(1, retries):
+                    raise
+                self._hwnd = None
+                self.sleep(1.0)
+                continue
             crop = np.ascontiguousarray(frame[top:bottom, left:right])
             try:
                 tokens = tuple(
@@ -481,6 +524,7 @@ class WindowsEaHybridDriver:
         and a whole-window pass regularly fails to recognise it at all.
         """
 
+        hwnd = self._live(hwnd)
         frame = self._frame()
         left, top, right, bottom = self._clip_rect(hwnd, frame)
         window_width = right - left
@@ -659,6 +703,11 @@ class WindowsEaHybridDriver:
         )
         self._clear_focused_field()
         self._type_secret(credentials.login_identifier)
+        # The capture source serves the last frame it has. Reading straight
+        # after typing showed an empty field on a page that had in fact
+        # accepted the text, which is a false negative on the one signal that
+        # says the click found the input.
+        self.sleep(INPUT_SETTLE_S)
         typed = self._observe(hwnd)
         # Whether the identifier actually landed in a field separates "the
         # click missed the input" from "the submit never fired". Only the fact
@@ -720,6 +769,7 @@ class WindowsEaHybridDriver:
         )
         self._clear_focused_field()
         self._type_secret(credentials.password)
+        self.sleep(INPUT_SETTLE_S)
         self._record("password-typed", self._observe(hwnd), fieldTarget=target)
         return self._submit(hwnd, observation, PASSWORD_SUBMIT_RATIO)
 
@@ -939,7 +989,18 @@ class WindowsEaHybridDriver:
             self.sleep(1.0)
         if identity is None:
             return False
-        self._click(hwnd, 0.89, 0.075)
+        # The account menu hangs off the signed-in badge, and the badge is a
+        # token we have just read. Clicking the text beats a corner ratio that
+        # only fits one window size.
+        badge = self._anchor(
+            self._observe(hwnd),
+            (identity.ea_account_id,),
+            y_range=(0.0, 0.20),
+        )
+        if badge is None:
+            self._click(hwnd, 0.89, 0.075)
+        else:
+            self._click_point(hwnd, *badge)
         self.sleep(1.0)
         menu = self._observe(hwnd)
         targets = ("signout", "logout", "退出登录", "登出")

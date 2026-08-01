@@ -831,96 +831,108 @@ def run_ea_login_check(
                 evidence=evidence,
                 notify=print,
             )
-            state = driver.preflight()
-            print(f"EA 领号前预检通过：{state.value}")
+            # Handing the lease back needs the driver, and the driver needs
+            # the capture source, so the whole cleanup lives inside this
+            # block. Releasing after the camera closed left a real account
+            # leased to a process that had already exited.
+            try:
+                state = driver.preflight()
+                print(f"EA 领号前预检通过：{state.value}")
 
-            # Never touch a lease this command did not open: it may belong to
-            # a paused account-cycle checkpoint that still owns the account.
-            existing = provider.current()
-            if existing is not None and not existing.terminal:
-                print(
-                    f"设备已有活动租约 {existing.lease_id}（{existing.state.value}）。"
-                    "请先用 account-cycle 收口或在运营页安全释放后再跑登录检查。",
-                    file=sys.stderr,
+                # Never touch a lease this command did not open: it may belong
+                # to a paused account-cycle checkpoint that still owns it.
+                existing = provider.current()
+                if existing is not None and not existing.terminal:
+                    print(
+                        f"设备已有活动租约 {existing.lease_id}"
+                        f"（{existing.state.value}）。请先用 account-cycle 收口"
+                        "或在运营页安全释放后再跑登录检查。",
+                        file=sys.stderr,
+                    )
+                    return 2
+
+                lease = provider.claim(uuid.uuid4().hex, DEFAULT_TASK_TYPE)
+                if lease is None:
+                    print("服务端当前没有可领取的账号，未执行登录。")
+                    return 0
+                print(f"已领取租约 {lease.lease_id}（fence={lease.lease_fence}）")
+                keeper = LeaseKeeper(
+                    provider,
+                    lease,
+                    phase=lambda: "EA_SIGNING_IN",
+                    run_id=lambda: None,
                 )
-                return 2
+                keeper.start()
 
-            lease = provider.claim(uuid.uuid4().hex, DEFAULT_TASK_TYPE)
-            if lease is None:
-                print("服务端当前没有可领取的账号，未执行登录。")
-                return 0
-            print(f"已领取租约 {lease.lease_id}（fence={lease.lease_fence}）")
-            keeper = LeaseKeeper(
-                provider,
-                lease,
-                phase=lambda: "EA_SIGNING_IN",
-                run_id=lambda: None,
-            )
-            keeper.start()
-
-            expected = lease.expected_ea_account_id
-            if not expected:
-                raise EaAppAutomationError("租约缺少可验证的 EA 稳定账号 ID")
-            credentials = provider.credentials(
-                lease.lease_id,
-                lease.lease_fence,
-                uuid.uuid4().hex,
-            )
-
-            def supply_otp(challenge: OtpChallenge) -> OtpCode:
-                return provider.request_otp(
+                expected = lease.expected_ea_account_id
+                if not expected:
+                    raise EaAppAutomationError("租约缺少可验证的 EA 稳定账号 ID")
+                credentials = provider.credentials(
                     lease.lease_id,
                     lease.lease_fence,
                     uuid.uuid4().hex,
-                    challenge.challenge_id,
-                    challenge.started_at,
                 )
+                active = lease
 
-            driver.sign_in(credentials, supply_otp)
-            identity = driver.verify_identity(expected)
-            print(
-                "EA 登录检查通过："
-                f"identity={mask_identity(identity.ea_account_id)}, "
-                f"source={identity.source}"
-            )
-    except EaAppAutomationError as error:
-        print(f"EA 登录检查失败：{error.reason_code}：{error}", file=sys.stderr)
-        reason_code = error.reason_code
-        outcome = "FAILED"
-        exit_code = 1
-    except (LeaseProviderError, RunnerConfigurationError) as error:
-        print(f"EA 登录检查中止：{error}", file=sys.stderr)
-        reason_code = "OPERATOR_STOPPED"
-        outcome = "FAILED"
-        exit_code = 1
-    except (EmergencyStop, KeyboardInterrupt):
-        reason_code = "OPERATOR_STOPPED"
-        outcome = "FAILED"
-        exit_code = 1
-    except Exception as error:
-        print(
-            f"EA 登录检查异常：{type(error).__name__}：{error}",
-            file=sys.stderr,
-        )
-        reason_code = "EA_UI_UNKNOWN"
-        outcome = "FAILED"
-        exit_code = 1
-    finally:
-        if keeper is not None:
-            try:
-                keeper.stop()
+                def supply_otp(challenge: OtpChallenge) -> OtpCode:
+                    return provider.request_otp(
+                        active.lease_id,
+                        active.lease_fence,
+                        uuid.uuid4().hex,
+                        challenge.challenge_id,
+                        challenge.started_at,
+                    )
+
+                driver.sign_in(credentials, supply_otp)
+                identity = driver.verify_identity(expected)
+                print(
+                    "EA 登录检查通过："
+                    f"identity={mask_identity(identity.ea_account_id)}, "
+                    f"source={identity.source}"
+                )
+            except EaAppAutomationError as error:
+                print(
+                    f"EA 登录检查失败：{error.reason_code}：{error}",
+                    file=sys.stderr,
+                )
+                reason_code = error.reason_code
+                outcome = "FAILED"
+                exit_code = 1
+            except (LeaseProviderError, RunnerConfigurationError) as error:
+                print(f"EA 登录检查中止：{error}", file=sys.stderr)
+                reason_code = "OPERATOR_STOPPED"
+                outcome = "FAILED"
+                exit_code = 1
+            except (EmergencyStop, KeyboardInterrupt):
+                reason_code = "OPERATOR_STOPPED"
+                outcome = "FAILED"
+                exit_code = 1
             except Exception as error:
-                print(f"租约续期线程停止失败：{error}", file=sys.stderr)
-        if lease is not None:
-            released = _release_login_check_lease(
-                provider,
-                lease,
-                driver,
-                outcome=outcome,
-                reason_code=reason_code,
-            )
-            if not released:
-                exit_code = max(exit_code, 1)
+                print(
+                    f"EA 登录检查异常：{type(error).__name__}：{error}",
+                    file=sys.stderr,
+                )
+                reason_code = "EA_UI_UNKNOWN"
+                outcome = "FAILED"
+                exit_code = 1
+            finally:
+                if keeper is not None:
+                    try:
+                        keeper.stop()
+                    except Exception as error:
+                        print(f"租约续期线程停止失败：{error}", file=sys.stderr)
+                if lease is not None and not _release_login_check_lease(
+                    provider,
+                    lease,
+                    driver,
+                    outcome=outcome,
+                    reason_code=reason_code,
+                ):
+                    exit_code = max(exit_code, 1)
+    except Exception as error:
+        print(f"EA 登录检查启动失败：{type(error).__name__}：{error}", file=sys.stderr)
+        exit_code = max(exit_code, 1)
+    finally:
         try:
             evidence.prune()
         except OSError as error:
@@ -949,8 +961,11 @@ def _release_login_check_lease(
         if driver is not None:
             apex_exited = driver.stop_apex().all_processes_exited
             signed_out = driver.sign_out()
-    except EaAppAutomationError as error:
-        print(f"EA 清理失败：{error}", file=sys.stderr)
+    except Exception as error:
+        # Cleanup must never be the thing that strands a real account: an
+        # unhandled error here used to escape the finally block and leave the
+        # lease open until it expired.
+        print(f"EA 清理失败：{type(error).__name__}：{error}", file=sys.stderr)
     cleanup = CleanupEvidence(
         input_released=True,
         apex_exited=apex_exited,
