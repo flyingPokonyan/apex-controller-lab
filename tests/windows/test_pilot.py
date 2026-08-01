@@ -17,6 +17,8 @@ from apex_automation.config import load_config
 from apex_automation.ocr_obstacles import OcrToken
 from apex_automation.ocr_states import OcrStateDetector
 from apex_automation.pilot import CapabilityPilot
+from apex_automation.progression import LobbyProgressionReader
+from apex_automation.progression_policy import TargetLevelPolicy
 from apex_automation.safety import ForegroundLost
 
 
@@ -82,7 +84,9 @@ class FakeRecorder:
         self.events.append((event, payload))
 
     def screenshot(self, stage: str, frame: np.ndarray) -> Path:
-        return self.run_dir / f"{stage}.png"
+        path = self.run_dir / f"{stage}.png"
+        self.log("SCREENSHOT_SAVED", stage=stage, path=str(path))
+        return path
 
     def names(self) -> list[str]:
         return [event for event, _ in self.events]
@@ -138,6 +142,11 @@ class PilotTest(unittest.TestCase):
 
     def overlay_screen(self, text: str = "", confidence: float = 1.0) -> None:
         self.overlay_provider.readings = {} if not text else {"fullFrame": (text, confidence)}
+
+    def enable_progression(self, *, max_attempts: int = 3) -> None:
+        self.pilot.progression_reader = LobbyProgressionReader(self.provider)
+        self.pilot.progression_stabilizer.reset()
+        self.pilot.progression_max_attempts = max_attempts
 
     def test_the_shipped_capability_set_is_executable_as_written(self) -> None:
         # Construction validates every action name and kind, so reaching this
@@ -271,6 +280,129 @@ class PilotTest(unittest.TestCase):
         self.assertEqual(record["state"], "LOBBY_QUEUEING")
         self.assertEqual(record["decision"]["reason"], "NO_CAPABILITY")
         self.assertEqual(self.sender.calls, [])
+
+    def test_lobby_progress_is_confirmed_before_starting_the_match(self) -> None:
+        self.enable_progression()
+        self.screen(
+            lobbyPrimaryButton=("准备", 1.0),
+            lobbyModeName=("进化版机器人大逃杀", 1.0),
+            lobbyLevel=("9", 0.99),
+            lobbyXp=("7.87K / 8.15K", 0.98),
+        )
+
+        first = self.pilot.step()
+        self.now = 0.3
+        second = self.pilot.step()
+
+        self.assertEqual(first["decision"]["reason"], "LOBBY_PROGRESS")
+        self.assertEqual(second["decision"]["capability"], "lobby-start-match")
+        self.assertEqual(self.sender.calls, [("click", 1280, 1295)])
+        progress = next(
+            payload
+            for event, payload in self.recorder.events
+            if event == "LOBBY_PROGRESS"
+        )
+        self.assertEqual(progress["level"], 9)
+        self.assertEqual(progress["xpCurrentApprox"], 7870)
+        self.assertEqual(progress["readStatus"], "OK")
+
+    def test_failed_lobby_progress_does_not_block_play_indefinitely(self) -> None:
+        self.enable_progression(max_attempts=3)
+        self.screen(
+            lobbyPrimaryButton=("准备", 1.0),
+            lobbyModeName=("进化版机器人大逃杀", 1.0),
+            lobbyLevel=("?", 0.99),
+            lobbyXp=("?", 0.99),
+        )
+
+        first = self.pilot.step()
+        self.now = 0.3
+        second = self.pilot.step()
+        self.now = 0.6
+        third = self.pilot.step()
+
+        self.assertEqual(first["decision"]["reason"], "LOBBY_PROGRESS")
+        self.assertEqual(second["decision"]["reason"], "LOBBY_PROGRESS")
+        self.assertEqual(third["decision"]["capability"], "lobby-start-match")
+        progress = next(
+            payload
+            for event, payload in self.recorder.events
+            if event == "LOBBY_PROGRESS"
+        )
+        self.assertEqual(progress["readStatus"], "FAILED")
+        self.assertIsNone(progress["level"])
+
+    def test_target_level_stops_before_the_ready_capability_is_dispatched(self) -> None:
+        self.enable_progression()
+        self.pilot.progression_policy = TargetLevelPolicy(20)
+        self.screen(
+            lobbyPrimaryButton=("准备", 1.0),
+            lobbyModeName=("进化版机器人大逃杀", 1.0),
+            lobbyLevel=("20", 0.99),
+            lobbyXp=("1.44K / 3.90K", 0.98),
+        )
+
+        first = self.pilot.step()
+        self.now = 0.3
+        second = self.pilot.step()
+
+        self.assertEqual(first["decision"]["reason"], "LOBBY_PROGRESS")
+        self.assertEqual(second["decision"]["reason"], "TARGET_REACHED")
+        self.assertEqual(self.pilot.session_outcome, "TARGET_REACHED")
+        self.assertNotIn(("click", 1280, 1295), self.sender.calls)
+        self.assertIn("ACCOUNT_TARGET_REACHED", self.recorder.names())
+
+    def test_managed_failed_progress_pauses_before_dispatch_and_rechecks_later(self) -> None:
+        self.enable_progression(max_attempts=2)
+        self.pilot.progression_policy = TargetLevelPolicy(20)
+        self.screen(
+            lobbyPrimaryButton=("准备", 1.0),
+            lobbyModeName=("进化版机器人大逃杀", 1.0),
+            lobbyLevel=("?", 0.99),
+            lobbyXp=("?", 0.99),
+        )
+
+        self.pilot.step()
+        self.now = 0.3
+        paused = self.pilot.step()
+        self.now = 1.0
+        still_paused = self.pilot.step()
+        self.now = 5.4
+        retrying = self.pilot.step()
+
+        self.assertEqual(paused["decision"]["reason"], "PAUSE_UNCERTAIN")
+        self.assertEqual(still_paused["decision"]["reason"], "PAUSE_UNCERTAIN")
+        self.assertEqual(retrying["decision"]["reason"], "LOBBY_PROGRESS")
+        self.assertNotIn(("click", 1280, 1295), self.sender.calls)
+        self.assertEqual(self.recorder.names().count("PROGRESSION_PAUSED"), 1)
+
+    def test_target_read_while_queueing_defers_until_a_safe_lobby(self) -> None:
+        self.enable_progression()
+        self.pilot.progression_policy = TargetLevelPolicy(20)
+        self.screen(
+            lobbyPrimaryButton=("取消", 1.0),
+            lobbyLevel=("20", 0.99),
+            lobbyXp=("1.44K / 3.90K", 0.98),
+        )
+
+        self.pilot.step()
+        self.now = 0.3
+        queued = self.pilot.step()
+        self.now = 0.6
+        self.screen(
+            lobbyPrimaryButton=("准备", 1.0),
+            lobbyModeName=("进化版机器人大逃杀", 1.0),
+            lobbyLevel=("20", 0.99),
+            lobbyXp=("1.44K / 3.90K", 0.98),
+        )
+        safe = self.pilot.step()
+
+        self.assertEqual(
+            queued["decision"]["reason"],
+            "DEFER_UNTIL_SAFE_LOBBY",
+        )
+        self.assertEqual(safe["decision"]["reason"], "TARGET_REACHED")
+        self.assertNotIn(("click", 1280, 1295), self.sender.calls)
 
     def test_a_known_guide_overlay_blocks_the_lobby_and_uses_its_own_click(self) -> None:
         self.enable_overlays()

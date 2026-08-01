@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 from pathlib import Path
 import sys
 import time
@@ -8,6 +9,9 @@ from typing import Callable
 
 import json
 
+from . import __version__
+from .account_orchestrator import AccountOrchestrator
+from .account_provider import AccountProvider, HttpAccountProvider
 from .capabilities import CapabilityDispatcher, CapabilitySet
 from .capture import DxcamFrameSource
 from .config import (
@@ -20,13 +24,25 @@ from .config import (
 )
 from .control import TaskControl, TaskStopRequested
 from .control_server import LocalControlServer
+from .ea_app import EaAppDriver
 from .input_win32 import EmergencyStop, Win32InputSender, Win32SafetyGuard
+from .instance_lock import AlreadyRunningError, SingleInstanceLock
 from .observer import ObservationSession
 from .ocr_obstacles import FullFrameOcrProvider, OcrObstacleDetector, RapidOcrProvider
-from .pilot import CapabilityPilot
 from .ocr_states import OcrStateDetector
+from .play_session import PlaySessionRunner, SessionIdentity
+from .progression_policy import ContinuePlayPolicy
 from .recorder import RunRecorder
+from .orchestration_state import AtomicCheckpointStore
 from .runner import ScenarioRunner
+from .runner_identity import (
+    RunnerConfigurationError,
+    RunnerIdentityMismatch,
+    RunnerSettings,
+    load_runner_settings,
+    require_identity_match,
+    verify_runner_identity,
+)
 from .supervisor import TaskSupervisor
 from .vision import VisionDetector, load_frame
 
@@ -34,6 +50,29 @@ from .vision import VisionDetector, load_frame
 def _repository_path(value: object) -> Path:
     path = Path(str(value))
     return path if path.is_absolute() else REPOSITORY_ROOT / path
+
+
+def _config_revision(config: RunnerConfig) -> str:
+    digest = hashlib.sha256()
+    candidates = [
+        config.path,
+        _repository_path(config.game_states["rules"])
+        if config.game_states.get("rules")
+        else None,
+        _repository_path(config.capability_set) if config.capability_set else None,
+        _repository_path(config.overlay_ocr["rules"])
+        if config.overlay_ocr.get("rules")
+        else None,
+        _repository_path(config.overlay_ocr["safetyRules"])
+        if config.overlay_ocr.get("safetyRules")
+        else None,
+    ]
+    for path in candidates:
+        if path is None:
+            continue
+        digest.update(str(path.name).encode("utf-8"))
+        digest.update(path.read_bytes())
+    return f"sha256:{digest.hexdigest()}"
 
 
 def _build_obstacle_detector(
@@ -355,25 +394,19 @@ def _tap_times(sender: Win32InputSender, scan_code: int, times: int) -> None:
         time.sleep(0.35)
 
 
-def run_play(config_path: Path, *, countdown: int, duration_s: float | None) -> int:
-    if sys.platform != "win32":
-        print("play 模式只能在 Windows 上运行。", file=sys.stderr)
-        return 2
-
-    # The default profile is the first-match one, which has neither a state
-    # dictionary nor a capability set. Falling back to the play profile keeps
-    # `python -m apex_automation play` working the same as `play.cmd`.
-    if config_path.expanduser().resolve() == DEFAULT_CONFIG_PATH.resolve():
-        config_path = PLAY_CONFIG_PATH
-    config = load_config(config_path)
+def _build_play_session_runner(
+    config: RunnerConfig,
+    settings: RunnerSettings,
+    runs_root: Path,
+) -> tuple[PlaySessionRunner, CapabilitySet]:
     if not bool(config.game_states.get("enabled", False)):
-        print("这个画像没有开启 gameStates，能力集无从判断画面。", file=sys.stderr)
-        return 2
+        raise ValueError("这个画像没有开启 gameStates，能力集无从判断画面")
     if not config.capability_set:
-        print("这个画像没有配置 capabilitySet，没有任何能力可以执行。", file=sys.stderr)
-        return 2
+        raise ValueError("这个画像没有配置 capabilitySet，没有任何能力可以执行")
 
-    payload = json.loads(_repository_path(config.capability_set).read_text(encoding="utf-8"))
+    payload = json.loads(
+        _repository_path(config.capability_set).read_text(encoding="utf-8")
+    )
     capabilities = CapabilitySet.from_payload(payload)
     ocr_provider = RapidOcrProvider()
     state_detector = OcrStateDetector.from_path(
@@ -384,11 +417,12 @@ def run_play(config_path: Path, *, countdown: int, duration_s: float | None) -> 
     safety_detector = (
         None
         if not safety_rules
-        else OcrObstacleDetector.from_path(ocr_provider, _repository_path(safety_rules))
+        else OcrObstacleDetector.from_path(
+            ocr_provider,
+            _repository_path(safety_rules),
+        )
     )
-    # Every state a capability claims to handle has to be one the detector can
-    # actually produce, or that capability is dead configuration that looks
-    # alive. Checked here because this is the first command that acts on it.
+
     known_states = set(state_detector.states)
     if overlay_detector is not None:
         known_states.update(overlay_detector.states)
@@ -399,51 +433,49 @@ def run_play(config_path: Path, *, countdown: int, duration_s: float | None) -> 
         if state not in known_states
     }
     if unknown:
-        print(f"能力集引用了识别不出的画面：{sorted(unknown)}", file=sys.stderr)
-        return 2
+        raise ValueError(f"能力集引用了识别不出的画面：{sorted(unknown)}")
 
-    guard_states = {str(value) for value in config.overlay_ocr.get("guardStates", [])}
+    guard_states = {
+        str(value) for value in config.overlay_ocr.get("guardStates", [])
+    }
     invalid_guards = guard_states - state_detector.states
     if invalid_guards:
-        print(f"覆盖层守卫引用了快速识别不存在的画面：{sorted(invalid_guards)}", file=sys.stderr)
-        return 2
+        raise ValueError(
+            f"覆盖层守卫引用了快速识别不存在的画面：{sorted(invalid_guards)}"
+        )
     if overlay_detector is not None:
         handled_states = {
             state
             for capability in capabilities.capabilities
             for state in capability.states
         }
-        manual_states = {str(value) for value in config.overlay_ocr.get("manualStates", [])}
+        manual_states = {
+            str(value) for value in config.overlay_ocr.get("manualStates", [])
+        }
         invalid_manual_states = manual_states - overlay_detector.states
         if invalid_manual_states:
-            print(
-                f"人工覆盖层状态不在识别字典里：{sorted(invalid_manual_states)}",
-                file=sys.stderr,
+            raise ValueError(
+                f"人工覆盖层状态不在识别字典里：{sorted(invalid_manual_states)}"
             )
-            return 2
         unhandled = overlay_detector.states - handled_states - manual_states
         if unhandled:
-            print(f"覆盖层状态既没有能力也未声明人工处理：{sorted(unhandled)}", file=sys.stderr)
-            return 2
+            raise ValueError(
+                f"覆盖层状态既没有能力也未声明人工处理：{sorted(unhandled)}"
+            )
         unknown_only_states = {
-            str(value) for value in config.overlay_ocr.get("unknownOnlyStates", [])
+            str(value)
+            for value in config.overlay_ocr.get("unknownOnlyStates", [])
         }
         invalid_unknown_only = unknown_only_states - overlay_detector.states
         if invalid_unknown_only:
-            print(
-                f"仅未知画面可用的覆盖层状态不在识别字典里：{sorted(invalid_unknown_only)}",
-                file=sys.stderr,
+            raise ValueError(
+                "仅未知画面可用的覆盖层状态不在识别字典里："
+                f"{sorted(invalid_unknown_only)}"
             )
-            return 2
 
-    # The old obstacle dictionary still owns the safety decision: only rules
-    # marked safePage and restricted to the keyboard allowlist can load. The
-    # capability set owns dispatch/retry semantics. Pin their shared fields so
-    # the two sources cannot silently drift apart.
     if safety_detector is not None:
         if overlay_detector is None:
-            print("配置了覆盖层安全字典，但没有启用覆盖层识别", file=sys.stderr)
-            return 2
+            raise ValueError("配置了覆盖层安全字典，但没有启用覆盖层识别")
         overlay_rules = {
             rule.state: rule for rule in overlay_detector.rules if rule.enabled
         }
@@ -452,8 +484,7 @@ def run_play(config_path: Path, *, countdown: int, duration_s: float | None) -> 
                 continue
             overlay_rule = overlay_rules.get(rule.state)
             if overlay_rule is None:
-                print(f"安全清障状态没有接入覆盖层识别：{rule.state}", file=sys.stderr)
-                return 2
+                raise ValueError(f"安全清障状态没有接入覆盖层识别：{rule.state}")
             safety_requirements = [
                 (item.region, item.any_terms, item.all_terms, item.min_confidence)
                 for item in rule.requirements
@@ -463,8 +494,9 @@ def run_play(config_path: Path, *, countdown: int, duration_s: float | None) -> 
                 for item in overlay_rule.requirements
             ]
             if overlay_requirements != safety_requirements:
-                print(f"覆盖层规则与安全清障字典不一致：{rule.state}", file=sys.stderr)
-                return 2
+                raise ValueError(
+                    f"覆盖层规则与安全清障字典不一致：{rule.state}"
+                )
             matches = [
                 capability
                 for capability in capabilities.for_state(rule.state)
@@ -474,11 +506,9 @@ def run_play(config_path: Path, *, countdown: int, duration_s: float | None) -> 
                 and capability.max_attempts == rule.action.max_attempts
             ]
             if not matches:
-                print(
-                    f"清障规则 {rule.rule_id} 与能力集动作不一致：{rule.state}",
-                    file=sys.stderr,
+                raise ValueError(
+                    f"清障规则 {rule.rule_id} 与能力集动作不一致：{rule.state}"
                 )
-                return 2
 
     guard = Win32SafetyGuard(config.environment["foregroundExecutables"])
     sender = Win32InputSender(
@@ -486,54 +516,212 @@ def run_play(config_path: Path, *, countdown: int, duration_s: float | None) -> 
         int(config.environment["width"]),
         int(config.environment["height"]),
     )
-    recorder = RunRecorder(REPOSITORY_ROOT / "windows" / "runs", f"{config.profile}.play")
-    recorder.log("RUN_STARTED", profile=config.profile, capabilitySet=str(config.capability_set))
+    return (
+        PlaySessionRunner(
+            config=config,
+            capabilities=capabilities,
+            actions=dict(payload.get("actions", {})),
+            state_detector=state_detector,
+            overlay_detector=overlay_detector,
+            ocr_provider=ocr_provider,
+            settings=settings,
+            sender=sender,
+            guard=guard,
+            runs_root=runs_root,
+            app_version=__version__,
+            config_revision=_config_revision(config),
+            notify=print,
+        ),
+        capabilities,
+    )
 
-    print("自动游玩：会真实发送键盘和鼠标输入。")
-    print(f"能力：{', '.join(item.id for item in capabilities.capabilities)}")
-    print("随时按 F8 或 Ctrl+C 立即停止；把 Apex 切到后台也会暂停。")
-    for remaining in range(max(0, countdown), 0, -1):
-        print(f"{remaining}...")
-        time.sleep(1)
 
-    pilot: CapabilityPilot | None = None
+def run_play(
+    config_path: Path,
+    *,
+    countdown: int,
+    duration_s: float | None,
+    runner_config_path: Path | None = None,
+) -> int:
+    if sys.platform != "win32":
+        print("play 模式只能在 Windows 上运行。", file=sys.stderr)
+        return 2
+
+    # The default profile is the first-match one, which has neither a state
+    # dictionary nor a capability set. Falling back to the play profile keeps
+    # `python -m apex_automation play` working the same as `play.cmd`.
+    if config_path.expanduser().resolve() == DEFAULT_CONFIG_PATH.resolve():
+        config_path = PLAY_CONFIG_PATH
+    config = load_config(config_path)
+
+    try:
+        settings = load_runner_settings(
+            explicit_path=runner_config_path,
+            default_path=REPOSITORY_ROOT / "windows" / "runner.private.json",
+        )
+        verification = verify_runner_identity(settings)
+        require_identity_match(verification)
+    except (RunnerConfigurationError, RunnerIdentityMismatch) as error:
+        print(f"Runner 账号配置错误：{error}", file=sys.stderr)
+        return 2
+
+    runs_root = REPOSITORY_ROOT / "windows" / "runs"
+    lock = SingleInstanceLock(runs_root / "play.lock")
+    try:
+        lock.acquire()
+    except AlreadyRunningError as error:
+        print(str(error), file=sys.stderr)
+        return 2
+
+    try:
+        session_runner, capabilities = _build_play_session_runner(
+            config,
+            settings,
+            runs_root,
+        )
+
+        print("自动游玩：会真实发送键盘和鼠标输入。")
+        print(f"能力：{', '.join(item.id for item in capabilities.capabilities)}")
+        if settings.account_id:
+            print(
+                f"运行账号：{settings.display_account}"
+                f"（{settings.account_id}，身份 {verification.status}）"
+            )
+        else:
+            print("运行账号：未绑定；本次只保留本地记录，不按账号远程归档。")
+        if verification.status in {"CONFIGURED", "UNAVAILABLE"}:
+            print(f"账号核验提示：{verification.message}")
+        print(
+            "远程上报："
+            + ("已启用，断网时会本地排队补传。" if settings.enabled else "未启用。")
+        )
+        print("随时按 F8 或 Ctrl+C 立即停止；把 Apex 切到后台也会暂停。")
+
+        identity = SessionIdentity.from_runner_settings(settings, verification)
+        with DxcamFrameSource(
+            backend=str(config.environment["captureBackend"]),
+            output_index=int(config.environment["outputIndex"]),
+        ) as source:
+            result = session_runner.run(
+                identity,
+                ContinuePlayPolicy(),
+                source,
+                duration_s=duration_s,
+                countdown=countdown,
+            )
+        print(f"共 {result.frames} 帧，发出 {result.actions_sent} 次输入。")
+        if result.run_dir is not None:
+            summary_path = result.run_dir / "pilot-summary.json"
+            if summary_path.exists():
+                print(f"统计摘要：{summary_path}")
+            print(f"证据目录：{result.run_dir}")
+        return result.exit_code
+    except Exception as error:
+        print(f"play 启动失败：{error}", file=sys.stderr)
+        return 1
+    finally:
+        try:
+            lock.release()
+        except Exception as error:
+            print(f"运行锁释放失败：{error}", file=sys.stderr)
+
+
+def run_account_cycle(
+    config_path: Path,
+    *,
+    runner_config_path: Path | None = None,
+    idle_s: float = 30.0,
+    provider: AccountProvider | None = None,
+    ea_driver: EaAppDriver | None = None,
+    play_session: PlaySessionRunner | None = None,
+) -> int:
+    if sys.platform != "win32":
+        print("account-cycle 模式只能在 Windows 上运行。", file=sys.stderr)
+        return 2
+
+    if config_path.expanduser().resolve() == DEFAULT_CONFIG_PATH.resolve():
+        config_path = PLAY_CONFIG_PATH
+    try:
+        config = load_config(config_path)
+        settings = load_runner_settings(
+            explicit_path=runner_config_path,
+            default_path=REPOSITORY_ROOT
+            / "windows"
+            / "account-cycle.private.json",
+            managed=True,
+        )
+        if not settings.enabled or settings.device_id is None:
+            raise RunnerConfigurationError("托管模式必须启用设备级远程上报")
+        if provider is None:
+            if settings.lease_url is None or settings.provider_token is None:
+                raise RunnerConfigurationError(
+                    "托管模式必须配置 leaseUrl/providerToken"
+                )
+            provider = HttpAccountProvider(
+                settings.lease_url,
+                settings.provider_token,
+                client_version=__version__,
+            )
+        runs_root = REPOSITORY_ROOT / "windows" / "runs"
+        if play_session is None:
+            play_session, _ = _build_play_session_runner(
+                config,
+                settings,
+                runs_root,
+            )
+    except (OSError, ValueError, RunnerConfigurationError) as error:
+        print(f"account-cycle 配置错误：{error}", file=sys.stderr)
+        return 2
+
+    if ea_driver is None:
+        print(
+            "账号租约 HTTP、远程上报和游戏内闭环均已配置；"
+            "EA App UIA 驱动仍需目标 Windows 实机控件树，已拒绝领取账号。",
+            file=sys.stderr,
+        )
+        return 2
+
+    lock = SingleInstanceLock(runs_root / "play.lock")
+    try:
+        lock.acquire()
+    except AlreadyRunningError as error:
+        print(str(error), file=sys.stderr)
+        return 2
+
+    orchestrator: AccountOrchestrator | None = None
     try:
         with DxcamFrameSource(
             backend=str(config.environment["captureBackend"]),
             output_index=int(config.environment["outputIndex"]),
         ) as source:
-            pilot = CapabilityPilot(
-                config,
-                source,
-                sender,
-                guard,
-                recorder,
-                state_detector=state_detector,
-                overlay_detector=overlay_detector,
-                dispatcher=CapabilityDispatcher(capabilities),
-                actions=dict(payload.get("actions", {})),
+            orchestrator = AccountOrchestrator(
+                provider=provider,
+                ea_driver=ea_driver,
+                play_session=play_session,
+                checkpoint_store=AtomicCheckpointStore(
+                    runs_root / "account-cycle-status.json"
+                ),
+                device_id=settings.device_id,
+                capture_source=source,
+                recover_report_drain=play_session.recover_report_drain,
                 notify=print,
             )
-            pilot.run(duration_s=duration_s)
-    except (EmergencyStop, KeyboardInterrupt) as error:
-        sender.release_all()
-        reason = str(error) or "用户停止"
-        recorder.finish("STOPPED", reason=reason)
-        print(f"\n已停止：{reason}")
+            return orchestrator.run_forever(idle_s=max(1.0, idle_s))
+    except (EmergencyStop, KeyboardInterrupt):
+        return 0
     except Exception as error:
-        sender.release_all()
-        recorder.finish("FAILED", error=str(error))
-        print(f"自动游玩中断：{error}", file=sys.stderr)
-        print(f"证据目录：{recorder.run_dir}", file=sys.stderr)
+        print(f"account-cycle 启动失败：{error}", file=sys.stderr)
         return 1
-    else:
-        recorder.finish("PLAYED", actionsSent=0 if pilot is None else pilot.actions_sent)
-
-    if pilot is not None:
-        print(f"共 {pilot.frames} 帧，发出 {pilot.actions_sent} 次输入。")
-        print(f"统计摘要：{pilot.write_summary()}")
-    print(f"证据目录：{recorder.run_dir}")
-    return 0
+    finally:
+        if orchestrator is not None:
+            try:
+                orchestrator.stop()
+            except Exception as error:
+                print(f"账号编排停止失败：{error}", file=sys.stderr)
+        try:
+            lock.release()
+        except Exception as error:
+            print(f"运行锁释放失败：{error}", file=sys.stderr)
 
 
 def run_start(
@@ -682,6 +870,26 @@ def build_parser() -> argparse.ArgumentParser:
     )
     play.add_argument("--countdown", type=int, default=5)
     play.add_argument("--duration-s", type=float, help="到时自动停止，默认一直跑")
+    play.add_argument(
+        "--runner-config",
+        type=Path,
+        help="账号/设备私有绑定文件；默认自动读取 windows/runner.private.json",
+    )
+    account_cycle = subparsers.add_parser(
+        "account-cycle",
+        help="按服务端租约自动登录 EA、游玩到目标等级并安全切号",
+    )
+    account_cycle.add_argument(
+        "--runner-config",
+        type=Path,
+        help="托管设备私有配置；默认读取 windows/account-cycle.private.json",
+    )
+    account_cycle.add_argument(
+        "--idle-s",
+        type=float,
+        default=30.0,
+        help="服务端暂无账号时的最小轮询间隔",
+    )
     probe = subparsers.add_parser(
         "probe-input",
         help="向游戏发几个明显动作，用来确认 SendInput 到底进不进得去",
@@ -722,6 +930,13 @@ def main(argv: list[str] | None = None) -> int:
             args.config,
             countdown=max(0, args.countdown),
             duration_s=args.duration_s,
+            runner_config_path=args.runner_config,
+        )
+    if command == "account-cycle":
+        return run_account_cycle(
+            args.config,
+            runner_config_path=args.runner_config,
+            idle_s=args.idle_s,
         )
     if command == "start":
         return run_start(

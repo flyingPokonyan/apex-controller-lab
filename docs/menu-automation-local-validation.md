@@ -75,7 +75,7 @@
 DOM 模拟状态标记          →       Windows.Graphics.Capture 画面帧
 页面内锚点判断            →       局部模板匹配 / OCR
 React 状态变化            →       Windows 鼠标键盘或手柄输入适配器
-内存中的运行日志          →       runs/<run-id>/actions.jsonl
+内存中的运行日志          →       runs/<run-id>/events.jsonl
 模拟截帧计数              →       runs/<run-id>/screenshots/*.png
 ```
 

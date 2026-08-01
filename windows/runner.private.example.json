@@ -1,0 +1,11 @@
+{
+  "schemaVersion": 1,
+  "enabled": true,
+  "reportUrl": "https://example.com/v1/runner/reports",
+  "reportToken": "replace-with-device-token",
+  "deviceId": "dev_01K1UVWXYZ",
+  "accountId": "acct_01K1ABCDEF",
+  "accountLabel": "账号备注（可选）",
+  "expectedPlatform": "steam",
+  "expectedPlatformAccountId": "76561198000000000"
+}

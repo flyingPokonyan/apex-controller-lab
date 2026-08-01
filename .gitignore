@@ -44,6 +44,11 @@ next-env.d.ts
 # local Windows automation artifacts
 /windows/.venv/
 /windows/runs/
+/windows/runner.private.json
+/windows/account-cycle.private.json
+/.understand-anything/
+/01094214e7b9043ffa65b8f83514b45d_720.png
+/2dd2eb555b68362e508c3c1672071395_720.png
 /calibration/raw/*.png
 /calibration/tutorial/raw/
 __pycache__/

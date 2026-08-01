@@ -1,0 +1,242 @@
+openapi: 3.1.0
+info:
+  title: Apex Runner Reporting API
+  version: 1.0.0
+  description: |
+    Windows Runner 的单向批量上报接口。accountId 必须是
+    apex_profiles.public_id；服务端根据 Bearer Token 识别设备并校验账号授权。
+    手动 play.cmd 省略 lease；托管运行必须携带 leaseId 和 leaseFence。
+    Reporter Token 只授予 report:write，不能与 Account Provider Token 共用。
+servers:
+  - url: https://example.com
+paths:
+  /v1/runner/reports:
+    post:
+      operationId: submitRunnerReports
+      summary: 批量提交一个账号、设备和运行会话的连续事件
+      security:
+        - reporterToken: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ReportRequest"
+      responses:
+        "200":
+          description: 本批已经持久化，返回当前最高连续确认序号
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ReportAccepted"
+        "400":
+          $ref: "#/components/responses/ClientError"
+        "401":
+          $ref: "#/components/responses/ClientError"
+        "403":
+          $ref: "#/components/responses/ClientError"
+        "408":
+          $ref: "#/components/responses/ServerError"
+        "409":
+          $ref: "#/components/responses/ClientError"
+        "413":
+          $ref: "#/components/responses/ClientError"
+        "422":
+          $ref: "#/components/responses/ClientError"
+        "429":
+          description: 请求过于频繁，可使用 Retry-After
+          headers:
+            Retry-After:
+              schema:
+                type: integer
+                minimum: 0
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "5XX":
+          $ref: "#/components/responses/ServerError"
+components:
+  securitySchemes:
+    reporterToken:
+      type: http
+      scheme: bearer
+      bearerFormat: opaque-reporter-token
+      description: 绑定设备且仅拥有 report:write 的 Reporter Token
+  responses:
+    ClientError:
+      description: 请求、身份、授权、版本或序号冲突
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorResponse"
+    ServerError:
+      description: 服务端暂时不可用，Runner 保留 outbox 并退避重试
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorResponse"
+  schemas:
+    ReportRequest:
+      type: object
+      additionalProperties: false
+      required:
+        - schemaVersion
+        - accountId
+        - deviceId
+        - runId
+        - sentAt
+        - client
+        - events
+      properties:
+        schemaVersion:
+          type: integer
+          const: 1
+        accountId:
+          type: string
+          minLength: 1
+          maxLength: 128
+          description: apex_profiles.public_id，不是内部整数 ID 或玩家昵称
+        deviceId:
+          type: string
+          minLength: 1
+          maxLength: 128
+          description: 必须与 Bearer Token 对应的 Runner 一致
+        runId:
+          type: string
+          minLength: 1
+          maxLength: 128
+        lease:
+          $ref: "#/components/schemas/LeaseContext"
+        sentAt:
+          type: string
+          format: date-time
+        client:
+          $ref: "#/components/schemas/ClientIdentity"
+        events:
+          type: array
+          minItems: 1
+          maxItems: 100
+          items:
+            $ref: "#/components/schemas/ReportEvent"
+    LeaseContext:
+      type: object
+      additionalProperties: false
+      description: |
+        手动 play.cmd 整体省略。托管 run 每个批次必填；首次有效报告后，
+        deviceId、accountId、runId、leaseId 和 leaseFence 永久绑定。
+      required:
+        - leaseId
+        - leaseFence
+      properties:
+        leaseId:
+          type: string
+          minLength: 1
+          maxLength: 128
+        leaseFence:
+          type: integer
+          minimum: 1
+    ClientIdentity:
+      type: object
+      additionalProperties: false
+      required:
+        - appVersion
+        - profile
+        - configRevision
+      properties:
+        appVersion:
+          type: string
+          minLength: 1
+          maxLength: 64
+        profile:
+          type: string
+          minLength: 1
+          maxLength: 128
+        configRevision:
+          type: string
+          minLength: 1
+          maxLength: 128
+    ReportEvent:
+      type: object
+      additionalProperties: false
+      required:
+        - seq
+        - occurredAt
+        - elapsedMs
+        - type
+        - payload
+      properties:
+        seq:
+          type: integer
+          minimum: 1
+          description: report-outbox 内从 1 连续递增的远程序号
+        occurredAt:
+          type: string
+          format: date-time
+        elapsedMs:
+          type: integer
+          minimum: 0
+        type:
+          type: string
+          enum:
+            - RUN_STARTED
+            - HEARTBEAT
+            - STATE_CHANGED
+            - ACTION_RESULT
+            - MATCH_PHASE_CHANGED
+            - LOBBY_PROGRESS
+            - INCIDENT
+            - RUN_FINISHED
+        payload:
+          type: object
+          additionalProperties: true
+    ReportAccepted:
+      type: object
+      additionalProperties: false
+      required:
+        - schemaVersion
+        - accountId
+        - deviceId
+        - runId
+        - acceptedThrough
+        - serverTime
+      properties:
+        schemaVersion:
+          type: integer
+          const: 1
+        accountId:
+          type: string
+        deviceId:
+          type: string
+        runId:
+          type: string
+        acceptedThrough:
+          type: integer
+          minimum: 0
+        serverTime:
+          type: string
+          format: date-time
+    ErrorResponse:
+      type: object
+      additionalProperties: false
+      required:
+        - error
+      properties:
+        error:
+          type: object
+          additionalProperties: false
+          required:
+            - code
+            - message
+            - retryable
+          properties:
+            code:
+              type: string
+              minLength: 1
+              maxLength: 64
+            message:
+              type: string
+              minLength: 1
+              maxLength: 512
+            retryable:
+              type: boolean

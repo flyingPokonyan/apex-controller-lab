@@ -23,6 +23,12 @@
     "enabled": true,
     "rules": "windows/config/game-states.zh-CN.json"
   },
+  "lobbyProgress": {
+    "enabled": true,
+    "minConfidence": 0.65,
+    "stableSamples": 2,
+    "maxAttempts": 3
+  },
   "overlayOcr": {
     "enabled": true,
     "rules": "windows/config/play-overlays.zh-CN.json",

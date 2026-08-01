@@ -12,6 +12,19 @@ import numpy as np
 from .capabilities import Capability, CapabilityDispatcher, Decision
 from .config import RunnerConfig
 from .ocr_states import OcrStateDetector
+from .progression import (
+    LobbyProgressionReader,
+    LobbyProgressionReading,
+    LobbyProgressionStabilizer,
+)
+from .progression_policy import (
+    ContinuePlayPolicy,
+    ProgressionContext,
+    ProgressionDecision,
+    ProgressionOutcome,
+    ProgressionPolicy,
+    ProgressionStatus,
+)
 from .safety import ForegroundLost
 
 
@@ -20,6 +33,41 @@ from .safety import ForegroundLost
 # assumed, because the alternative is discovering a bad action name halfway
 # into a match with an input already sent.
 SUPPORTED_KINDS = frozenset({"click", "key", "sequence"})
+LOBBY_CONTEXT_STATES = frozenset(
+    {
+        "LOBBY_QUEUEING",
+        "LOBBY_SELECT_REQUIRED",
+        "LOBBY_READY_TARGET_FILL_ON",
+        "LOBBY_READY_TRAINING",
+        "LOBBY_READY_TARGET",
+        "LOBBY_READY_OTHER",
+        "MODE_PANEL_TARGET_VISIBLE",
+        "MODE_PANEL_TARGET_HOVERED",
+    }
+)
+LOBBY_PROGRESS_STATES = frozenset(
+    state for state in LOBBY_CONTEXT_STATES if not state.startswith("MODE_PANEL_")
+)
+SAFE_LOBBY_STATES = frozenset(
+    {
+        "LOBBY_SELECT_REQUIRED",
+        "LOBBY_READY_TARGET_FILL_ON",
+        "LOBBY_READY_TRAINING",
+        "LOBBY_READY_TARGET",
+        "LOBBY_READY_OTHER",
+    }
+)
+ROUND_CONTEXT_STATES = frozenset(
+    {
+        "DROPSHIP_FOLLOWING",
+        "DROPSHIP_SOLO_JUMPMASTER",
+        "LAUNCH_READY",
+        "FREEFALL",
+        "IN_MATCH_ALIVE",
+        "SPECTATING",
+        "POST_MATCH_SUMMARY",
+    }
+)
 
 
 # Declared here rather than imported from `runner`: that module pulls in the
@@ -46,6 +94,7 @@ class PilotRecorder(Protocol):
     run_dir: Path
     def log(self, event: str, **payload: object) -> None: ...
     def screenshot(self, stage: str, frame: np.ndarray) -> object: ...
+    def write_status(self, payload: dict[str, object]) -> None: ...
 
 
 @dataclass(frozen=True)
@@ -88,6 +137,13 @@ class CapabilityPilot:
         unknown_grace_ms: int = 8000,
         unknown_sample_ms: int = 20_000,
         unknown_static_epsilon: float = 0.02,
+        progression_reader: LobbyProgressionReader | None = None,
+        progression_stable_samples: int = 2,
+        progression_max_attempts: int = 3,
+        progression_policy: ProgressionPolicy | None = None,
+        progression_retry_ms: int = 5000,
+        lease_is_current: Callable[[], bool] = lambda: True,
+        status_interval_ms: int = 1000,
     ) -> None:
         self.config = config
         self.source = source
@@ -125,6 +181,19 @@ class CapabilityPilot:
         # is far below both and only suppresses a frame that is essentially
         # identical to the last kept one, which is what a loading wipe is.
         self.unknown_static_epsilon = unknown_static_epsilon
+        self.progression_reader = progression_reader
+        self.progression_stabilizer = LobbyProgressionStabilizer(
+            progression_stable_samples
+        )
+        if progression_max_attempts < progression_stable_samples:
+            raise ValueError("大厅等级经验最大读取次数不能小于稳定确认次数")
+        self.progression_max_attempts = progression_max_attempts
+        self.progression_policy = progression_policy or ContinuePlayPolicy()
+        if progression_retry_ms <= 0:
+            raise ValueError("大厅等级经验失败后的复核间隔必须大于 0")
+        self.progression_retry_s = progression_retry_ms / 1000
+        self.lease_is_current = lease_is_current
+        self.status_interval_s = max(0.1, status_interval_ms / 1000)
 
         # Full-frame and multi-region obstacle OCR is intentionally not part of
         # the 300ms fast loop. It runs once before a menu action, or after an
@@ -180,6 +249,23 @@ class CapabilityPilot:
         self._overlay_candidate: tuple[str, str, str] | None = None
         self._overlay_candidate_count = 0
         self._active_overlay: StateObservation | None = None
+        self._lobby_visit_active = False
+        self._lobby_visit_count = 0
+        self._progression_done = False
+        self._progression_attempts = 0
+        self._progression_reason = "INITIAL"
+        self._last_progression: LobbyProgressionReading | None = None
+        self._last_progression_attempt: LobbyProgressionReading | None = None
+        self._progression_outcome: ProgressionOutcome | None = None
+        self._progression_retry_at: float | None = None
+        self._progression_pause_reported = False
+        self.progression_decision: ProgressionDecision | None = None
+        self.session_outcome: str | None = None
+        self.target_reading: LobbyProgressionReading | None = None
+        self._round_active = False
+        self.rounds_started = 0
+        self.rounds_returned_to_lobby = 0
+        self._next_status_at = 0.0
 
     def _validate_actions(self) -> None:
         """Fail before the first frame rather than mid-action.
@@ -483,6 +569,267 @@ class CapabilityPilot:
             self._snapshot(state, frame)
         return state
 
+    def _update_visit_tracking(self, base_state: str | None) -> None:
+        if base_state in LOBBY_CONTEXT_STATES:
+            if not self._lobby_visit_active:
+                self._lobby_visit_active = True
+                self._lobby_visit_count += 1
+                self._progression_reason = (
+                    "INITIAL"
+                    if self._lobby_visit_count == 1
+                    else (
+                        "RETURNED_AFTER_MATCH"
+                        if self._round_active
+                        else "STATE_REENTRY"
+                    )
+                )
+                if self._round_active:
+                    self.rounds_returned_to_lobby += 1
+                    self._round_active = False
+                self.progression_stabilizer.reset()
+                self._progression_done = self.progression_reader is None
+                self._progression_attempts = 0
+                self._last_progression_attempt = None
+                self._progression_outcome = None
+                self._progression_retry_at = None
+                self._progression_pause_reported = False
+                self.progression_decision = None
+            return
+
+        if base_state in ROUND_CONTEXT_STATES:
+            self._lobby_visit_active = False
+            if not self._round_active:
+                self._round_active = True
+                self.rounds_started += 1
+
+    @staticmethod
+    def _failed_progression_payload(
+        reason: str,
+        reading: LobbyProgressionReading | None,
+    ) -> dict[str, object]:
+        return {
+            "reason": reason,
+            "level": None,
+            "xpCurrentApprox": None,
+            "xpRequiredApprox": None,
+            "rawText": "" if reading is None else reading.raw_text,
+            "levelRawText": (
+                "" if reading is None else reading.level_evidence.raw_text
+            ),
+            "xpRawText": "" if reading is None else reading.xp_evidence.raw_text,
+            "confidence": 0.0,
+            "levelConfidence": (
+                0.0 if reading is None else round(reading.level_evidence.confidence, 4)
+            ),
+            "xpConfidence": (
+                0.0 if reading is None else round(reading.xp_evidence.confidence, 4)
+            ),
+            "changed": False,
+            "deltaApprox": None,
+            "readStatus": "FAILED",
+            "error": "大厅等级经验未能在限定帧数内得到一致读数"
+            if reading is None
+            else reading.error
+            or "大厅等级经验连续读数不一致",
+        }
+
+    def _read_lobby_progress(
+        self,
+        state: str | None,
+        frame: np.ndarray,
+    ) -> bool:
+        """Return True while a lobby action must wait for this short read."""
+
+        if (
+            self.progression_reader is None
+            or self._progression_done
+            or not self._lobby_visit_active
+            or state not in LOBBY_PROGRESS_STATES
+        ):
+            return False
+
+        self._progression_attempts += 1
+        reading = self.progression_reader.read(frame)
+        self._last_progression_attempt = reading
+        stable = self.progression_stabilizer.observe(reading)
+        if stable is not None:
+            previous = self._last_progression
+            changed = (
+                previous is not None
+                and (
+                    stable.level,
+                    stable.xp_current_approx,
+                    stable.xp_required_approx,
+                )
+                != (
+                    previous.level,
+                    previous.xp_current_approx,
+                    previous.xp_required_approx,
+                )
+            )
+            delta_approx: int | None = None
+            if (
+                previous is not None
+                and previous.level == stable.level
+                and previous.xp_current_approx is not None
+                and stable.xp_current_approx is not None
+            ):
+                candidate_delta = (
+                    stable.xp_current_approx - previous.xp_current_approx
+                )
+                if candidate_delta >= 0:
+                    delta_approx = candidate_delta
+            self.recorder.log(
+                "LOBBY_PROGRESS",
+                **stable.as_event_payload(
+                    self._progression_reason,
+                    changed=changed,
+                    delta_approx=delta_approx,
+                ),
+            )
+            self._last_progression = stable
+            self._progression_outcome = ProgressionOutcome.confirmed(
+                stable,
+                attempts=self._progression_attempts,
+            )
+            self._progression_done = True
+            self.notify(
+                f"[账号进度] 等级 {stable.level}，"
+                f"{stable.raw_text or '经验值已读取'}"
+            )
+            return False
+
+        if self._progression_attempts >= self.progression_max_attempts:
+            payload = self._failed_progression_payload(
+                self._progression_reason,
+                self._last_progression_attempt,
+            )
+            self.recorder.log("LOBBY_PROGRESS", **payload)
+            self._progression_outcome = ProgressionOutcome.failed(
+                self._last_progression_attempt,
+                attempts=self._progression_attempts,
+                error=str(payload["error"]),
+            )
+            self._progression_done = True
+            self.counters["progressionFailed"] += 1
+            return False
+        return True
+
+    def _prepare_progression_retry(self, now: float) -> None:
+        outcome = self._progression_outcome
+        if (
+            outcome is None
+            or outcome.status is not ProgressionStatus.FAILED
+            or self.progression_decision is not ProgressionDecision.PAUSE_UNCERTAIN
+            or self._progression_retry_at is None
+            or now < self._progression_retry_at
+        ):
+            return
+        self.progression_stabilizer.reset()
+        self._progression_done = False
+        self._progression_attempts = 0
+        self._last_progression_attempt = None
+        self._progression_outcome = None
+        self._progression_retry_at = None
+        self._progression_pause_reported = False
+        self.progression_decision = None
+
+    def _progression_context(
+        self,
+        state: str | None,
+        base_state: str | None,
+    ) -> ProgressionContext:
+        return ProgressionContext(
+            observed_state=state,
+            safe_lobby=base_state in SAFE_LOBBY_STATES,
+            queueing=base_state == "LOBBY_QUEUEING",
+            overlay_clear=state == base_state and self._active_overlay is None,
+            pending_action=self.dispatcher.pending is not None,
+            foreground=self._foreground,
+            lease_current=bool(self.lease_is_current()),
+        )
+
+    def _apply_progression_policy(
+        self,
+        state: str | None,
+        base_state: str | None,
+        frame: np.ndarray,
+        now: float,
+    ) -> ProgressionDecision | None:
+        outcome = self._progression_outcome
+        if outcome is None:
+            return None
+        decision = self.progression_policy.decide(
+            outcome,
+            self._progression_context(state, base_state),
+        )
+        self.progression_decision = decision
+        self.counters[f"progression:{decision.value}"] += 1
+
+        if decision is ProgressionDecision.CONTINUE_PLAY:
+            self._progression_retry_at = None
+            self._progression_pause_reported = False
+            return decision
+        if decision is ProgressionDecision.DEFER_UNTIL_SAFE_LOBBY:
+            return decision
+        if decision is ProgressionDecision.PAUSE_UNCERTAIN:
+            self._release_all("PROGRESSION_UNCERTAIN")
+            if (
+                outcome.status is ProgressionStatus.FAILED
+                and self._progression_retry_at is None
+            ):
+                self._progression_retry_at = now + self.progression_retry_s
+            if not self._progression_pause_reported:
+                self._progression_pause_reported = True
+                self.recorder.log(
+                    "PROGRESSION_PAUSED",
+                    decision=decision.value,
+                    attempts=outcome.attempts,
+                    error=outcome.error,
+                    state=state,
+                )
+                self.notify("暂停：大厅等级经验尚未可靠确认。")
+                self._snapshot("paused-progression-uncertain", frame)
+            return decision
+
+        self._release_all("TARGET_REACHED")
+        reading = outcome.reading
+        assert reading is not None and reading.level is not None
+        self.target_reading = reading
+        self.recorder.log(
+            "ACCOUNT_TARGET_REACHED",
+            level=reading.level,
+            xpCurrentApprox=reading.xp_current_approx,
+            xpRequiredApprox=reading.xp_required_approx,
+            state=state,
+        )
+        self._snapshot("target-reached", frame)
+        self.session_outcome = "TARGET_REACHED"
+        self.notify(f"目标等级已达到：{reading.level}")
+        self._write_status(now, force=True)
+        return decision
+
+    def _write_status(self, now: float, *, force: bool = False) -> None:
+        if not force and now < self._next_status_at:
+            return
+        writer = getattr(self.recorder, "write_status", None)
+        if not callable(writer):
+            return
+        writer(
+            {
+                "runtimeState": "RUNNING" if self._foreground else "PAUSED",
+                "elapsedMs": max(0, round((now - self.started) * 1000)),
+                "observedState": self.observed_state,
+                "foreground": self._foreground,
+                "observationVersion": self.state_version,
+                "frames": self.frames,
+                "actionsSent": self.actions_sent,
+                "roundNumber": self.rounds_started,
+                "roundsReturnedToLobby": self.rounds_returned_to_lobby,
+            }
+        )
+        self._next_status_at = now + self.status_interval_s
+
     def _observe(self, frame: np.ndarray, now: float) -> tuple[str | None, str | None]:
         base = self._base_observation(frame, now)
         effective = self._resolve_overlay(frame, base, now)
@@ -551,8 +898,7 @@ class CapabilityPilot:
         if self.screenshot_count >= self.max_screenshots:
             return
         self.screenshot_count += 1
-        path = self.recorder.screenshot(stage.lower(), frame)
-        self.recorder.log("SCREENSHOT_SAVED", stage=stage, path=str(path))
+        self.recorder.screenshot(stage.lower(), frame)
 
     def _act(self, decision: Decision, state: str, frame: np.ndarray) -> None:
         capability = decision.capability
@@ -601,6 +947,7 @@ class CapabilityPilot:
         if not foreground:
             self._pause_for_foreground()
             record["skipped"] = "NOT_FOREGROUND"
+            self._write_status(now, force=True)
             return record
         if not self._foreground:
             self._foreground = True
@@ -613,6 +960,7 @@ class CapabilityPilot:
             self.counters["captureError"] += 1
             self.recorder.log("CAPTURE_ERROR", error=str(error))
             record["captureError"] = str(error)
+            self._write_status(now)
             return record
 
         self.frames += 1
@@ -634,10 +982,37 @@ class CapabilityPilot:
         now = self.monotonic()
         record["state"] = state
         record["baseState"] = base_state
+        self._update_visit_tracking(base_state)
         self._note_unknown(state, frame, now)
 
         self._settle_pending(state)
         self.dispatcher.note_state(state, now)
+        self._prepare_progression_retry(now)
+        if self._read_lobby_progress(state, frame):
+            record["decision"] = {"kind": "wait", "reason": "LOBBY_PROGRESS"}
+            self.counters["wait:LOBBY_PROGRESS"] += 1
+            self._write_status(self.monotonic())
+            return record
+        progression_decision = self._apply_progression_policy(
+            state,
+            base_state,
+            frame,
+            self.monotonic(),
+        )
+        if (
+            progression_decision is not None
+            and progression_decision is not ProgressionDecision.CONTINUE_PLAY
+        ):
+            record["decision"] = {
+                "kind": (
+                    "stop"
+                    if progression_decision is ProgressionDecision.TARGET_REACHED
+                    else "wait"
+                ),
+                "reason": progression_decision.value,
+            }
+            self._write_status(self.monotonic())
+            return record
         decision = self.dispatcher.decide(state, self.state_version, now)
         record["decision"] = {"kind": decision.kind, "reason": decision.reason}
         self.counters[f"{decision.kind}:{decision.reason}"] += 1
@@ -662,18 +1037,23 @@ class CapabilityPilot:
             self.notify(f"暂停：{decision.reason}")
             if state is not None:
                 self._snapshot(f"paused-{decision.reason.lower()}", frame)
+        self._write_status(self.monotonic())
         return record
 
-    def run(self, duration_s: float | None = None) -> None:
+    def run(self, duration_s: float | None = None) -> str:
         deadline = None if duration_s is None else self.monotonic() + duration_s
         try:
-            while deadline is None or self.monotonic() < deadline:
+            while (
+                self.session_outcome is None
+                and (deadline is None or self.monotonic() < deadline)
+            ):
                 self.step()
                 self.sleep(self.poll_ms / 1000)
         finally:
             # Whatever ends the run — the deadline, F8, Ctrl+C, an exception —
             # must not leave a key held down in a live match.
             self._release_all("RUN_ENDED")
+        return self.session_outcome or "COMPLETED"
 
     def write_summary(self) -> Path:
         path = Path(self.recorder.run_dir) / "pilot-summary.json"
@@ -683,6 +1063,8 @@ class CapabilityPilot:
             "durationMs": round((self.monotonic() - self.started) * 1000),
             "frames": self.frames,
             "actionsSent": self.actions_sent,
+            "roundsStarted": self.rounds_started,
+            "roundsReturnedToLobby": self.rounds_returned_to_lobby,
             "screenshots": self.screenshot_count,
             "counters": dict(sorted(self.counters.items())),
         }

@@ -86,8 +86,8 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\run.ps1 start --mode match
 
 ```text
 windows/runs/<时间>/
-├── actions.jsonl
 ├── events.jsonl
+├── manifest.json
 ├── status.json
 ├── result.json       # 任务停止后生成
 └── screenshots/

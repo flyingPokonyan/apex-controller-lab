@@ -42,6 +42,7 @@ class RunnerConfig:
     task: dict[str, Any]
     control_api: dict[str, Any]
     game_states: dict[str, Any]
+    lobby_progress: dict[str, Any]
     capability_set: str | None
 
 
@@ -94,5 +95,6 @@ def load_config(path: Path | str = DEFAULT_CONFIG_PATH) -> RunnerConfig:
         task=dict(payload.get("task", {})),
         control_api=dict(payload.get("controlApi", {})),
         game_states=dict(payload.get("gameStates", {})),
+        lobby_progress=dict(payload.get("lobbyProgress", {})),
         capability_set=payload.get("capabilitySet"),
     )

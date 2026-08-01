@@ -56,6 +56,10 @@ Windows 第一次克隆后，进入 `windows` 目录运行 `setup.ps1`。以后�
 - [Windows 首场匹配运行器](docs/windows-first-match-runner.md)
 - [Windows 新号训练任务运行器](docs/windows-first-tutorial-runner.md)
 - [可恢复任务运行器设计（讨论稿）](docs/resilient-task-runner-design.md)
+- [远程上报 API 规范（账号、事件、等级经验）](docs/remote-reporting-api.md)
+- [远程上报 OpenAPI 3.1](docs/remote-reporting-openapi.yaml)
+- [EA App 自动登录与 20 级切号编排设计](docs/ea-account-orchestrator-design.md)
+- [EA 自动切号真实服务器 Windows 闭环验证手册](docs/ea-server-windows-end-to-end-validation.md)
 - [菜单改用文字证据：离线测量与待实测项](docs/ocr-first-calibration.md)
 - [观察会话清单](docs/observation-session-checklist.md)
 
@@ -65,6 +69,29 @@ Windows 第一次克隆后，进入 `windows` 目录运行 `setup.ps1`。以后�
 活动公告、奖励/升级和账户/好友/设置/进度导览，再统一处理选未上榜、匹配、脱离跳伞
 与近战。快速大厅识别和低频覆盖层 OCR 可以分开跑，但所有真实输入只由一套 capability
 调度器发送；识别不出、验证码或 OCR 异常都会停住并留证，不会点击覆盖层下面的大厅。
+同一台机器重复双击时只有第一个会话能取得运行锁。
+
+自动切号入口预留为 `windows\account-cycle.cmd`。会话抽取、20 级停止策略、租约
+checkpoint、续租、终态恢复和真实 Provider HTTP 已经实现；EA App UIA 驱动仍待目标
+Windows 控件树勘察，因此当前入口会明确拒绝领取账号，不会尝试登录或发送输入。实施状态
+见 [EA App 自动登录与 20 级切号编排设计](docs/ea-account-orchestrator-design.md#19-当前实现状态)。
+回到目标机后先让 EA App 停在登录页，双击 `windows\probe-ea-uia.cmd`；脱敏控件树会
+保存到 `windows\runs\ea-uia-*.txt`，用于完成真实 UIA 驱动。
+
+两个入口使用不同的私有配置：固定账号的 `play.cmd` 读取
+`windows\runner.private.json`；动态领号的 `account-cycle.cmd` 读取
+`windows\account-cycle.private.json`。后者应直接使用 Apex 运营页“创建设备”时下载的
+托管配置，不要加入静态 `accountId`。两份私有配置都已加入 `.gitignore`。
+
+第一次使用先在 `windows` 目录运行 `setup.ps1`，再运行 `run.ps1 validate` 做不发送输入
+的离线检查。日常运行只双击 `play.cmd`；`run.ps1 start/live` 是旧监督器和线性回归入口，
+不再作为自动循环的推荐启动方式。
+
+远程上报默认关闭，不影响纯本地使用。Apex 管理页面以后为所选账号和设备生成
+`runner.private.json`，放到 `windows\runner.private.json` 后，`play.cmd` 会自动绑定该
+账号、验证 Steam 稳定 ID（已配置时）、异步上报并在断网后补传。`accountId` 固定对应
+服务端 `apex_profiles.public_id`，不是昵称、EA/Steam 用户名或数据库自增 ID；配置示例见
+`windows\runner.private.example.json`，完整接口见[远程上报 API 规范](docs/remote-reporting-api.md)。
 
 结算返回大厅已按操作者确认的完整交互实现为 `TAB → 等待 1500ms → 长按 SPACE 2000ms`，
 并以大厅态作为后置确认；不再等待或识别中间确认页。该序列和跳伞的 `LCTRL` 2 秒长按
@@ -72,13 +99,17 @@ Windows 第一次克隆后，进入 `windows` 目录运行 `setup.ps1`。以后�
 
 `windows/` 已包含针对 `2560×1440`、中文、全屏环境的截图门控运行器。它覆盖新手任务完成后的首场匹配：继续、准备、自动选择英雄、跟队时按 `LCTRL` 脱离、`E` 跳伞、自由落体、落地确认与最终截图。真正的跳伞指挥官画面还缺一张标定图，当前不可达而不会猜测。
 
-真实输入默认不会启动；先在 Windows 中运行 `.\\windows\\run.ps1 validate` 做离线识别，再显式运行 `.\\windows\\run.ps1 start --mode match` 启动可恢复的常驻匹配任务。启动后可在 `http://127.0.0.1:8765` 查看状态、关键截图和事件，并暂停、继续、停止或释放输入。Apex 不在前台、加载黑屏或暂时无法识别时，任务会释放输入并暂停观察，而不是直接退出；任何时候按 `F8` 紧急停止。
+每次稳定进入大厅后，Runner 会在发送大厅动作前读取两次等级和经验；两次一致才记录
+可信值，最多尝试三帧，失败只记录 `FAILED` 而不会猜值或阻塞后续匹配。Apex 不在前台
+时任务会释放输入并暂停观察；任何时候按 `F8` 紧急停止。
 
 区域 OCR 和外置清障字典已经接入。`match` 档默认仅识别留证，需要 `--arm-safe-obstacles` 才允许字典中的 `Enter`/`Esc` 安全动作；`tutorial` 档在配置里声明了 `ocr.autoArm`，双击入口即为已武装。未知页面在两种情况下都不会盲点。
 
 区域可以声明 `singleLine`，这样跳过文字检测直接识别。检测占了 OCR 的绝大部分开销，且开销与输入尺寸基本无关，所以只裁小区域省不下时间——大厅模式名实测 4.7ms（单行）对 234ms（带检测），置信度相同。
 
-原来的 `.\\windows\\run.ps1 live` 仍保留为固定首场链路的线性回归入口，不建议作为日常任务入口。运行状态可从 `windows/runs/status.json` 查看，每次会话的事件和关键截图保存在对应的时间目录中。
+运行状态可从 `windows/runs/status.json` 查看。每次会话使用唯一目录，`events.jsonl`
+是本地权威事件流；启用远程上报后还会生成连续序号的 `report-outbox.jsonl` 和确认游标，
+Token 不会写入这些文件、manifest、截图或错误事件。
 
 ## 观察模式（标定用）
 

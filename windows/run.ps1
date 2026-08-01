@@ -9,8 +9,8 @@ $PrefixArgs = @()
 if ($args.Count -ge 1) {
     $Command = [string]$args[0]
 }
-if (@("validate", "observe", "live", "start", "play", "probe-input") -notcontains $Command) {
-    throw "Unknown command: $Command (supported: validate, observe, live, start, play, probe-input)"
+if (@("validate", "observe", "live", "start", "play", "account-cycle", "probe-input") -notcontains $Command) {
+    throw "Unknown command: $Command (supported: validate, observe, live, start, play, account-cycle, probe-input)"
 }
 if ($args.Count -gt 1) {
     for ($Index = 1; $Index -lt $args.Count; $Index++) {
@@ -43,7 +43,7 @@ elseif ($Command -eq "observe") {
 elseif ($Command -eq "probe-input") {
     $PrefixArgs = @("--config", (Join-Path $WindowsDir "config\play-2560x1440.zh-CN.json"))
 }
-elseif ($Command -eq "play") {
+elseif (@("play", "account-cycle") -contains $Command) {
     # Its own profile rather than the observe one: this command sends input,
     # and it must not inherit the templates and ordered action table that the
     # capability set exists to replace.

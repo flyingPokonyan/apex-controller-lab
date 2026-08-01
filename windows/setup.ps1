@@ -16,4 +16,4 @@ if (-not (Test-Path $VenvPython)) {
 & $VenvPython -m pip install --upgrade pip
 & $VenvPython -m pip install -r (Join-Path $WindowsDir "requirements.txt")
 
-Write-Host "Setup complete. Tutorial start: .\run.ps1 start tutorial"
+Write-Host "Setup complete. Daily start: double-click play.cmd"

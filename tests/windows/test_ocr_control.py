@@ -15,7 +15,7 @@ REPOSITORY_ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(REPOSITORY_ROOT / "windows"))
 
 from apex_automation.control import TaskControl
-from apex_automation.control_server import LocalControlServer
+from apex_automation.control_server import LocalControlServer, read_event_page
 from apex_automation.ocr_obstacles import (
     OcrObstacleDetector,
     OcrToken,
@@ -102,6 +102,21 @@ class OcrRulesTest(unittest.TestCase):
 
 
 class LocalControlServerTest(unittest.TestCase):
+    def test_event_page_reads_the_versioned_recorder_schema(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            recorder = RunRecorder(Path(directory), "test-profile")
+            recorder.log("STATE_DETECTED", state="LOBBY_READY_TARGET")
+
+            events = read_event_page(recorder.events_path, after=1)
+
+            self.assertEqual(len(events), 1)
+            self.assertEqual(events[0]["eventId"], 2)
+            self.assertEqual(events[0]["event"], "STATE_DETECTED")
+            self.assertEqual(
+                events[0]["payload"],
+                {"state": "LOBBY_READY_TARGET"},
+            )
+
     def test_local_dashboard_reads_status_and_requires_token_for_commands(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             recorder = RunRecorder(Path(directory), "test-profile")

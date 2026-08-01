@@ -100,7 +100,7 @@ ScenarioOrchestrator
 │   ├── EvidenceCapture
 │   └── UserScreenshotTrigger
 └── RunRecorder
-    ├── actions.jsonl
+    ├── events.jsonl
     ├── screenshots/
     └── result.json
 ```

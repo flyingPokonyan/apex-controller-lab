@@ -1,0 +1,9 @@
+{
+  "schemaVersion": 1,
+  "enabled": true,
+  "reportUrl": "https://example.com/v1/runner/reports",
+  "reportToken": "replace-with-device-reporter-token",
+  "deviceId": "dev_01K1UVWXYZ",
+  "leaseUrl": "https://example.com/v1/runner/account-leases",
+  "providerToken": "replace-with-provider-token"
+}

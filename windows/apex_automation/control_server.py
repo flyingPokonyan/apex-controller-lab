@@ -107,6 +107,51 @@ refresh();setInterval(refresh,1000);
 </body></html>"""
 
 
+def read_event_page(
+    path: Path,
+    *,
+    after: int = 0,
+    limit: int = 100,
+) -> list[dict[str, object]]:
+    events: list[dict[str, object]] = []
+    if not path.exists():
+        return events
+    for line_number, line in enumerate(
+        path.read_text(encoding="utf-8").splitlines(),
+        start=1,
+    ):
+        if not line.strip():
+            continue
+        try:
+            record = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        event_id = int(record.get("seq", line_number))
+        if event_id <= after:
+            continue
+        event_name = record.get("type", record.get("event", "UNKNOWN"))
+        elapsed = record.get("elapsedMs")
+        raw_payload = record.get("payload")
+        payload = (
+            raw_payload
+            if isinstance(raw_payload, dict)
+            else {
+                key: value
+                for key, value in record.items()
+                if key not in {"event", "elapsedMs"}
+            }
+        )
+        events.append(
+            {
+                "eventId": event_id,
+                "elapsedMs": elapsed,
+                "event": event_name,
+                "payload": payload,
+            }
+        )
+    return events[-min(500, max(1, limit)) :]
+
+
 class LocalControlServer:
     def __init__(
         self,
@@ -192,29 +237,16 @@ class LocalControlServer:
                     query = parse_qs(parsed.query)
                     after = max(0, int(query.get("after", ["0"])[0]))
                     limit = min(500, max(1, int(query.get("limit", ["100"])[0])))
-                    events: list[dict[str, object]] = []
-                    if recorder.events_path.exists():
-                        for event_id, line in enumerate(
-                            recorder.events_path.read_text(encoding="utf-8").splitlines(),
-                            start=1,
-                        ):
-                            if event_id <= after or not line.strip():
-                                continue
-                            try:
-                                record = json.loads(line)
-                            except json.JSONDecodeError:
-                                continue
-                            event_name = record.pop("event", "UNKNOWN")
-                            elapsed = record.pop("elapsedMs", None)
-                            events.append(
-                                {
-                                    "eventId": event_id,
-                                    "elapsedMs": elapsed,
-                                    "event": event_name,
-                                    "payload": record,
-                                }
+                    self._send_json(
+                        HTTPStatus.OK,
+                        {
+                            "events": read_event_page(
+                                recorder.events_path,
+                                after=after,
+                                limit=limit,
                             )
-                    self._send_json(HTTPStatus.OK, {"events": events[-limit:]})
+                        },
+                    )
                     return
                 if parsed.path == "/api/screenshots/latest":
                     try:
