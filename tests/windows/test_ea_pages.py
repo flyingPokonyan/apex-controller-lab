@@ -209,6 +209,20 @@ class AnchorTargetingTest(unittest.TestCase):
         )
 
 
+class SharedInputStructureTest(unittest.TestCase):
+    @unittest.skipUnless(
+        sys.platform == "win32",
+        "Win32 INPUT structures only exist on Windows",
+    )
+    def test_ea_driver_shares_the_play_sender_input_structure(self) -> None:
+        # ctypes.windll.user32 is process-wide: two structurally identical
+        # INPUT classes make whichever module constructs last break the other
+        # one's SendInput with "expected LP_INPUT instance instead of LP_INPUT".
+        from apex_automation import ea_app_win32, input_win32
+
+        self.assertIs(ea_app_win32.INPUT, input_win32.INPUT)
+
+
 class EvidenceRedactionTest(unittest.TestCase):
     def test_emails_and_codes_are_sensitive(self) -> None:
         self.assertTrue(is_sensitive_text("player@example.test"))

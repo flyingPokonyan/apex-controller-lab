@@ -709,16 +709,24 @@ class AccountOrchestrator:
                         outcome=AccountCycleOutcome.STOPPED,
                         lease_id=lease.lease_id,
                         run_id=result.run_id,
+                        error_code=result.error_code,
                     )
                 if result.status not in {"TARGET_REACHED", "FAILED"}:
                     return self._pause(
                         "SESSION_ENDED_WITHOUT_TARGET",
                         manual=True,
                     )
+                # The cycle completing says nothing about how the game session
+                # went. A crashed session closed its lease correctly and still
+                # reported COMPLETED with no reason attached, which reads as a
+                # clean run.
                 return AccountCycleResult(
                     outcome=AccountCycleOutcome.COMPLETED,
                     lease_id=lease.lease_id,
                     run_id=result.run_id,
+                    error_code=(
+                        None if result.status == "TARGET_REACHED" else result.error_code
+                    ),
                 )
             self.sleep(self.completion_poll_s)
             state = self.provider.status(

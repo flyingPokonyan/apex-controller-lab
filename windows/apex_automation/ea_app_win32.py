@@ -81,33 +81,12 @@ INPUT_SETTLE_S = 0.8
 
 
 if sys.platform == "win32":
-    ULONG_PTR = ctypes.c_size_t
-
-    class MOUSEINPUT(ctypes.Structure):
-        _fields_ = [
-            ("dx", wintypes.LONG),
-            ("dy", wintypes.LONG),
-            ("mouseData", wintypes.DWORD),
-            ("dwFlags", wintypes.DWORD),
-            ("time", wintypes.DWORD),
-            ("dwExtraInfo", ULONG_PTR),
-        ]
-
-    class KEYBDINPUT(ctypes.Structure):
-        _fields_ = [
-            ("wVk", wintypes.WORD),
-            ("wScan", wintypes.WORD),
-            ("dwFlags", wintypes.DWORD),
-            ("time", wintypes.DWORD),
-            ("dwExtraInfo", ULONG_PTR),
-        ]
-
-    class INPUT_UNION(ctypes.Union):
-        _fields_ = [("mi", MOUSEINPUT), ("ki", KEYBDINPUT)]
-
-    class INPUT(ctypes.Structure):
-        _anonymous_ = ("union",)
-        _fields_ = [("type", wintypes.DWORD), ("union", INPUT_UNION)]
+    # These must be the *same* classes the play-session sender uses.
+    # ctypes.windll.user32 is one process-wide object, so whichever module
+    # constructs last owns SendInput.argtypes — and a second, structurally
+    # identical INPUT class makes the other module's calls fail with
+    # "expected LP_INPUT instance instead of LP_INPUT". Import, never redefine.
+    from .input_win32 import INPUT, KEYBDINPUT, MOUSEINPUT
 
 
 @dataclass(eq=False)
