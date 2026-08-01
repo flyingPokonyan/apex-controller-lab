@@ -200,6 +200,35 @@ class WindowsEaHybridDriver:
         )
         self.sleep(0.5)
 
+    def _click_ocr_text(
+        self,
+        hwnd: int,
+        targets: set[str],
+        *,
+        x_range: tuple[float, float],
+        y_range: tuple[float, float],
+    ) -> bool:
+        left, top, right, bottom = self._rect(hwnd)
+        width = right - left
+        height = bottom - top
+        matches: list[tuple[float, float, float]] = []
+        for token in self.ocr.read_with_boxes(self._frame()):
+            if token.roi is None or token.normalized not in targets:
+                continue
+            x1, y1, x2, y2 = token.roi
+            x_ratio = ((x1 + x2) / 2 - left) / width
+            y_ratio = ((y1 + y2) / 2 - top) / height
+            if (
+                x_range[0] <= x_ratio <= x_range[1]
+                and y_range[0] <= y_ratio <= y_range[1]
+            ):
+                matches.append((token.confidence, x_ratio, y_ratio))
+        if not matches:
+            return False
+        _, x_ratio, y_ratio = max(matches)
+        self._click(hwnd, x_ratio, y_ratio)
+        return True
+
     def _type_secret(self, value: str) -> None:
         inputs: list[INPUT] = []
         for character in value:
@@ -386,7 +415,25 @@ class WindowsEaHybridDriver:
         hwnd = self._ea_window()
         if self._state(hwnd) is not EaUiState.SIGNED_IN:
             raise EaAppAutomationError("EA App 未处于已登录状态，拒绝启动 Apex")
-        self._click(hwnd, 0.52, 0.495)
+        if not self._click_ocr_text(
+            hwnd,
+            {"apexlegends"},
+            x_range=(0.0, 0.30),
+            y_range=(0.15, 0.90),
+        ):
+            raise EaAppAutomationError("EA App 未找到左侧 Apex Legends 游戏入口")
+        self.sleep(2.0)
+        for _ in range(8):
+            if self._click_ocr_text(
+                hwnd,
+                {"play", "launch", "开始游戏"},
+                x_range=(0.35, 0.75),
+                y_range=(0.30, 0.70),
+            ):
+                break
+            self.sleep(1.0)
+        else:
+            raise EaAppAutomationError("EA App Apex 页面未找到 Play 按钮")
         deadline = time.monotonic() + 90.0
         while time.monotonic() < deadline:
             if any(self._process_running(name) for name in APEX_EXECUTABLES):
