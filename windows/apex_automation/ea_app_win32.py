@@ -407,14 +407,19 @@ class WindowsEaHybridDriver:
         raise EaAppAutomationError("EA App 登录后未在时限内出现可验证身份")
 
     def verify_identity(self, expected_ea_account_id: str) -> EaIdentityFact:
-        identity = self._identity(self._ea_window())
-        if identity is None:
-            raise EaIdentityMismatch("EA App 页面没有可验证的稳定 EA ID")
-        if identity.ea_account_id != expected_ea_account_id:
-            raise EaIdentityMismatch("EA App 当前稳定 EA ID 与租约不一致")
-        if not identity.verified:
-            raise EaIdentityMismatch("EA App 稳定 EA ID OCR 置信度不足")
-        return identity
+        deadline = time.monotonic() + 15.0
+        while time.monotonic() < deadline:
+            identity = self._identity(self._ea_window())
+            if identity is None:
+                self.sleep(1.0)
+                continue
+            if identity.ea_account_id != expected_ea_account_id:
+                raise EaIdentityMismatch("EA App 当前稳定 EA ID 与租约不一致")
+            if not identity.verified:
+                self.sleep(1.0)
+                continue
+            return identity
+        raise EaIdentityMismatch("EA App 页面没有可验证的稳定 EA ID")
 
     @staticmethod
     def _process_running(executable: str) -> bool:
@@ -431,7 +436,11 @@ class WindowsEaHybridDriver:
         if any(self._process_running(name) for name in APEX_EXECUTABLES):
             return
         hwnd = self._ea_window()
-        if self._state(hwnd) is not EaUiState.SIGNED_IN:
+        for _ in range(10):
+            if self._state(hwnd) is EaUiState.SIGNED_IN:
+                break
+            self.sleep(1.0)
+        else:
             raise EaAppAutomationError("EA App 未处于已登录状态，拒绝启动 Apex")
         if not self._click_ocr_text(
             hwnd,
@@ -479,8 +488,16 @@ class WindowsEaHybridDriver:
 
     def sign_out(self) -> bool:
         hwnd = self._ea_window()
-        if self._identity(hwnd) is None:
-            return self._state(hwnd) is EaUiState.LOGIN
+        identity = None
+        for _ in range(8):
+            identity = self._identity(hwnd)
+            if identity is not None:
+                break
+            if self._state(hwnd) is EaUiState.LOGIN:
+                return True
+            self.sleep(1.0)
+        if identity is None:
+            return False
         self._click(hwnd, 0.89, 0.075)
         self.sleep(1.0)
         frame = self._frame()
