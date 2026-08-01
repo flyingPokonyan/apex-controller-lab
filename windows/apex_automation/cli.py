@@ -33,7 +33,7 @@ from .config import (
 )
 from .control import TaskControl, TaskStopRequested
 from .control_server import LocalControlServer
-from .ea_app import EaAppAutomationError, EaAppDriver, OtpChallenge
+from .ea_app import EaAppAutomationError, EaAppDriver, EaUiState, OtpChallenge
 from .ea_app_win32 import WindowsEaHybridDriver
 from .ea_evidence import EaLoginEvidence, default_evidence_root
 from .ea_pages import mask_identity
@@ -838,6 +838,16 @@ def run_ea_login_check(
             try:
                 state = driver.preflight()
                 print(f"EA 领号前预检通过：{state.value}")
+                if state is EaUiState.SIGNED_IN:
+                    # Signing in is the whole point: starting from a signed-in
+                    # EA would report a pass without ever testing a login, and
+                    # would spend a real lease doing it.
+                    print(
+                        "EA 当前已登录，登录检查不会真正测试登录。"
+                        "请先在 EA App 手动登出，让它停在登录页后重跑。",
+                        file=sys.stderr,
+                    )
+                    return 2
 
                 # Never touch a lease this command did not open: it may belong
                 # to a paused account-cycle checkpoint that still owns it.
