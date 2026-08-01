@@ -291,8 +291,20 @@ class WindowsEaHybridDriver:
             return EaUiState.LOGIN
         return EaUiState.UNKNOWN
 
+    def _dismiss_expired_session(self, hwnd: int) -> bool:
+        compact = "".join(token.normalized for token in self._tokens(hwnd))
+        if not any(
+            term in compact
+            for term in ("sessionhasexpired", "backtosignin", "会话已过期")
+        ):
+            return False
+        self._click(hwnd, 0.50, 0.35)
+        self.sleep(2.0)
+        return True
+
     def preflight(self) -> EaUiState:
         hwnd = self._ea_window()
+        self._dismiss_expired_session(hwnd)
         state = self._state(hwnd)
         if state is EaUiState.UNKNOWN:
             raise EaAppAutomationError("EA App 页面无法识别，领号前预检失败")
@@ -310,6 +322,7 @@ class WindowsEaHybridDriver:
         otp_supplier: Callable[[OtpChallenge], OtpCode],
     ) -> EaIdentityFact:
         hwnd = self._ea_window()
+        self._dismiss_expired_session(hwnd)
         if self._state(hwnd) is not EaUiState.LOGIN:
             raise EaAppAutomationError("EA App 当前不是登录页")
         self._click(hwnd, 0.50, 0.50)

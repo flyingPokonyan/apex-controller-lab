@@ -54,7 +54,11 @@ class SingleInstanceLock:
             if os.name == "nt":
                 import msvcrt
 
-                msvcrt.locking(handle.fileno(), msvcrt.LK_UNLCK, 1)
+                try:
+                    msvcrt.locking(handle.fileno(), msvcrt.LK_UNLCK, 1)
+                except OSError:
+                    # Closing the Windows handle releases its byte-range lock.
+                    pass
             else:
                 import fcntl
 
