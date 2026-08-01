@@ -337,6 +337,21 @@ class WindowsEaHybridDriver:
         self.sleep(2.0)
         return True
 
+    def _wait_for_text(
+        self,
+        hwnd: int,
+        terms: tuple[str, ...],
+        *,
+        timeout_s: float = 15.0,
+    ) -> bool:
+        deadline = time.monotonic() + timeout_s
+        while time.monotonic() < deadline:
+            compact = "".join(token.normalized for token in self._tokens(hwnd))
+            if any(term in compact for term in terms):
+                return True
+            self.sleep(1.0)
+        return False
+
     def preflight(self) -> EaUiState:
         hwnd = self._ea_window()
         self._dismiss_expired_session(hwnd)
@@ -366,7 +381,8 @@ class WindowsEaHybridDriver:
         self._clear_focused_field()
         self._type_secret(credentials.login_identifier)
         self._click(hwnd, 0.50, 0.69)
-        self.sleep(2.0)
+        if not self._wait_for_text(hwnd, ("password", "密码")):
+            raise EaAppAutomationError("EA App 提交账号后未出现密码页")
         self._click(hwnd, 0.50, 0.50)
         self._clear_focused_field()
         self._type_secret(credentials.password)
