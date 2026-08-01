@@ -223,6 +223,27 @@ def page_markers(normalized_tokens: Iterable[str]) -> tuple[str, ...]:
     return tuple(seen)
 
 
+# Window chrome that happens to look like an account id once OCR strips the
+# punctuation: "Friends 0/2" normalizes to "friends02", nine alphanumerics
+# sitting in the same corner as the signed-in badge.
+UI_CHROME_WORDS = (
+    "friends",
+    "library",
+    "browse",
+    "store",
+    "search",
+    "download",
+    "notification",
+    "achievement",
+    "installed",
+    "playlist",
+)
+
+
+def is_ui_chrome(candidate: str) -> bool:
+    return any(word in candidate for word in UI_CHROME_WORDS)
+
+
 def fold_identity(value: str) -> str:
     return value.strip().lower().translate(_IDENTITY_FOLD)
 

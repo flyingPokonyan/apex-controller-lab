@@ -38,6 +38,7 @@ from .ea_pages import (
     identity_candidates,
     identity_matches,
     is_login_error,
+    is_ui_chrome,
     mask_identity,
     page_markers,
     password_page_blocker,
@@ -76,7 +77,9 @@ PASSWORD_FIELD_RATIO = (0.50, 0.50)
 PASSWORD_SUBMIT_RATIO = (0.50, 0.58)
 OTP_FIELD_RATIO = (0.50, 0.50)
 OTP_SUBMIT_RATIO = (0.50, 0.69)
-IDENTITY_BAND = (0.75, 0.00, 1.00, 0.17)
+# The badge sits at about 7.5% of the window height; the friends list
+# starts just below 14%. Keep the crop above it.
+IDENTITY_BAND = (0.75, 0.00, 1.00, 0.12)
 INPUT_SETTLE_S = 0.8
 
 
@@ -524,6 +527,11 @@ class WindowsEaHybridDriver:
         candidates: list[tuple[float, str]] = []
         for token in self.ocr.read(frame, region):
             for candidate in identity_candidates([normalize_ocr_text(token.text)]):
+                # Window chrome shares this corner. Reading "Friends 0/2" as
+                # the signed-in account sends the orchestrator off to sign out
+                # of a session that is already the right one.
+                if is_ui_chrome(candidate):
+                    continue
                 candidates.append((token.confidence, candidate))
         if not candidates:
             return None
@@ -793,9 +801,21 @@ class WindowsEaHybridDriver:
     ) -> EaIdentityFact:
         deadline = time.monotonic() + timeout_s
         observation: EaObservation | None = None
+        seen_pages: set[EaPage] = set()
         while time.monotonic() < deadline:
             self.sleep(2.0)
             observation = self._observe(hwnd)
+            # Whatever EA puts on screen here gets a frame the first time it
+            # appears. Waiting for the timeout to explain itself meant an
+            # unexpected page — a verification prompt, say — left no evidence
+            # at all until 90 seconds later, and none of it from the moment
+            # that mattered.
+            if observation.page not in seen_pages:
+                seen_pages.add(observation.page)
+                self._record(
+                    f"awaiting-{observation.page.value.lower()}",
+                    observation,
+                )
             if observation.page is EaPage.CAPTCHA:
                 self._record("captcha", observation)
                 raise EaCaptchaRequired("EA App 出现 Captcha，已暂停")

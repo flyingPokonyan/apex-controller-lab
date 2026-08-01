@@ -28,6 +28,7 @@ from apex_automation.ea_pages import (
     identity_candidates,
     identity_matches,
     is_login_error,
+    is_ui_chrome,
     mask_identity,
     page_markers,
     password_page_blocker,
@@ -139,6 +140,14 @@ class IdentityMatchTest(unittest.TestCase):
 
     def test_masking_keeps_both_ends_only(self) -> None:
         self.assertEqual(mask_identity("maraninovo253"), "mara...o253")
+
+    def test_window_chrome_is_not_an_account_id(self) -> None:
+        # "Friends 0/2" sits in the same corner as the badge and normalizes to
+        # nine alphanumerics, which read as an account id for one whole run.
+        self.assertTrue(is_ui_chrome("friends02"))
+        self.assertTrue(is_ui_chrome("installedgames"))
+        self.assertFalse(is_ui_chrome("maraninovo253"))
+        self.assertFalse(is_ui_chrome("f4vbjqygvlb"))
 
 
 class AnchorTargetingTest(unittest.TestCase):
