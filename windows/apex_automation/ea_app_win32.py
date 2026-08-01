@@ -305,10 +305,12 @@ class WindowsEaHybridDriver:
     def preflight(self) -> EaUiState:
         hwnd = self._ea_window()
         self._dismiss_expired_session(hwnd)
-        state = self._state(hwnd)
-        if state is EaUiState.UNKNOWN:
-            raise EaAppAutomationError("EA App 页面无法识别，领号前预检失败")
-        return state
+        for _ in range(8):
+            state = self._state(hwnd)
+            if state is not EaUiState.UNKNOWN:
+                return state
+            self.sleep(1.0)
+        raise EaAppAutomationError("EA App 页面无法识别，领号前预检失败")
 
     def ensure_started(self) -> EaUiState:
         return self.preflight()
