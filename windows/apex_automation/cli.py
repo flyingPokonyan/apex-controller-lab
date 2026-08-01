@@ -935,7 +935,11 @@ def run_ea_login_check(
                 exit_code = 1
             except (LeaseProviderError, RunnerConfigurationError) as error:
                 print(f"EA 登录检查中止：{error}", file=sys.stderr)
-                reason_code = "OPERATOR_STOPPED"
+                # An OTP the Provider could not deliver is an OTP failure, not
+                # an operator stopping the run: the server treats the two
+                # differently when it decides on cooldowns.
+                code = getattr(error, "code", "") or ""
+                reason_code = "OTP_TIMEOUT" if code.startswith("OTP") else "OPERATOR_STOPPED"
                 outcome = "FAILED"
                 exit_code = 1
             except (EmergencyStop, KeyboardInterrupt):

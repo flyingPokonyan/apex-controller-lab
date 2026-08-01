@@ -13,7 +13,7 @@ import uuid
 
 import numpy as np
 
-from .account_provider import OtpCode, SecretCredentials
+from .account_provider import MIN_USABLE_OTP_LIFETIME_S, OtpCode, SecretCredentials
 from .ea_app import (
     ApexExitEvidence,
     EaAppAutomationError,
@@ -92,6 +92,15 @@ SEND_CODE_RATIO = (0.50, 0.68)
 IDENTITY_BAND = (0.75, 0.00, 1.00, 0.12)
 INPUT_SETTLE_S = 0.8
 MAX_OTP_ATTEMPTS = 3
+
+# Pages that prove no session exists yet.
+PRE_LOGIN_PAGES = (
+    EaPage.EMAIL,
+    EaPage.PASSWORD,
+    EaPage.OTP_METHOD,
+    EaPage.OTP,
+    EaPage.EXPIRED_SESSION,
+)
 
 
 if sys.platform == "win32":
@@ -836,6 +845,27 @@ class WindowsEaHybridDriver:
             timeout_s=20.0,
         )
 
+    def _fresh_otp(
+        self,
+        otp_supplier: Callable[[OtpChallenge], OtpCode],
+    ) -> OtpCode:
+        """Get a code with enough life left to be typed.
+
+        A TOTP dies at the end of its 30-second window, so one handed over
+        with a second to go is useless — and asking again inside the same
+        window returns the very same digits. Waiting the window out is the
+        only thing that helps.
+        """
+
+        otp = otp_supplier(OtpChallenge(uuid.uuid4().hex, datetime.now(timezone.utc)))
+        if otp.lifetime_s >= MIN_USABLE_OTP_LIFETIME_S:
+            return otp
+        self.notify(f"验证码只剩 {otp.lifetime_s:.0f} 秒，等下一个窗口再取")
+        self.sleep(otp.lifetime_s + 1.0)
+        return otp_supplier(
+            OtpChallenge(uuid.uuid4().hex, datetime.now(timezone.utc))
+        )
+
     def _submit_otp(
         self,
         hwnd: int,
@@ -847,8 +877,7 @@ class WindowsEaHybridDriver:
             raise EaOtpUnavailable(
                 "EA 停在邮箱验证码页，服务端目前只能生成验证器验证码"
             )
-        challenge = OtpChallenge(uuid.uuid4().hex, datetime.now(timezone.utc))
-        otp = otp_supplier(challenge)
+        otp = self._fresh_otp(otp_supplier)
         target = self._click_target(
             hwnd,
             observation,
@@ -1114,11 +1143,18 @@ class WindowsEaHybridDriver:
         hwnd = self._ea_window()
         identity = None
         for _ in range(8):
+            observation = self._observe(hwnd)
+            # Anything still inside the login flow — the account page, the
+            # password page, a verification prompt — means no session was ever
+            # established, so there is nothing to sign out of. Failing here
+            # blocked the lease from being handed back after a login that
+            # stopped at EA's verification step.
+            if observation.page in PRE_LOGIN_PAGES:
+                self._record("signout-not-signed-in", observation)
+                return True
             identity = self._identity(hwnd)
             if identity is not None:
                 break
-            if self._state(hwnd) is EaUiState.LOGIN:
-                return True
             self.sleep(1.0)
         if identity is None:
             return False

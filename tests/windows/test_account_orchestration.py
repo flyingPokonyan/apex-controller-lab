@@ -112,8 +112,8 @@ class AccountProviderContractTest(unittest.TestCase):
             otp_factory=lambda challenge_id, started_at: OtpCode(
                 code="123456",
                 challenge_id=challenge_id,
-                received_at=started_at - timedelta(seconds=1),
-                expires_at=started_at + timedelta(minutes=1),
+                received_at=started_at - timedelta(minutes=10),
+                expires_at=started_at - timedelta(minutes=10) + timedelta(seconds=27),
             ),
         )
         provider.claim("claim_1", "LEVEL_TO_TARGET")
@@ -126,6 +126,31 @@ class AccountProviderContractTest(unittest.TestCase):
                 "challenge_1",
                 now,
             )
+
+    def test_otp_a_few_seconds_out_of_step_is_still_this_challenge(self) -> None:
+        # Two machines, two clocks. Treating a few seconds of drift as a stale
+        # code rejected every OTP a runner ever asked for.
+        now = datetime.now(timezone.utc)
+        lease = FakeAccountProvider.lease("acct_1", now=now)
+        provider = FakeAccountProvider(
+            [lease],
+            otp_factory=lambda challenge_id, started_at: OtpCode(
+                code="123456",
+                challenge_id=challenge_id,
+                received_at=started_at - timedelta(seconds=6),
+                expires_at=started_at - timedelta(seconds=6) + timedelta(seconds=27),
+            ),
+        )
+        provider.claim("claim_1", "LEVEL_TO_TARGET")
+
+        otp = provider.request_otp(
+            lease.lease_id,
+            lease.lease_fence,
+            "otp_1",
+            "challenge_1",
+            now,
+        )
+        self.assertEqual(otp.challenge_id, "challenge_1")
 
 
 class CheckpointStoreTest(unittest.TestCase):
@@ -736,6 +761,42 @@ class AccountOrchestratorTest(unittest.TestCase):
                     [name for name, _ in provider.calls if name in {"credentials", "renew"}],
                     [],
                 )
+
+    def test_otp_validity_survives_a_runner_clock_ahead_of_the_server(self) -> None:
+        # The challenge time is the runner's clock and receivedAt is the
+        # Provider's. A runner a few seconds ahead used to fail every attempt.
+        server_now = datetime(2026, 8, 1, 22, 49, 40, tzinfo=timezone.utc)
+        challenge_started_at = server_now + timedelta(seconds=6)
+        otp = OtpCode(
+            code="123456",
+            challenge_id="challenge_1",
+            received_at=server_now,
+            expires_at=server_now + timedelta(seconds=27),
+        )
+
+        self.assertTrue(otp.valid_for("challenge_1", challenge_started_at))
+        self.assertFalse(otp.valid_for("challenge_2", challenge_started_at))
+        # An answer from a materially older challenge is still refused.
+        stale = OtpCode(
+            code="123456",
+            challenge_id="challenge_1",
+            received_at=server_now - timedelta(minutes=10),
+            expires_at=server_now - timedelta(minutes=10) + timedelta(seconds=27),
+        )
+        self.assertFalse(stale.valid_for("challenge_1", challenge_started_at))
+
+    def test_otp_lifetime_comes_from_the_provider_clock_alone(self) -> None:
+        server_now = datetime(2026, 8, 1, 22, 49, 40, tzinfo=timezone.utc)
+        nearly_expired = OtpCode(
+            code="123456",
+            challenge_id="challenge_1",
+            received_at=server_now,
+            expires_at=server_now + timedelta(seconds=2),
+        )
+        self.assertEqual(nearly_expired.lifetime_s, 2.0)
+        # Still a valid answer to this challenge — it is the caller's job to
+        # decide two seconds is not enough to type it.
+        self.assertTrue(nearly_expired.valid_for("challenge_1", server_now))
 
     def test_resume_clears_a_manual_pause_the_operator_has_resolved(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

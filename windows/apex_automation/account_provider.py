@@ -14,6 +14,12 @@ from urllib.request import HTTPRedirectHandler, Request, build_opener
 
 DEFAULT_TASK_TYPE = "LEVEL_TO_TARGET"
 MAX_PROVIDER_RESPONSE_BYTES = 1024 * 1024
+# The runner and the Provider keep their own clocks, and nothing keeps them in
+# step. Anything that must compare across them needs room to be wrong.
+CLOCK_SKEW_TOLERANCE_S = 120.0
+# A TOTP is only valid to the end of its 30-second window, so a code handed
+# over with a second left cannot survive being typed.
+MIN_USABLE_OTP_LIFETIME_S = 8.0
 
 
 def _is_private_test_host(hostname: str | None) -> bool:
@@ -85,6 +91,16 @@ class OtpCode:
     received_at: datetime
     expires_at: datetime
 
+    @property
+    def lifetime_s(self) -> float:
+        """How long the Provider said this code lives.
+
+        Both timestamps come from the Provider, so this is the one duration
+        here that no clock difference can distort.
+        """
+
+        return (self.expires_at - self.received_at).total_seconds()
+
     def valid_for(
         self,
         challenge_id: str,
@@ -92,12 +108,23 @@ class OtpCode:
         *,
         now: datetime | None = None,
     ) -> bool:
-        current = now or datetime.now(timezone.utc)
-        return (
-            self.challenge_id == challenge_id
-            and self.received_at >= challenge_started_at
-            and current < self.expires_at
-        )
+        """Reject a code that belongs to an older challenge.
+
+        `challenge_started_at` is this machine's clock and `received_at` is the
+        Provider's, so the two are only ever loosely comparable. A runner whose
+        clock ran a few seconds ahead of the server failed this check on every
+        single attempt. The challenge id is the exact half of the guarantee —
+        it is freshly generated per attempt — and the timestamps only have to
+        rule out an answer from a materially older challenge.
+        """
+
+        del now  # Absolute expiry cannot be judged across two clocks.
+        if self.challenge_id != challenge_id:
+            return False
+        if self.lifetime_s <= 0:
+            return False
+        skew = timedelta(seconds=CLOCK_SKEW_TOLERANCE_S)
+        return self.received_at >= challenge_started_at - skew
 
 
 @dataclass(frozen=True)
