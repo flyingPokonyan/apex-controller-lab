@@ -22,19 +22,25 @@ from .ea_app import (
     EaIdentityFact,
     EaIdentityMismatch,
     EaLoginRejected,
+    EaOtpUnavailable,
     EaUiState,
     OtpChallenge,
 )
 from .ea_evidence import EaLoginEvidence
 from .ea_pages import (
     ACCOUNT_FIELD_TERMS,
+    AUTHENTICATOR_TERMS,
+    EMAIL_CODE_TERMS,
+    OTP_FIELD_TERMS,
     PASSWORD_FIELD_TERMS,
     PASSWORD_LINK_TERMS,
+    SEND_CODE_TERMS,
     SIGN_OUT_CONFIRM_TERMS,
     SIGN_OUT_TERMS,
     SUBMIT_TERMS,
     EaPage,
     classify_page,
+    has_any,
     identity_candidates,
     identity_matches,
     is_login_error,
@@ -75,12 +81,17 @@ ACCOUNT_FIELD_RATIO = (0.50, 0.50)
 ACCOUNT_SUBMIT_RATIO = (0.50, 0.69)
 PASSWORD_FIELD_RATIO = (0.50, 0.50)
 PASSWORD_SUBMIT_RATIO = (0.50, 0.58)
-OTP_FIELD_RATIO = (0.50, 0.50)
-OTP_SUBMIT_RATIO = (0.50, 0.69)
+# Measured off the real 520x867 login window: the code field sits just
+# under half height, NEXT below it, and on the chooser the authenticator
+# option is the second row with SEND CODE underneath.
+OTP_FIELD_RATIO = (0.50, 0.49)
+OTP_SUBMIT_RATIO = (0.50, 0.64)
+SEND_CODE_RATIO = (0.50, 0.68)
 # The badge sits at about 7.5% of the window height; the friends list
 # starts just below 14%. Keep the crop above it.
 IDENTITY_BAND = (0.75, 0.00, 1.00, 0.12)
 INPUT_SETTLE_S = 0.8
+MAX_OTP_ATTEMPTS = 3
 
 
 if sys.platform == "win32":
@@ -792,6 +803,70 @@ class WindowsEaHybridDriver:
             )
         return self._await_identity(hwnd, otp_supplier)
 
+    def _choose_authenticator(
+        self,
+        hwnd: int,
+        observation: EaObservation,
+    ) -> None:
+        """Pick the authenticator on EA's "Verify your identity" chooser.
+
+        The account's email is preselected, and the Provider can only generate
+        the authenticator's code — sending the email one would post a code
+        nothing in this system can read.
+        """
+
+        point = self._anchor(observation, AUTHENTICATOR_TERMS)
+        if point is None:
+            self._record("otp-no-authenticator", observation)
+            raise EaOtpUnavailable(
+                "EA 只提供邮箱验证码，服务端目前只能生成验证器验证码"
+            )
+        self._click_point(hwnd, *point)
+        self.sleep(INPUT_SETTLE_S)
+        chosen = self._observe(hwnd)
+        self._record("otp-method-authenticator", chosen)
+        send = self._anchor(chosen, SEND_CODE_TERMS, y_range=(0.40, 0.95))
+        if send is None:
+            self._click(hwnd, *SEND_CODE_RATIO)
+        else:
+            self._click_point(hwnd, *send)
+        self._wait_for_page(
+            hwnd,
+            (EaPage.OTP, EaPage.SIGNED_IN),
+            timeout_s=20.0,
+        )
+
+    def _submit_otp(
+        self,
+        hwnd: int,
+        observation: EaObservation,
+        otp_supplier: Callable[[OtpChallenge], OtpCode],
+    ) -> None:
+        if has_any("".join(observation.normalized), EMAIL_CODE_TERMS):
+            self._record("otp-email-code-page", observation)
+            raise EaOtpUnavailable(
+                "EA 停在邮箱验证码页，服务端目前只能生成验证器验证码"
+            )
+        challenge = OtpChallenge(uuid.uuid4().hex, datetime.now(timezone.utc))
+        otp = otp_supplier(challenge)
+        target = self._click_target(
+            hwnd,
+            observation,
+            OTP_FIELD_TERMS,
+            OTP_FIELD_RATIO,
+            y_range=(0.20, 0.80),
+        )
+        self._clear_focused_field()
+        self._type_secret(otp.code)
+        self.sleep(INPUT_SETTLE_S)
+        submit = self._submit(hwnd, self._observe(hwnd), OTP_SUBMIT_RATIO)
+        self._record(
+            "otp-submitted",
+            self._observe(hwnd),
+            fieldTarget=target,
+            submitTarget=submit,
+        )
+
     def _await_identity(
         self,
         hwnd: int,
@@ -802,6 +877,7 @@ class WindowsEaHybridDriver:
         deadline = time.monotonic() + timeout_s
         observation: EaObservation | None = None
         seen_pages: set[EaPage] = set()
+        otp_attempts = 0
         while time.monotonic() < deadline:
             self.sleep(2.0)
             observation = self._observe(hwnd)
@@ -822,20 +898,17 @@ class WindowsEaHybridDriver:
             if observation.has_login_error():
                 self._record("login-rejected", observation)
                 raise EaLoginRejected("EA App 报告登录信息有误")
+            if observation.page is EaPage.OTP_METHOD:
+                self._choose_authenticator(hwnd, observation)
+                continue
             if observation.page is EaPage.OTP:
-                challenge = OtpChallenge(uuid.uuid4().hex, datetime.now(timezone.utc))
-                otp = otp_supplier(challenge)
-                self._click_target(
-                    hwnd,
-                    observation,
-                    ("code", "验证码", "安全代码"),
-                    OTP_FIELD_RATIO,
-                    y_range=(0.20, 0.80),
-                )
-                self._clear_focused_field()
-                self._type_secret(otp.code)
-                self._submit(hwnd, observation, OTP_SUBMIT_RATIO)
-                self._record("otp-submitted", self._observe(hwnd))
+                otp_attempts += 1
+                if otp_attempts > MAX_OTP_ATTEMPTS:
+                    self._record("otp-exhausted", observation, attempts=otp_attempts)
+                    raise EaOtpUnavailable(
+                        f"EA 连续 {MAX_OTP_ATTEMPTS} 次没有接受验证码"
+                    )
+                self._submit_otp(hwnd, observation, otp_supplier)
                 continue
             # A login page still on screen is not a badge to read, whatever a
             # corner crop makes of the text sitting there.

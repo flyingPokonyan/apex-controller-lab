@@ -16,6 +16,7 @@ from typing import Iterable, Sequence
 class EaPage(str, Enum):
     EMAIL = "EMAIL"
     PASSWORD = "PASSWORD"
+    OTP_METHOD = "OTP_METHOD"
     OTP = "OTP"
     CAPTCHA = "CAPTCHA"
     EXPIRED_SESSION = "EXPIRED_SESSION"
@@ -49,14 +50,44 @@ PASSWORD_LINK_TERMS = (
     "重置密码",
 )
 
+# "Verify your identity" — the method chooser EA raises on a new device. It
+# offers the account's email first and the authenticator second, and the
+# button underneath sends a code by whichever one is selected.
+OTP_METHOD_TERMS = (
+    "verifyyouridentity",
+    "usemyappauthenticator",
+    "sendcode",
+    "验证你的身份",
+    "使用验证器",
+)
+
+AUTHENTICATOR_TERMS = ("usemyappauthenticator", "appauthenticator", "验证器")
+
+SEND_CODE_TERMS = ("sendcode", "continue", "next", "发送验证码", "继续")
+
 OTP_TERMS = (
     "verificationcode",
     "securitycode",
     "logincode",
     "enterthecode",
+    "enteryourcode",
+    "enter6digitcode",
+    "rememberthisdevice",
     "安全代码",
     "验证代码",
     "验证码",
+)
+
+OTP_FIELD_TERMS = ("enter6digitcode", "digitcode", "code", "验证码")
+
+# The code page reached through the email option. A generated TOTP will never
+# match it, so recognising it is the difference between a clear failure and
+# burning attempts against a code that cannot be right.
+EMAIL_CODE_TERMS = (
+    "wesentacodeto",
+    "checkyourspamfolder",
+    "requestaresend",
+    "promotionstab",
 )
 
 CAPTCHA_TERMS = (
@@ -166,6 +197,10 @@ def classify_page(normalized_tokens: Iterable[str]) -> EaPage:
         return EaPage.CAPTCHA
     if has_any(compact, EXPIRED_SESSION_TERMS):
         return EaPage.EXPIRED_SESSION
+    # The chooser talks about codes too, so it has to be settled before the
+    # code-entry page: typing into it would go nowhere.
+    if has_any(compact, OTP_METHOD_TERMS):
+        return EaPage.OTP_METHOD
     if has_any(compact, OTP_TERMS):
         return EaPage.OTP
     # The account field wins a tie: during the page transition both fields can
@@ -207,6 +242,9 @@ def page_markers(normalized_tokens: Iterable[str]) -> tuple[str, ...]:
     seen: list[str] = []
     for name, terms in (
         ("account", ACCOUNT_FIELD_TERMS),
+        ("otpMethod", OTP_METHOD_TERMS),
+        ("authenticator", AUTHENTICATOR_TERMS),
+        ("emailCode", EMAIL_CODE_TERMS),
         ("otp", OTP_TERMS),
         ("captcha", CAPTCHA_TERMS),
         ("expired", EXPIRED_SESSION_TERMS),

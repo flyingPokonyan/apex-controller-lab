@@ -30,6 +30,12 @@ class EaApexStartFailed(EaAppAutomationError):
     reason_code = "APEX_START_FAILED"
 
 
+class EaOtpUnavailable(EaAppAutomationError):
+    """EA asked for a code this runner has no way to produce."""
+
+    reason_code = "OTP_TIMEOUT"
+
+
 class EaUiState(str, Enum):
     STOPPED = "STOPPED"
     LOGIN = "LOGIN"
