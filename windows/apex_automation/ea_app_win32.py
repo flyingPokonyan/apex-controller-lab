@@ -137,26 +137,32 @@ class WindowsEaHybridDriver:
             self.kernel32.CloseHandle(process)
 
     def _ea_window(self) -> int:
-        matches: list[int] = []
+        deadline = time.monotonic() + 10.0
         callback_type = ctypes.WINFUNCTYPE(wintypes.BOOL, wintypes.HWND, wintypes.LPARAM)
+        while True:
+            matches: list[tuple[int, int]] = []
 
-        @callback_type
-        def collect(hwnd, _lparam):
-            if not self.user32.IsWindowVisible(hwnd):
+            @callback_type
+            def collect(hwnd, _lparam):
+                if not self.user32.IsWindowVisible(hwnd):
+                    return True
+                process_id = wintypes.DWORD()
+                self.user32.GetWindowThreadProcessId(hwnd, ctypes.byref(process_id))
+                if self._process_name(process_id.value) == EA_EXECUTABLE:
+                    rect = wintypes.RECT()
+                    if self.user32.GetWindowRect(hwnd, ctypes.byref(rect)):
+                        width = rect.right - rect.left
+                        height = rect.bottom - rect.top
+                        if width >= 480 and height >= 640:
+                            matches.append((width * height, int(hwnd)))
                 return True
-            process_id = wintypes.DWORD()
-            self.user32.GetWindowThreadProcessId(hwnd, ctypes.byref(process_id))
-            if self._process_name(process_id.value) == EA_EXECUTABLE:
-                rect = wintypes.RECT()
-                if self.user32.GetWindowRect(hwnd, ctypes.byref(rect)):
-                    if rect.right - rect.left >= 480 and rect.bottom - rect.top >= 640:
-                        matches.append(int(hwnd))
-            return True
 
-        self.user32.EnumWindows(collect, 0)
-        if not matches:
-            raise EaAppAutomationError("没有发现可见的 EA App 主窗口")
-        return matches[0]
+            self.user32.EnumWindows(collect, 0)
+            if matches:
+                return max(matches)[1]
+            if time.monotonic() >= deadline:
+                raise EaAppAutomationError("没有发现可见的 EA App 主窗口")
+            self.sleep(0.5)
 
     def _rect(self, hwnd: int) -> tuple[int, int, int, int]:
         rect = wintypes.RECT()

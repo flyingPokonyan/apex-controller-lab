@@ -513,11 +513,17 @@ class AccountOrchestrator:
         lease: AccountLease,
         reason_code: str,
     ) -> AccountCycleResult:
-        exit_evidence = self.ea_driver.stop_apex()
+        try:
+            exit_evidence = self.ea_driver.stop_apex()
+        except EaAppAutomationError:
+            return self._pause("CLEANUP_UNCONFIRMED", manual=True)
         if not exit_evidence.all_processes_exited:
             return self._pause("APEX_EXIT_TIMEOUT", manual=True)
         self._update_checkpoint(workflow_phase=WorkflowPhase.EA_SIGNING_OUT)
-        signed_out = self.ea_driver.sign_out()
+        try:
+            signed_out = self.ea_driver.sign_out()
+        except EaAppAutomationError:
+            return self._pause("EA_SIGNOUT_FAILED", manual=True)
         cleanup = CleanupEvidence(True, True, signed_out)
         if not cleanup.complete:
             return self._pause("EA_SIGNOUT_FAILED", manual=True)
