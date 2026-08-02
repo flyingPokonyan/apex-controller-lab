@@ -9,6 +9,8 @@ import threading
 import time
 from typing import TYPE_CHECKING, Any
 
+from .atomic_files import replace_with_retry
+
 if TYPE_CHECKING:
     import numpy as np
 
@@ -145,7 +147,7 @@ class RunRecorder:
                 json.dumps(payload, ensure_ascii=False, indent=2) + "\n",
                 encoding="utf-8",
             )
-            os.replace(temporary, path)
+            replace_with_retry(temporary, path)
         finally:
             try:
                 temporary.unlink()

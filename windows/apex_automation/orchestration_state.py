@@ -9,6 +9,8 @@ from pathlib import Path
 import secrets
 from typing import Any
 
+from .atomic_files import replace_with_retry
+
 
 class WorkflowPhase(str, Enum):
     CLAIMING = "CLAIMING"
@@ -204,7 +206,7 @@ class AtomicCheckpointStore:
                 handle.write(content)
                 handle.flush()
                 os.fsync(handle.fileno())
-            os.replace(temporary, path)
+            replace_with_retry(temporary, path)
             try:
                 directory_fd = os.open(path.parent, os.O_RDONLY)
             except OSError:

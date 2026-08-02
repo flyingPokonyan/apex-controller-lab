@@ -11,6 +11,7 @@ from typing import Any, Callable, Iterable, Protocol
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
+from .atomic_files import replace_with_retry
 from .runner_identity import RunnerSettings
 
 
@@ -67,7 +68,7 @@ def _atomic_json(path: Path, payload: dict[str, object]) -> None:
         json.dumps(payload, ensure_ascii=False, indent=2) + "\n",
         encoding="utf-8",
     )
-    os.replace(temporary, path)
+    replace_with_retry(temporary, path)
 
 
 def _atomic_jsonl(path: Path, records: Iterable[dict[str, object]]) -> None:
@@ -81,7 +82,7 @@ def _atomic_jsonl(path: Path, records: Iterable[dict[str, object]]) -> None:
             )
         handle.flush()
         os.fsync(handle.fileno())
-    os.replace(temporary, path)
+    replace_with_retry(temporary, path)
 
 
 def _read_json(path: Path) -> dict[str, Any]:
