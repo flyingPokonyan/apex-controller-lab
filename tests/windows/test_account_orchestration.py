@@ -357,6 +357,49 @@ class FakeManagedSession:
 
 
 class AccountOrchestratorTest(unittest.TestCase):
+    def test_lease_released_from_the_console_clears_the_local_checkpoint(self) -> None:
+        """An operator releasing a lease must not strand the machine.
+
+        Releasing advances the fence, so `status()` rejects the response
+        against the fence the checkpoint still holds and raises before the
+        state it fetched can be read. That used to surface as LEASE_STALE on
+        every subsequent run, with no way out but deleting the file by hand.
+        """
+
+        with tempfile.TemporaryDirectory() as directory:
+            lease = FakeAccountProvider.lease("acct_1", fence=18)
+            provider = FakeAccountProvider([lease])
+            store = AtomicCheckpointStore(
+                Path(directory) / "account-cycle-status.json"
+            )
+            store.save(
+                OrchestrationCheckpoint(
+                    device_id="device_1",
+                    workflow_phase=WorkflowPhase.EA_SIGNING_OUT,
+                    lease_id=lease.lease_id,
+                    lease_fence=1,
+                    account_id=lease.account_id,
+                    target_level=20,
+                )
+            )
+
+            class NeverPlay:
+                def run(self, *args, **kwargs):
+                    raise AssertionError("a cleared checkpoint must not replay")
+
+            result = AccountOrchestrator(
+                provider=provider,
+                ea_driver=object(),
+                play_session=NeverPlay(),
+                checkpoint_store=store,
+                device_id="device_1",
+                capture_source=object(),
+                notify=lambda _: None,
+            ).run_once()
+
+            self.assertEqual(result.outcome, AccountCycleOutcome.NO_ACCOUNT)
+            self.assertFalse(store.load().has_lease)
+
     def test_ea_login_failure_cleans_up_closes_lease_and_clears_checkpoint(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             lease = replace(

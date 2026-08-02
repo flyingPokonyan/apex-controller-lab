@@ -218,10 +218,26 @@ class AccountOrchestrator:
 
         if checkpoint.has_lease:
             if remote is None:
-                status = self.provider.status(
-                    checkpoint.lease_id or "",
-                    checkpoint.lease_fence or 0,
-                )
+                try:
+                    status = self.provider.status(
+                        checkpoint.lease_id or "",
+                        checkpoint.lease_fence or 0,
+                    )
+                except LeaseStaleError:
+                    # Releasing a lease from the console advances its fence, so
+                    # `status()` rejects the response against the fence this
+                    # checkpoint still holds — before anything can read the
+                    # state it just fetched. That refusal is itself the answer:
+                    # the fence moved on without us, and `current()` already
+                    # reported no occupancy for this device, so there is no
+                    # account left to hand back. Without this the checkpoint
+                    # could never be cleared and every later run paused on
+                    # LEASE_STALE until the file was deleted by hand.
+                    self.notify(
+                        "服务端租约已被接管或释放，清除本地 checkpoint 后继续"
+                    )
+                    self._clear_lease_checkpoint()
+                    return None
                 if status.terminal:
                     self._clear_lease_checkpoint()
                     return None
