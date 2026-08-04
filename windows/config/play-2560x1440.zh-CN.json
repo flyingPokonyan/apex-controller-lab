@@ -49,6 +49,12 @@
     "probeIntervalMs": 6000,
     "probeMaxPerRound": 5
   },
+  "pageProbe": {
+    "_note": "被 fullscreen-esc-back 一律 ESC 掉的那族全屏页，关掉之前先把整页文字连坐标记一条 PAGE_TEXT。这族页面里有排位之路——20260730-215512 的证据帧 035 就是它——上面写着「经历缩圈 x/30」这类任务计数，而这正是决定要不要为缩圈做工程的那个数。这一帧的全屏 OCR 本来就已经付过钱了，原来只是把结果丢掉。每次进入这张页面记一条，一次会话最多八条。",
+    "enabled": true,
+    "states": ["FULLSCREEN_ESC_BACK"],
+    "maxPerSession": 8
+  },
   "overlayOcr": {
     "enabled": true,
     "rules": "windows/config/play-overlays.zh-CN.json",

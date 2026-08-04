@@ -274,6 +274,14 @@ class CapabilityPilot:
         if self.legend_probe_s <= 0:
             raise ValueError("传奇选择探针的间隔必须大于 0")
 
+        page_probe = config.page_probe
+        self.page_probe_states = frozenset(
+            str(value) for value in page_probe.get("states", ["FULLSCREEN_ESC_BACK"])
+        )
+        self.page_probe_max = int(page_probe.get("maxPerSession", 8))
+        if not bool(page_probe.get("enabled", True)):
+            self.page_probe_states = frozenset()
+
         # Full-frame and multi-region obstacle OCR is intentionally not part of
         # the 300ms fast loop. It runs once before a menu action, or after an
         # unknown screen has persisted. A positive result must repeat before it
@@ -332,6 +340,9 @@ class CapabilityPilot:
         self._legend_probes = 0
         self._legend_next_probe = 0.0
         self._legend_text_logged = False
+        self._last_page_tokens: tuple[Any, ...] = ()
+        self._page_probes = 0
+        self._page_probed_state: str | None = None
         self._base_state: str | None = None
         self._base_state_version = 0
         self._base_unknown_since: float | None = None
@@ -626,6 +637,7 @@ class CapabilityPilot:
             return None, False
         analysis = self.overlay_detector.analyze(frame)
         decision = analysis.decision
+        self._last_page_tokens = analysis.regions.get("fullFrame", ())
         self.recorder.log(
             "OVERLAY_OCR_ANALYZED",
             source="overlayOcr",
@@ -721,11 +733,47 @@ class CapabilityPilot:
             return StateObservation(None, "overlayCandidate")
 
         self._active_overlay = match
+        self._probe_page_text(match)
         self.counters[f"overlay:{match.state}"] += 1
         actionable = bool(self.dispatcher.capabilities.for_state(match.state or ""))
         retry_s = self.overlay_scan_interval_s if actionable else self.overlay_active_retry_s
         self._overlay_next_scan_at = finished + retry_s
         return match
+
+    def _probe_page_text(self, match: StateObservation) -> None:
+        """Write down what a page said before dismissing it.
+
+        `fullscreen-esc-back` closes a whole family of pages by the hint in
+        their corner, without ever knowing which page it closed. One of them
+        is 排位之路, which carries the task counters — including 经历缩圈
+        30 次, the number that decides whether ring survival needs any work at
+        all. The OCR for that frame has already been paid for; only the result
+        was being thrown away.
+        """
+        if match.state not in self.page_probe_states:
+            return
+        if self._page_probes >= self.page_probe_max:
+            return
+        if not self._last_page_tokens:
+            return
+        if match.state == self._page_probed_state:
+            # One record per visit, not one per rescan of the same page.
+            return
+        self._page_probed_state = match.state
+        self._page_probes += 1
+        self.recorder.log(
+            "PAGE_TEXT",
+            state=match.state,
+            ruleId=match.rule_id,
+            tokens=[
+                {
+                    "text": token.text,
+                    "confidence": round(token.confidence, 3),
+                    "roi": list(token.roi) if token.roi else None,
+                }
+                for token in self._last_page_tokens[:80]
+            ],
+        )
 
     def _record_observation(
         self,

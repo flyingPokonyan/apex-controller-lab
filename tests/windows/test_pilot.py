@@ -494,6 +494,29 @@ class PilotTest(unittest.TestCase):
         self.assertEqual(record["state"], "FULLSCREEN_ESC_BACK")
         self.assertEqual(self.sender.calls, [("tap", 1, 80)])
 
+    def test_a_page_dismissed_by_its_corner_hint_is_read_before_it_is_closed(self) -> None:
+        # 排位之路 is one of the pages `fullscreen-esc-back` closes without
+        # knowing what it closed, and it carries 经历缩圈 x/30 — the counter
+        # that decides whether ring survival needs any work. The OCR for that
+        # frame is already paid for.
+        self.enable_overlays()
+        self.screen()
+        self.overlay_provider.readings = {
+            "bottomLeftBack": ("ESC 返回", 0.98),
+            "fullFrame": [
+                ("排位之路", 0.97, (300, 120, 520, 180)),
+                ("经历缩圈 12/30", 0.94, (300, 620, 700, 670)),
+            ],
+        }
+
+        record = self._settle_overlay()
+        self.assertEqual(record["state"], "FULLSCREEN_ESC_BACK")
+        page = next(p for e, p in self.recorder.events if e == "PAGE_TEXT")
+        self.assertEqual(page["state"], "FULLSCREEN_ESC_BACK")
+        self.assertIn("经历缩圈 12/30", [token["text"] for token in page["tokens"]])
+        # Reading it changes nothing about closing it.
+        self.assertEqual(self.sender.calls, [("tap", 1, 80)])
+
     def test_the_generic_back_rule_never_backs_out_of_the_mode_panel(self) -> None:
         # The mode panel carries the same 「ESC 返回」 hint and is a screen the
         # runner has to stay on and act within, so a rule this broad may only
