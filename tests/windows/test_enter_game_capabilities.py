@@ -372,13 +372,13 @@ class EnterGameCapabilityTest(unittest.TestCase):
     def test_the_jump_waits_out_part_of_the_flight_but_never_all_of_it(self) -> None:
         # Pressing E on sight landed every match on the same spot at the start
         # of the flight path, where the first ring never reaches. The wait has
-        # to stay comfortably inside the flight: ride past its end and the
-        # game force-drops at the far edge, which is the same problem mirrored.
-        # 20260730 bounds the whole entry at 142s including legend select and
-        # loading, so the flight itself is shorter than that.
+        # to stay inside the flight: ride past its end and the game force-drops
+        # at the far edge, which is the same problem mirrored. The operator
+        # puts the whole dropship run at under 30 seconds, so a wait anywhere
+        # near half a minute is not "late", it is "never jumped".
         launch = next(c for c in self.capabilities.capabilities if c.id == "dropship-launch")
         self.assertGreater(launch.delay_ms, 0)
-        self.assertLess(launch.delay_ms + launch.delay_jitter_ms, 60_000)
+        self.assertLess(launch.delay_ms + launch.delay_jitter_ms, 25_000)
         # Detaching from the squad is not delayed with it: that only says the
         # runner picks its own landing, and doing it early costs nothing.
         detach = next(c for c in self.capabilities.capabilities if c.id == "dropship-detach")
