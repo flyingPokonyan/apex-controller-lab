@@ -63,6 +63,8 @@ OTP_METHOD_TERMS = (
 
 AUTHENTICATOR_TERMS = ("usemyappauthenticator", "appauthenticator", "验证器")
 
+EMAIL_METHOD_TERMS = ("email", "电子邮件", "邮箱")
+
 SEND_CODE_TERMS = ("sendcode", "continue", "next", "发送验证码", "继续")
 
 OTP_TERMS = (

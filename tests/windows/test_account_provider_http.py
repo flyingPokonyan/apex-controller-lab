@@ -18,6 +18,7 @@ from apex_automation.account_provider import (
     LeaseProviderError,
     LeaseStaleError,
     LeaseState,
+    OtpMethod,
     ProviderHttpResponse,
 )
 
@@ -177,7 +178,13 @@ class HttpAccountProviderTest(unittest.TestCase):
             "challengeId": "challenge_1",
         }
         transport = FakeTransport(
-            response({"loginIdentifier": "ea@example.com", "password": "secret"}),
+            response(
+                {
+                    "loginIdentifier": "ea@example.com",
+                    "password": "secret",
+                    "otpMethods": ["TOTP", "EMAIL"],
+                }
+            ),
             response(lease_payload("RUNNING")),
             response(otp_payload),
             response(lease_payload("COMPLETION_PENDING"), status=202),
@@ -204,6 +211,10 @@ class HttpAccountProviderTest(unittest.TestCase):
 
         self.assertNotIn("ea@example.com", repr(credentials))
         self.assertNotIn("secret", repr(credentials))
+        self.assertEqual(
+            credentials.otp_methods,
+            (OtpMethod.TOTP, OtpMethod.EMAIL),
+        )
         self.assertEqual(renewed.state, LeaseState.ACTIVE)
         self.assertNotIn("123456", repr(otp))
         self.assertEqual(closed.state, LeaseState.COMPLETION_PENDING)
@@ -221,6 +232,20 @@ class HttpAccountProviderTest(unittest.TestCase):
         self.assertEqual(close_body["lobbyProgressSeq"], 42)
         self.assertEqual(close_body["runFinishedSeq"], 43)
         self.assertNotIn("level", close_body)
+        # No `method` on the authenticator path. The Provider validates bodies
+        # exactly and answers 400 to an unknown field, so announcing the
+        # default would make every Runner require a Provider that already
+        # knows about methods — including for the path that worked before
+        # either side had heard of email codes.
+        self.assertEqual(
+            transport.calls[2]["json"],
+            {
+                "schemaVersion": 1,
+                "leaseFence": 7,
+                "challengeId": "challenge_1",
+                "challengeStartedAt": timestamp(),
+            },
+        )
         for index, operation_id in enumerate(
             ("credentials_1", "renew_1", "otp_1", "close_1")
         ):
@@ -228,6 +253,32 @@ class HttpAccountProviderTest(unittest.TestCase):
                 transport.calls[index]["headers"]["Idempotency-Key"],
                 operation_id,
             )
+
+    def test_email_otp_uses_explicit_method_and_long_timeout(self) -> None:
+        transport = FakeTransport(
+            response(
+                {
+                    "code": "654321",
+                    "receivedAt": timestamp(5),
+                    "expiresAt": timestamp(605),
+                    "challengeId": "challenge_email",
+                }
+            )
+        )
+        provider = self.provider(transport)
+
+        otp = provider.request_otp(
+            "lease_1",
+            7,
+            "otp_email_1",
+            "challenge_email",
+            NOW,
+            OtpMethod.EMAIL,
+        )
+
+        self.assertEqual(otp.code, "654321")
+        self.assertEqual(transport.calls[0]["json"]["method"], "EMAIL")
+        self.assertEqual(transport.calls[0]["timeout"], 90.0)
 
     def test_error_classification_and_expected_identity(self) -> None:
         stale = response(

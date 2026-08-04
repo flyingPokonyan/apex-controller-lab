@@ -5,7 +5,7 @@ from datetime import datetime
 from enum import Enum
 from typing import Callable, Protocol
 
-from .account_provider import OtpCode, SecretCredentials
+from .account_provider import OtpCode, OtpMethod, SecretCredentials
 
 
 class EaAppAutomationError(RuntimeError):
@@ -55,6 +55,7 @@ class EaIdentityFact:
 class OtpChallenge:
     challenge_id: str
     started_at: datetime
+    method: OtpMethod = OtpMethod.TOTP
 
 
 @dataclass(frozen=True)

@@ -78,10 +78,17 @@ class LeaseState(str, Enum):
     CLOSED = "CLOSED"
 
 
+class OtpMethod(str, Enum):
+    TOTP = "TOTP"
+    EMAIL = "EMAIL"
+
+
 @dataclass(frozen=True)
 class SecretCredentials:
     login_identifier: str = field(repr=False)
     password: str = field(repr=False)
+    # Old Providers only supported TOTP and did not return this field.
+    otp_methods: tuple[OtpMethod, ...] = (OtpMethod.TOTP,)
 
 
 @dataclass(frozen=True)
@@ -229,6 +236,7 @@ class AccountProvider(Protocol):
         operation_id: str,
         challenge_id: str,
         challenge_started_at: datetime,
+        method: OtpMethod = OtpMethod.TOTP,
     ) -> OtpCode: ...
 
     def close(
@@ -421,6 +429,7 @@ class HttpAccountProvider:
         payload: dict[str, object] | None = None,
         operation_id: str | None = None,
         allow_no_content: bool = False,
+        timeout_s: float | None = None,
     ) -> tuple[dict[str, object] | None, ProviderHttpResponse]:
         headers = {
             "Accept": "application/json",
@@ -448,7 +457,7 @@ class HttpAccountProvider:
                 f"{self.lease_url}{suffix}",
                 headers,
                 body,
-                self.timeout_s,
+                self.timeout_s if timeout_s is None else max(1.0, float(timeout_s)),
             )
         except LeaseProviderError:
             raise
@@ -699,9 +708,28 @@ class HttpAccountProvider:
             operation_id=operation_id,
         )
         assert payload is not None
+        raw_methods = payload.get("otpMethods")
+        if raw_methods is None:
+            otp_methods = (OtpMethod.TOTP,)
+        elif not isinstance(raw_methods, list) or not raw_methods:
+            raise LeaseProviderError(
+                "Provider 返回了无效的 OTP 方法",
+                code="INVALID_PROVIDER_RESPONSE",
+            )
+        else:
+            try:
+                otp_methods = tuple(
+                    dict.fromkeys(OtpMethod(str(item)) for item in raw_methods)
+                )
+            except (TypeError, ValueError) as error:
+                raise LeaseProviderError(
+                    "Provider 返回了未知的 OTP 方法",
+                    code="INVALID_PROVIDER_RESPONSE",
+                ) from error
         return SecretCredentials(
             login_identifier=self._string(payload, "loginIdentifier"),
             password=self._string(payload, "password"),
+            otp_methods=otp_methods,
         )
 
     def renew(
@@ -740,17 +768,30 @@ class HttpAccountProvider:
         operation_id: str,
         challenge_id: str,
         challenge_started_at: datetime,
+        method: OtpMethod = OtpMethod.TOTP,
     ) -> OtpCode:
+        body: dict[str, object] = {
+            "schemaVersion": 1,
+            "leaseFence": lease_fence,
+            "challengeId": challenge_id,
+            "challengeStartedAt": self._rfc3339(challenge_started_at),
+        }
+        if method is not OtpMethod.TOTP:
+            # Sent only when it changes the answer. The Provider validates
+            # request bodies exactly and rejects unknown fields with 400, so a
+            # Runner that always announced the method would demand a Provider
+            # that already knows about methods — and would take the
+            # authenticator path down with it on any rollback.
+            body["method"] = method.value
         payload, _ = self._request(
             "POST",
             self._lease_suffix(lease_id, "otp-challenges"),
-            payload={
-                "schemaVersion": 1,
-                "leaseFence": lease_fence,
-                "challengeId": challenge_id,
-                "challengeStartedAt": self._rfc3339(challenge_started_at),
-            },
+            payload=body,
             operation_id=operation_id,
+            timeout_s=max(
+                self.timeout_s,
+                90.0 if method is OtpMethod.EMAIL else self.timeout_s,
+            ),
         )
         assert payload is not None
         response_challenge = payload.get("challengeId")
@@ -1026,6 +1067,7 @@ class FakeAccountProvider:
         operation_id: str,
         challenge_id: str,
         challenge_started_at: datetime,
+        method: OtpMethod = OtpMethod.TOTP,
     ) -> OtpCode:
         self.calls.append(
             (
@@ -1036,6 +1078,7 @@ class FakeAccountProvider:
                     operation_id,
                     challenge_id,
                     challenge_started_at,
+                    method,
                 ),
             )
         )
@@ -1052,7 +1095,7 @@ class FakeAccountProvider:
         return self._idempotent(
             "request_otp",
             operation_id,
-            (lease_id, lease_fence, challenge_id, challenge_started_at),
+            (lease_id, lease_fence, challenge_id, challenge_started_at, method),
             request,
         )  # type: ignore[return-value]
 

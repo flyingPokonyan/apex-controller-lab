@@ -13,6 +13,8 @@ import numpy as np
 REPOSITORY_ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(REPOSITORY_ROOT / "windows"))
 
+from apex_automation.account_provider import OtpMethod
+from apex_automation.ea_app import EaOtpUnavailable
 from apex_automation.ea_app_win32 import EaObservation, WindowsEaHybridDriver
 from apex_automation.ea_evidence import (
     EaLoginEvidence,
@@ -267,6 +269,76 @@ class AnchorTargetingTest(unittest.TestCase):
                 "player@example.test",
             )
         )
+
+
+class OtpMethodSelectionTest(unittest.TestCase):
+    @staticmethod
+    def observation(*texts: str) -> EaObservation:
+        placed = tuple(
+            OcrToken(text, 0.99, (100, 100 + index * 30, 500, 125 + index * 30))
+            for index, text in enumerate(texts)
+        )
+        return EaObservation(
+            rect=(0, 0, 600, 900),
+            frame=np.zeros((1, 1), dtype=np.uint8),
+            tokens=placed,
+            page=classify_page(token.normalized for token in placed),
+        )
+
+    def test_code_page_selects_the_source_it_describes(self) -> None:
+        available = (OtpMethod.TOTP, OtpMethod.EMAIL)
+
+        self.assertIs(
+            WindowsEaHybridDriver._otp_page_method(
+                self.observation(*OTP_AUTHENTICATOR_PAGE),
+                available,
+                None,
+            ),
+            OtpMethod.TOTP,
+        )
+        self.assertIs(
+            WindowsEaHybridDriver._otp_page_method(
+                self.observation(*OTP_EMAIL_PAGE),
+                available,
+                None,
+            ),
+            OtpMethod.EMAIL,
+        )
+
+    def test_email_page_is_rejected_when_provider_has_no_mailbox(self) -> None:
+        with self.assertRaises(EaOtpUnavailable):
+            WindowsEaHybridDriver._otp_page_method(
+                self.observation(*OTP_EMAIL_PAGE),
+                (OtpMethod.TOTP,),
+                None,
+            )
+
+    def test_chooser_prefers_totp_and_falls_back_to_email(self) -> None:
+        observation = self.observation(*OTP_METHOD_PAGE)
+
+        def run(methods):
+            driver = object.__new__(WindowsEaHybridDriver)
+            clicks = []
+            driver._anchor = lambda _observation, terms, **_kwargs: (
+                (300, 300) if terms == AUTHENTICATOR_TERMS else (300, 600)
+            )
+            driver._click_point = lambda _hwnd, *point: clicks.append(point)
+            driver._click = lambda _hwnd, *point: clicks.append(point)
+            driver._observe = lambda _hwnd: observation
+            driver._record = lambda *_args, **_kwargs: None
+            driver._wait_for_page = lambda *_args, **_kwargs: None
+            driver.sleep = lambda _seconds: None
+            driver.notify = lambda _message: None
+            selected, _ = driver._choose_otp_method(1, observation, methods)
+            return selected, clicks
+
+        selected, totp_clicks = run((OtpMethod.TOTP, OtpMethod.EMAIL))
+        self.assertIs(selected, OtpMethod.TOTP)
+        self.assertEqual(len(totp_clicks), 2)
+
+        selected, email_clicks = run((OtpMethod.EMAIL,))
+        self.assertIs(selected, OtpMethod.EMAIL)
+        self.assertEqual(len(email_clicks), 1)
 
 
 class SharedInputStructureTest(unittest.TestCase):

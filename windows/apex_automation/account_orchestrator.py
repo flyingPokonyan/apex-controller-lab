@@ -366,6 +366,7 @@ class AccountOrchestrator:
                     operation_id,
                     challenge.challenge_id,
                     challenge.started_at,
+                    challenge.method,
                 )
                 if not otp.valid_for(
                     challenge.challenge_id,

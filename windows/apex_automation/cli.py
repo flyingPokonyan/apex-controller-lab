@@ -915,6 +915,7 @@ def run_ea_login_check(
                         uuid.uuid4().hex,
                         challenge.challenge_id,
                         challenge.started_at,
+                        challenge.method,
                     )
 
                 driver.sign_in(credentials, supply_otp)

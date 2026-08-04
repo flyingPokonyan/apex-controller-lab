@@ -13,7 +13,12 @@ import uuid
 
 import numpy as np
 
-from .account_provider import MIN_USABLE_OTP_LIFETIME_S, OtpCode, SecretCredentials
+from .account_provider import (
+    MIN_USABLE_OTP_LIFETIME_S,
+    OtpCode,
+    OtpMethod,
+    SecretCredentials,
+)
 from .ea_app import (
     ApexExitEvidence,
     EaAppAutomationError,
@@ -31,6 +36,7 @@ from .ea_pages import (
     ACCOUNT_FIELD_TERMS,
     AUTHENTICATOR_TERMS,
     EMAIL_CODE_TERMS,
+    EMAIL_METHOD_TERMS,
     OTP_FIELD_TERMS,
     PASSWORD_FIELD_TERMS,
     PASSWORD_LINK_TERMS,
@@ -799,6 +805,7 @@ class WindowsEaHybridDriver:
             raise EaCaptchaRequired("EA App 出现 Captcha，已暂停")
         if observation.page is EaPage.EMAIL:
             observation = self._submit_login_identifier(hwnd, observation, credentials)
+        challenge_started_at = datetime.now(timezone.utc)
         if observation.page is EaPage.PASSWORD:
             # Only a page that shows a password field and no account field
             # gets the password typed into it. Guessing here once meant typing
@@ -810,31 +817,47 @@ class WindowsEaHybridDriver:
             raise EaAppAutomationError(
                 f"EA App 当前不是可登录页面（{observation.page.value}）"
             )
-        return self._await_identity(hwnd, otp_supplier)
+        return self._await_identity(
+            hwnd,
+            otp_supplier,
+            otp_methods=credentials.otp_methods,
+            initial_challenge_started_at=challenge_started_at,
+        )
 
-    def _choose_authenticator(
+    def _choose_otp_method(
         self,
         hwnd: int,
         observation: EaObservation,
-    ) -> None:
-        """Pick the authenticator on EA's "Verify your identity" chooser.
+        otp_methods: tuple[OtpMethod, ...],
+    ) -> tuple[OtpMethod, datetime]:
+        """Prefer TOTP when both the account and EA's chooser offer it."""
 
-        The account's email is preselected, and the Provider can only generate
-        the authenticator's code — sending the email one would post a code
-        nothing in this system can read.
-        """
-
-        point = self._anchor(observation, AUTHENTICATOR_TERMS)
-        if point is None:
-            self._record("otp-no-authenticator", observation)
-            raise EaOtpUnavailable(
-                "EA 只提供邮箱验证码，服务端目前只能生成验证器验证码"
+        compact = "".join(observation.normalized)
+        authenticator = self._anchor(observation, AUTHENTICATOR_TERMS)
+        if OtpMethod.TOTP in otp_methods and authenticator is not None:
+            self._click_point(hwnd, *authenticator)
+            self.sleep(INPUT_SETTLE_S)
+            chosen = self._observe(hwnd)
+            method = OtpMethod.TOTP
+            self._record("otp-method-authenticator", chosen)
+            self.notify("EA 使用验证器验证码")
+        elif OtpMethod.EMAIL in otp_methods and has_any(
+            compact, EMAIL_METHOD_TERMS
+        ):
+            chosen = observation
+            method = OtpMethod.EMAIL
+            self._record("otp-method-email", chosen)
+            self.notify("EA 未提供可用验证器，改用邮箱验证码")
+        else:
+            self._record(
+                "otp-method-unavailable",
+                observation,
+                providerMethods=[item.value for item in otp_methods],
             )
-        self._click_point(hwnd, *point)
-        self.sleep(INPUT_SETTLE_S)
-        chosen = self._observe(hwnd)
-        self._record("otp-method-authenticator", chosen)
+            raise EaOtpUnavailable("EA 页面与账号可用的验证码方式不匹配")
+
         send = self._anchor(chosen, SEND_CODE_TERMS, y_range=(0.40, 0.95))
+        challenge_started_at = datetime.now(timezone.utc)
         if send is None:
             self._click(hwnd, *SEND_CODE_RATIO)
         else:
@@ -844,10 +867,37 @@ class WindowsEaHybridDriver:
             (EaPage.OTP, EaPage.SIGNED_IN),
             timeout_s=20.0,
         )
+        return method, challenge_started_at
+
+    @staticmethod
+    def _otp_page_method(
+        observation: EaObservation,
+        otp_methods: tuple[OtpMethod, ...],
+        selected_method: OtpMethod | None,
+    ) -> OtpMethod:
+        compact = "".join(observation.normalized)
+        if has_any(compact, EMAIL_CODE_TERMS):
+            method = OtpMethod.EMAIL
+        elif has_any(compact, AUTHENTICATOR_TERMS):
+            method = OtpMethod.TOTP
+        elif selected_method is not None:
+            method = selected_method
+        elif len(otp_methods) == 1:
+            method = otp_methods[0]
+        else:
+            method = OtpMethod.TOTP
+        if method not in otp_methods:
+            raise EaOtpUnavailable(
+                f"EA 要求 {method.value}，但服务端没有对应验证码来源"
+            )
+        return method
 
     def _fresh_otp(
         self,
         otp_supplier: Callable[[OtpChallenge], OtpCode],
+        *,
+        method: OtpMethod,
+        challenge_started_at: datetime,
     ) -> OtpCode:
         """Get a code with enough life left to be typed.
 
@@ -857,13 +907,22 @@ class WindowsEaHybridDriver:
         only thing that helps.
         """
 
-        otp = otp_supplier(OtpChallenge(uuid.uuid4().hex, datetime.now(timezone.utc)))
-        if otp.lifetime_s >= MIN_USABLE_OTP_LIFETIME_S:
+        otp = otp_supplier(
+            OtpChallenge(uuid.uuid4().hex, challenge_started_at, method)
+        )
+        if (
+            method is OtpMethod.EMAIL
+            or otp.lifetime_s >= MIN_USABLE_OTP_LIFETIME_S
+        ):
             return otp
         self.notify(f"验证码只剩 {otp.lifetime_s:.0f} 秒，等下一个窗口再取")
         self.sleep(otp.lifetime_s + 1.0)
         return otp_supplier(
-            OtpChallenge(uuid.uuid4().hex, datetime.now(timezone.utc))
+            OtpChallenge(
+                uuid.uuid4().hex,
+                datetime.now(timezone.utc),
+                method,
+            )
         )
 
     def _submit_otp(
@@ -871,13 +930,16 @@ class WindowsEaHybridDriver:
         hwnd: int,
         observation: EaObservation,
         otp_supplier: Callable[[OtpChallenge], OtpCode],
+        *,
+        method: OtpMethod,
+        challenge_started_at: datetime,
     ) -> None:
-        if has_any("".join(observation.normalized), EMAIL_CODE_TERMS):
-            self._record("otp-email-code-page", observation)
-            raise EaOtpUnavailable(
-                "EA 停在邮箱验证码页，服务端目前只能生成验证器验证码"
-            )
-        otp = self._fresh_otp(otp_supplier)
+        self._record(f"otp-{method.value.lower()}-code-page", observation)
+        otp = self._fresh_otp(
+            otp_supplier,
+            method=method,
+            challenge_started_at=challenge_started_at,
+        )
         target = self._click_target(
             hwnd,
             observation,
@@ -901,12 +963,16 @@ class WindowsEaHybridDriver:
         hwnd: int,
         otp_supplier: Callable[[OtpChallenge], OtpCode],
         *,
+        otp_methods: tuple[OtpMethod, ...],
+        initial_challenge_started_at: datetime,
         timeout_s: float = 90.0,
     ) -> EaIdentityFact:
         deadline = time.monotonic() + timeout_s
         observation: EaObservation | None = None
         seen_pages: set[EaPage] = set()
         otp_attempts = 0
+        selected_method: OtpMethod | None = None
+        challenge_started_at = initial_challenge_started_at
         while time.monotonic() < deadline:
             self.sleep(2.0)
             observation = self._observe(hwnd)
@@ -928,7 +994,11 @@ class WindowsEaHybridDriver:
                 self._record("login-rejected", observation)
                 raise EaLoginRejected("EA App 报告登录信息有误")
             if observation.page is EaPage.OTP_METHOD:
-                self._choose_authenticator(hwnd, observation)
+                selected_method, challenge_started_at = self._choose_otp_method(
+                    hwnd,
+                    observation,
+                    otp_methods,
+                )
                 continue
             if observation.page is EaPage.OTP:
                 otp_attempts += 1
@@ -937,7 +1007,18 @@ class WindowsEaHybridDriver:
                     raise EaOtpUnavailable(
                         f"EA 连续 {MAX_OTP_ATTEMPTS} 次没有接受验证码"
                     )
-                self._submit_otp(hwnd, observation, otp_supplier)
+                method = self._otp_page_method(
+                    observation,
+                    otp_methods,
+                    selected_method,
+                )
+                self._submit_otp(
+                    hwnd,
+                    observation,
+                    otp_supplier,
+                    method=method,
+                    challenge_started_at=challenge_started_at,
+                )
                 continue
             # A login page still on screen is not a badge to read, whatever a
             # corner crop makes of the text sitting there.
