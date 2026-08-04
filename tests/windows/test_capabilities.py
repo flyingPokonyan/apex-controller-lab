@@ -302,5 +302,58 @@ class DispatcherTest(unittest.TestCase):
             CapabilitySet.from_payload({"schemaVersion": 2, "capabilities": []})
 
 
+class DelayedActionTest(unittest.TestCase):
+    """Leaving a screen later is a different outcome, not a safer one.
+
+    The dropship is the same picture for its whole flight; when the runner
+    presses E decides where it lands, and pressing on sight put every landing
+    on the same spot at the start of the path.
+    """
+
+    def dispatcher(self, **kwargs) -> CapabilityDispatcher:
+        capability = click("jump", "DROPSHIP", delay_ms=35_000, **kwargs)
+        return CapabilityDispatcher(
+            CapabilitySet([capability]),
+            jitter=lambda low, high: high,
+        )
+
+    def test_the_screen_has_to_persist_before_the_action_is_allowed(self) -> None:
+        dispatcher = self.dispatcher()
+        dispatcher.note_state("DROPSHIP", 0.0)
+        self.assertEqual(dispatcher.decide("DROPSHIP", 1, 10.0).reason, "ACTION_DELAYED")
+        self.assertEqual(dispatcher.decide("DROPSHIP", 1, 34.9).reason, "ACTION_DELAYED")
+        self.assertEqual(dispatcher.decide("DROPSHIP", 1, 35.1).kind, "fire")
+
+    def test_the_wait_is_measured_from_this_visit_not_the_first_one(self) -> None:
+        dispatcher = self.dispatcher()
+        dispatcher.note_state("DROPSHIP", 0.0)
+        dispatcher.decide("DROPSHIP", 1, 40.0)
+        dispatcher.note_state("FREEFALL", 41.0)
+        dispatcher.note_state("DROPSHIP", 600.0)
+        self.assertEqual(dispatcher.decide("DROPSHIP", 2, 610.0).reason, "ACTION_DELAYED")
+        self.assertEqual(dispatcher.decide("DROPSHIP", 2, 636.0).kind, "fire")
+
+    def test_the_jitter_is_rolled_once_a_visit_rather_than_every_frame(self) -> None:
+        # Re-rolling per frame would average the jitter away and put every
+        # landing back on one spot, which is the whole reason it is here.
+        dispatcher = self.dispatcher(delay_jitter_ms=8000)
+        dispatcher.note_state("DROPSHIP", 0.0)
+        for moment in (1.0, 20.0, 36.0, 42.0):
+            self.assertEqual(dispatcher.decide("DROPSHIP", 1, moment).reason, "ACTION_DELAYED")
+        self.assertEqual(dispatcher.decide("DROPSHIP", 1, 43.1).kind, "fire")
+
+    def test_a_periodic_capability_may_not_also_declare_a_delay(self) -> None:
+        with self.assertRaisesRegex(ValueError, "周期触发用间隔表达节奏"):
+            Capability(
+                id="melee", priority=10, states=("IN_MATCH",), action="meleeKey",
+                kind="key", action_class="idempotent", trigger="periodic",
+                min_interval_ms=1000, max_interval_ms=5000, delay_ms=1000,
+            )
+
+    def test_jitter_without_a_delay_is_rejected(self) -> None:
+        with self.assertRaisesRegex(ValueError, "声明了抖动却没有延迟"):
+            click("jump", "DROPSHIP", delay_jitter_ms=5000)
+
+
 if __name__ == "__main__":
     unittest.main()

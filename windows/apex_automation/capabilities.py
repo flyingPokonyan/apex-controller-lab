@@ -38,6 +38,13 @@ class Capability:
     allowed_next_states: tuple[str, ...] = ()
     min_interval_ms: int = 0
     max_interval_ms: int = 0
+    # How long this screen must have been on show before the capability may
+    # act on it. Not a safety margin — recognition is already stable by the
+    # time a state is reported — but a way to say "later is a different
+    # outcome": the dropship is the same screen for its whole flight, and when
+    # you leave it decides where you land.
+    delay_ms: int = 0
+    delay_jitter_ms: int = 0
     # How long a key stays down. Left at 0 the runner uses the profile's
     # default tap. Some prompts do not accept a tap at all, so this has to be
     # per-capability rather than one number for the whole session.
@@ -74,12 +81,21 @@ class Capability:
             if not 1 <= self.max_attempts <= 2:
                 raise ValueError(f"commit 动作的尝试上限必须为 1 或 2：{self.id}")
 
+        if not 0 <= self.delay_ms <= 120_000:
+            raise ValueError(f"能力 {self.id} 的延迟必须为 0 到 120000ms")
+        if not 0 <= self.delay_jitter_ms <= 60_000:
+            raise ValueError(f"能力 {self.id} 的延迟抖动必须为 0 到 60000ms")
+        if self.delay_jitter_ms and not self.delay_ms:
+            raise ValueError(f"能力 {self.id} 声明了抖动却没有延迟")
+
         if self.trigger == "periodic":
             # Periodic actions fire while a screen merely persists, so there is
             # no postcondition to check and nothing stops them repeating.
             # Restricting them to idempotent keeps that safe by construction.
             if self.action_class != "idempotent":
                 raise ValueError(f"周期触发只允许 idempotent 动作：{self.id}")
+            if self.delay_ms:
+                raise ValueError(f"周期触发用间隔表达节奏，不该再声明延迟：{self.id}")
             if self.allowed_next_states:
                 raise ValueError(f"周期触发不应声明后置画面：{self.id}")
             if not 0 < self.min_interval_ms <= self.max_interval_ms:
@@ -146,6 +162,8 @@ class CapabilitySet:
                 allowed_next_states=tuple(str(value) for value in item.get("allowedNextStates", [])),
                 min_interval_ms=int(item.get("minIntervalMs", 0)),
                 max_interval_ms=int(item.get("maxIntervalMs", 0)),
+                delay_ms=int(item.get("delayMs", 0)),
+                delay_jitter_ms=int(item.get("delayJitterMs", 0)),
                 hold_ms=int(item.get("holdMs", 0)),
             )
             for item in payload.get("capabilities", [])
@@ -183,14 +201,18 @@ class CapabilityDispatcher:
         self.blocked_observation_version: int | None = None
         self.handled_observation_versions: set[int] = set()
         self.next_periodic_at: dict[str, float] = {}
+        self.delay_deadlines: dict[str, float] = {}
         self._state_entries: deque[tuple[float, str]] = deque()
         self._current_state: str | None = None
+        self._current_state_since = 0.0
         self._cycle_paused = False
 
     def reset_for_pause(self) -> None:
         """Drop cross-frame memory that a pause invalidates."""
         self.pending = None
         self.blocked_observation_version = None
+        # The operator may have flown the dropship somewhere else entirely.
+        self.delay_deadlines.clear()
 
     def counts_toward_cycle(self, state: str) -> bool:
         """Whether revisiting this screen is evidence of a loop.
@@ -232,6 +254,10 @@ class CapabilityDispatcher:
             return
         previous = self._current_state
         self._current_state = state
+        self._current_state_since = now
+        # A delay is measured per visit: leaving the dropship and boarding the
+        # next one starts the wait again from the top.
+        self.delay_deadlines.clear()
         if previous is not None:
             # Leaving a screen ends that visit: a later return gets a fresh
             # budget, which is what makes "handle whatever shows up" workable.
@@ -255,6 +281,25 @@ class CapabilityDispatcher:
         if allowed and evidence_state not in allowed:
             return False, pending
         return True, pending
+
+    def delay_remaining(self, capability: Capability, now: float) -> float:
+        """Seconds this capability still has to wait on the current screen."""
+        if not capability.delay_ms:
+            return 0.0
+        deadline = self.delay_deadlines.get(capability.id)
+        if deadline is None:
+            # Rolled once per visit, not per frame: the wait has to be a fixed
+            # point in time, and re-rolling it every 300ms would average the
+            # jitter away into always leaving at the same moment — which is
+            # the thing the jitter exists to stop.
+            extra = (
+                self.jitter(0, capability.delay_jitter_ms)
+                if capability.delay_jitter_ms
+                else 0
+            )
+            deadline = self._current_state_since + (capability.delay_ms + extra) / 1000
+            self.delay_deadlines[capability.id] = deadline
+        return max(0.0, deadline - now)
 
     def _periodic_decision(self, capability: Capability, now: float) -> Decision:
         due_at = self.next_periodic_at.get(capability.id)
@@ -312,7 +357,10 @@ class CapabilityDispatcher:
             # loading that no rule names, so an unconditional retry would come
             # back long after the fact and click the lobby button at a point
             # where those coordinates mean something else entirely.
-            if state in retry.capability.states:
+            if (
+                state in retry.capability.states
+                and self.delay_remaining(retry.capability, now) <= 0
+            ):
                 return self._start(retry.capability, state, observation_version, now)
 
         candidates = self.capabilities.for_state(state)
@@ -321,12 +369,24 @@ class CapabilityDispatcher:
 
         periodic = [item for item in candidates if item.trigger == "periodic"]
         on_state = [item for item in candidates if item.trigger == "onState"]
+        waiting = [item for item in on_state if self.delay_remaining(item, now) > 0]
+        ready = [item for item in on_state if self.delay_remaining(item, now) <= 0]
 
         # A screen that has already been acted on still lets periodic
         # behaviours run: they are what "keep doing this while in a match"
         # means, and they carry no postcondition to wait for.
-        if on_state and observation_version not in self.handled_observation_versions:
-            return self._start(on_state[0], state, observation_version, now)
+        if ready and observation_version not in self.handled_observation_versions:
+            return self._start(ready[0], state, observation_version, now)
+        if waiting and not ready and not periodic:
+            return Decision(
+                "wait",
+                capability=waiting[0],
+                reason="ACTION_DELAYED",
+                detail={
+                    "state": state,
+                    "remainingMs": round(self.delay_remaining(waiting[0], now) * 1000),
+                },
+            )
         for capability in periodic:
             # Each periodic behaviour keeps its own interval, so the highest
             # priority one being mid-cooldown must not silence the others.

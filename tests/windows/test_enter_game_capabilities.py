@@ -369,6 +369,21 @@ class EnterGameCapabilityTest(unittest.TestCase):
         decision = dispatcher.decide("DROPSHIP_FOLLOWING", 2, 90.0)
         self.assertEqual(decision.capability.id, "dropship-detach")
 
+    def test_the_jump_waits_out_part_of_the_flight_but_never_all_of_it(self) -> None:
+        # Pressing E on sight landed every match on the same spot at the start
+        # of the flight path, where the first ring never reaches. The wait has
+        # to stay comfortably inside the flight: ride past its end and the
+        # game force-drops at the far edge, which is the same problem mirrored.
+        # 20260730 bounds the whole entry at 142s including legend select and
+        # loading, so the flight itself is shorter than that.
+        launch = next(c for c in self.capabilities.capabilities if c.id == "dropship-launch")
+        self.assertGreater(launch.delay_ms, 0)
+        self.assertLess(launch.delay_ms + launch.delay_jitter_ms, 60_000)
+        # Detaching from the squad is not delayed with it: that only says the
+        # runner picks its own landing, and doing it early costs nothing.
+        detach = next(c for c in self.capabilities.capabilities if c.id == "dropship-detach")
+        self.assertEqual(detach.delay_ms, 0)
+
     def test_confirming_a_mode_is_a_commit_that_must_be_verified(self) -> None:
         confirm = next(c for c in self.capabilities.capabilities if c.id == "mode-panel-confirm-hovered")
         self.assertEqual(confirm.action_class, "commit")

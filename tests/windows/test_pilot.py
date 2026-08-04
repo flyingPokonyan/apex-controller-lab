@@ -263,14 +263,21 @@ class PilotTest(unittest.TestCase):
     def _raise_foreground_lost() -> None:
         raise ForegroundLost("前台程序不是 Apex")
 
-    def test_a_solo_jumpmaster_still_launches_itself(self) -> None:
+    def test_a_solo_jumpmaster_launches_itself_after_riding_the_flight_out(self) -> None:
         # Without fill the squad is one player, so nobody can be followed or
         # detached from and neither dropship state can ever match. The launch
-        # prompt is the only thing left to key on.
+        # prompt is the only thing left to key on — but pressing it on sight
+        # is what put every landing on the same spot at the start of the
+        # flight path, where no first ring reaches.
         self.screen(dropshipLaunchPrompt=("发射", 0.98))
         record = self.pilot.step()
 
         self.assertEqual(record["state"], "DROPSHIP_SOLO_JUMPMASTER")
+        self.assertEqual(record["decision"]["reason"], "ACTION_DELAYED")
+        self.assertEqual(self.sender.calls, [])
+
+        self.now = 60.0
+        record = self.pilot.step()
         self.assertEqual(record["decision"]["capability"], "dropship-launch")
         self.assertEqual(self.sender.calls, [("tap", 18, 80)])
 
