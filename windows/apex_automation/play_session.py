@@ -332,6 +332,14 @@ class PlaySessionRunner:
             outcome = pilot.run(duration_s=duration_s)
             if outcome == "TARGET_REACHED":
                 finish_status = "TARGET_REACHED"
+            elif outcome == "STALLED":
+                # Not FAILED: nothing is wrong with the account, the runner
+                # just could not get the screen to move. The lease is released
+                # with a reason and the cycle stops for a look rather than
+                # spending the next account on the same wall.
+                error_code = "STALL_UNRECOVERED"
+                error_message = "画面长时间无法识别且无法恢复"
+                finish_detail["reason"] = error_message
         except (EmergencyStop, KeyboardInterrupt) as error:
             finish_status = "STOPPED"
             error_message = str(error) or "用户停止"

@@ -161,6 +161,7 @@ DisplayPort 关显示器会直接让桌面复制 `ACCESS_LOST`，RDP 断开会�
 ## 技术方案
 
 - [**现状汇总**：有哪些采集数据、闭环做到哪一步](docs/current-status.md)
+- [升级速度与停滞：8 月 3 日两段跑的复盘（含每分钟经验实测）](docs/xp-rate-and-idle-stall-20260804.md)
 - [能力证据矩阵：每条能力靠什么帧成立、还缺什么](docs/capability-evidence.md)
 - [本地菜单自动化验证与 Windows 接入清单](docs/menu-automation-local-validation.md)
 - [模式选择、脱离跳伞与截图技术可行性](docs/apex-ui-drop-screenshot-feasibility.md)

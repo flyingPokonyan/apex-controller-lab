@@ -22,7 +22,14 @@ REPORTABLE_INCIDENTS = {
     "FOREGROUND_PAUSED": "FOREGROUND_LOST",
     "DECISION_PAUSED": "ACTION_PAUSED",
     "REPORTER_ERROR": "REPORTER_ERROR",
+    # A stall is invisible from the remote side without these: heartbeats keep
+    # arriving with `observedState: null` and the run looks alive, which is how
+    # 20260803-083835 spent 75 minutes stuck without anything to point at.
+    "STALL_DETECTED": "STALL_DETECTED",
+    "STALL_UNRECOVERED": "STALL_UNRECOVERED",
+    "STALL_RECOVERED": "STALL_RECOVERED",
 }
+ERROR_INCIDENTS = frozenset({"CAPTURE_ERROR", "REPORTER_ERROR", "STALL_UNRECOVERED"})
 
 LOBBY_STATES = {
     "LOBBY_QUEUEING": "QUEUEING",
@@ -454,9 +461,7 @@ class ReportSession:
                     "INCIDENT",
                     {
                         "kind": REPORTABLE_INCIDENTS[name],
-                        "severity": "ERROR"
-                        if name in {"CAPTURE_ERROR", "REPORTER_ERROR"}
-                        else "WARNING",
+                        "severity": "ERROR" if name in ERROR_INCIDENTS else "WARNING",
                         "message": payload.get("error", payload.get("reason", name)),
                         "observedState": payload.get("state"),
                         "localEvidencePath": payload.get("path"),

@@ -11,6 +11,7 @@ import numpy as np
 
 from .capabilities import Capability, CapabilityDispatcher, Decision
 from .config import RunnerConfig
+from .ocr_obstacles import normalize_ocr_text
 from .ocr_states import OcrStateDetector
 from .progression import (
     LobbyProgressionReader,
@@ -32,7 +33,31 @@ from .safety import ForegroundLost
 # these; the check in `_validate_actions` is what makes that true rather than
 # assumed, because the alternative is discovering a bad action name halfway
 # into a match with an input already sent.
-SUPPORTED_KINDS = frozenset({"click", "key", "sequence"})
+SUPPORTED_KINDS = frozenset({"click", "key", "sequence", "clickText"})
+# The screen the watchdog names when nothing else could. It is not an OCR
+# state and never appears in a rule file: it means "no rule has matched this
+# frame for minutes", which is a fact about the runner rather than about a
+# page. Capabilities may attach to it exactly as they do to a real screen.
+STALLED_UNKNOWN = "STALLED_UNKNOWN"
+
+
+def producible_states(
+    state_detector: OcrStateDetector,
+    overlay_detector: OcrStateDetector | None = None,
+) -> set[str]:
+    """Every screen name a capability may legally be written against.
+
+    Startup rejects a capability that names a screen nothing can produce, and
+    that check has to know about the one name that comes from the runner
+    rather than from a dictionary. Both the launcher and the test that guards
+    the shipped capability set ask this function, so neither can drift into
+    believing in a screen the other does not.
+    """
+    states = set(state_detector.states)
+    if overlay_detector is not None:
+        states.update(overlay_detector.states)
+    states.add(STALLED_UNKNOWN)
+    return states
 LOBBY_CONTEXT_STATES = frozenset(
     {
         "LOBBY_QUEUEING",
@@ -195,6 +220,60 @@ class CapabilityPilot:
         self.lease_is_current = lease_is_current
         self.status_interval_s = max(0.1, status_interval_ms / 1000)
 
+        # Standing still is also a failure mode, and until now the only one
+        # with no signal at all. `20260803-083835` returned to the lobby at
+        # 04:20:23, hit a screen no rule named nine seconds later, and then
+        # heartbeated `observedState: null` for **75 minutes** — foreground,
+        # capturing, 2403 actions sent and not one more. Nothing was wrong
+        # enough to stop, so nothing stopped.
+        stall = config.stall
+        self.stall_enabled = bool(stall.get("enabled", True))
+        self.stall_grace_s = int(stall.get("graceMs", 120_000)) / 1000
+        # After 准备 the screen is *supposed* to go dark for a while: queueing,
+        # legend select and loading name nothing. Measured at 72, 104 and 116
+        # seconds on 20260803, which leaves no room under a two minute grace if
+        # matchmaking is ever slower than it was that day — and a stray ESC in
+        # there could cancel the queue. Both stalls actually seen began after
+        # returning to the lobby, where the ordinary grace still applies.
+        self.stall_queue_grace_s = int(stall.get("queueGraceMs", 420_000)) / 1000
+        self.stall_window_s = int(stall.get("recoverWindowMs", 20_000)) / 1000
+        self.stall_retry_s = int(stall.get("retryMs", 180_000)) / 1000
+        self.stall_give_up_s = int(stall.get("giveUpMs", 1_800_000)) / 1000
+        if self.stall_grace_s <= 0 or self.stall_window_s <= 0:
+            raise ValueError("停滞看门狗的宽限和处置窗口必须大于 0")
+        if self.stall_queue_grace_s < self.stall_grace_s:
+            raise ValueError("排队后的宽限不能短于普通宽限")
+        if self.stall_retry_s < self.stall_window_s:
+            raise ValueError("停滞看门狗的重试间隔不能短于一次处置窗口")
+        if self.stall_give_up_s and self.stall_give_up_s <= self.stall_grace_s:
+            raise ValueError("停滞看门狗的放弃时限必须长于宽限")
+
+        # Legend select is the one screen the runner passes through every match
+        # and has never seen: it lives inside the unknown stretch between
+        # `LOBBY_QUEUEING` and the dropship, where the generic evidence sampler
+        # keeps at most a frame every 20s and skips near-identical ones — which
+        # is exactly what a page with only a countdown ticking looks like.
+        legend = config.legend_select
+        self.legend_capture_enabled = bool(legend.get("captureEnabled", True))
+        self.legend_sample_s = int(legend.get("sampleMs", 5000)) / 1000
+        self.legend_max_frames = int(legend.get("maxFrames", 8))
+        self.legend_max_rounds = int(legend.get("maxRounds", 2))
+        if self.legend_sample_s <= 0:
+            raise ValueError("传奇选择取证的采样间隔必须大于 0")
+        # `probe` reads that stretch and writes down what it saw; it never
+        # sends anything. Whether a legend can be chosen by name depends on
+        # facts nobody has yet — is the name drawn on the card, does the pick
+        # need confirming — and one probing run answers both without asking
+        # anyone to reproduce a screen.
+        self.legend_mode = str(legend.get("mode", "probe"))
+        if self.legend_mode not in {"off", "probe"}:
+            raise ValueError(f"传奇选择模式暂不支持：{self.legend_mode}")
+        self.legend_preferred = str(legend.get("preferredLegend", "")).strip()
+        self.legend_probe_s = int(legend.get("probeIntervalMs", 6000)) / 1000
+        self.legend_probe_max = int(legend.get("probeMaxPerRound", 5))
+        if self.legend_probe_s <= 0:
+            raise ValueError("传奇选择探针的间隔必须大于 0")
+
         # Full-frame and multi-region obstacle OCR is intentionally not part of
         # the 300ms fast loop. It runs once before a menu action, or after an
         # unknown screen has persisted. A positive result must repeat before it
@@ -241,6 +320,18 @@ class CapabilityPilot:
         self._unknown_captured = False
         self._unknown_signature: np.ndarray | None = None
         self._unknown_next_sample = 0.0
+        self._last_known_state: str | None = None
+        self._stall_since: float | None = None
+        self._stall_rounds = 0
+        self._stall_round_until = 0.0
+        self._stall_next_round_at = 0.0
+        self._legend_armed = False
+        self._legend_kept = 0
+        self._legend_rounds_captured = 0
+        self._legend_next_sample = 0.0
+        self._legend_probes = 0
+        self._legend_next_probe = 0.0
+        self._legend_text_logged = False
         self._base_state: str | None = None
         self._base_state_version = 0
         self._base_unknown_since: float | None = None
@@ -290,6 +381,30 @@ class CapabilityPilot:
                 raise ValueError(f"动作 {capability.action} 不是一个扫描码")
             elif capability.kind == "sequence":
                 self._validate_sequence(capability.action, spec)
+            elif capability.kind == "clickText":
+                self._validate_click_text(capability.action, spec)
+
+    def _validate_click_text(self, action_name: str, spec: object) -> None:
+        if not isinstance(spec, dict):
+            raise ValueError(f"文字点击动作 {action_name} 不是对象")
+        if not isinstance(spec.get("region"), str):
+            raise ValueError(f"文字点击动作 {action_name} 没有声明区域")
+        words = spec.get("any")
+        if not isinstance(words, list) or not words:
+            raise ValueError(f"文字点击动作 {action_name} 没有声明任何目标文字")
+        if not all(isinstance(word, str) and word for word in words):
+            raise ValueError(f"文字点击动作 {action_name} 的目标文字必须是非空字符串")
+        fallback = spec.get("fallbackScanCode")
+        if fallback is not None and not isinstance(fallback, int):
+            raise ValueError(f"文字点击动作 {action_name} 的兜底扫描码不是整数")
+        confidence = float(spec.get("minConfidence", 0.62))
+        if not 0 <= confidence <= 1:
+            raise ValueError(f"文字点击动作 {action_name} 的置信度无效")
+        if (
+            self.overlay_detector is not None
+            and spec["region"] not in self.overlay_detector.regions
+        ):
+            raise ValueError(f"文字点击动作 {action_name} 引用了未知区域 {spec['region']}")
 
     def _validate_sequence(self, action_name: str, spec: object) -> None:
         if not isinstance(spec, list) or not spec:
@@ -324,7 +439,57 @@ class CapabilityPilot:
         self._overlay_candidate_count = 0
         self._active_overlay = None
 
-    def _execute(self, capability: Capability) -> dict[str, object]:
+    def _find_button(
+        self,
+        spec: dict[str, Any],
+        frame: np.ndarray,
+    ) -> tuple[int, int, str, float] | None:
+        """Locate a button by the word printed on it, or refuse to guess.
+
+        Every other action in this runner is a coordinate measured from a real
+        frame. This one exists for the screens nobody has measured yet — an
+        error box after a network blip, a prompt a game update introduced —
+        where the alternative is standing still until someone notices. It is
+        still not a blind click: nothing is pressed unless the OCR read one of
+        the declared words *and* the engine handed back where it read it.
+        """
+        if self.overlay_detector is None:
+            return None
+        # The name is checked at startup against this same dictionary, so a
+        # miss here means the detector was swapped mid-run: read nothing
+        # rather than crash a session that may be an hour in.
+        region = self.overlay_detector.regions.get(str(spec["region"]))
+        if region is None:
+            return None
+        min_confidence = float(spec.get("minConfidence", 0.62))
+        words = tuple(normalize_ocr_text(str(word)) for word in spec["any"])
+        try:
+            tokens = self.overlay_detector.provider.read(frame, region)
+        except Exception as error:
+            self.counters["clickTextOcrError"] += 1
+            self.recorder.log("CLICK_TEXT_OCR_ERROR", action=spec.get("region"), error=str(error))
+            return None
+        eligible = tuple(token for token in tokens if token.confidence >= min_confidence)
+        # Words are tried in the order the profile declares them, not in the
+        # order OCR happened to read them: a disconnect box carrying both
+        # 重试 and 返回 should retry, not back out.
+        for word in words:
+            if not word:
+                continue
+            for token in eligible:
+                if word not in token.normalized:
+                    continue
+                if token.roi is None:
+                    # A region fallback read has no coordinates. Clicking the
+                    # middle of the region because a word appeared somewhere
+                    # inside it is exactly the blind click this design refuses.
+                    self.counters["clickTextNoPosition"] += 1
+                    continue
+                x1, y1, x2, y2 = token.roi
+                return (x1 + x2) // 2, (y1 + y2) // 2, token.text, token.confidence
+        return None
+
+    def _execute(self, capability: Capability, frame: np.ndarray) -> dict[str, object]:
         spec = self.actions[capability.action]
         if capability.kind == "click":
             x, y = (int(value) for value in spec)
@@ -335,6 +500,29 @@ class CapabilityPilot:
             duration_ms = capability.hold_ms or self.key_tap_ms
             self.sender.tap_scan_code(scan_code, duration_ms)
             return {"scanCode": scan_code, "durationMs": duration_ms}
+        if capability.kind == "clickText":
+            found = self._find_button(spec, frame)
+            if found is not None:
+                x, y, text, confidence = found
+                self.sender.click(x, y)
+                return {
+                    "x": x,
+                    "y": y,
+                    "matchedText": text,
+                    "confidence": round(confidence, 4),
+                }
+            fallback = spec.get("fallbackScanCode")
+            if fallback is None:
+                return {"skipped": "NO_BUTTON_TEXT"}
+            duration_ms = capability.hold_ms or self.key_tap_ms
+            self.sender.tap_scan_code(int(fallback), duration_ms)
+            # Not `reason`: the send event already carries the dispatcher's
+            # reason for firing, and a detail key may not collide with it.
+            return {
+                "scanCode": int(fallback),
+                "durationMs": duration_ms,
+                "fallback": "NO_BUTTON_TEXT",
+            }
 
         executed: list[dict[str, object]] = []
         for raw_step in spec:
@@ -833,6 +1021,12 @@ class CapabilityPilot:
     def _observe(self, frame: np.ndarray, now: float) -> tuple[str | None, str | None]:
         base = self._base_observation(frame, now)
         effective = self._resolve_overlay(frame, base, now)
+        # Evidence first, and always against the screen as it actually read:
+        # the watchdog's name for a stuck frame must not look to the sampler
+        # like the screen was recognised.
+        self._note_unknown(effective.state, frame, now)
+        self._note_legend_select(effective.state, frame, now)
+        effective = self._promote_stall(effective, base.state, now)
         return self._record_observation(effective, frame), base.state
 
     @staticmethod
@@ -894,6 +1088,185 @@ class CapabilityPilot:
         self.counters["unknownSamples"] += 1
         self._capture_unknown(frame, now, "同一段里画面又变了")
 
+    def _note_legend_select(self, state: str | None, frame: np.ndarray, now: float) -> None:
+        """Keep the screens between pressing 准备 and the dropship.
+
+        Picking a legend is the one thing in the match loop that is still left
+        to the game's own timeout, and it stays that way until somebody can
+        measure the roster on a real frame. Nobody should have to reproduce it
+        by hand: it happens once per match, and the runner is already there.
+        """
+        if not self.legend_capture_enabled:
+            return
+        if state == "LOBBY_QUEUEING":
+            if not self._legend_armed and self._legend_rounds_captured < self.legend_max_rounds:
+                self._legend_armed = True
+                self._legend_kept = 0
+                self._legend_probes = 0
+                self._legend_text_logged = False
+                self._legend_next_sample = now
+                self._legend_next_probe = now
+            return
+        if not self._legend_armed:
+            return
+        if state is not None:
+            # A rule named the screen again — the blackout is over, whether it
+            # ended at the dropship or back in the lobby.
+            self._legend_armed = False
+            if self._legend_kept:
+                self._legend_rounds_captured += 1
+            return
+        self._probe_legend_screen(frame, now)
+        if self._legend_kept >= self.legend_max_frames or now < self._legend_next_sample:
+            return
+        self._legend_kept += 1
+        self._legend_next_sample = now + self.legend_sample_s
+        self.counters["legendSelectFrames"] += 1
+        self._snapshot("legend-select", frame)
+
+    def _probe_legend_screen(self, frame: np.ndarray, now: float) -> None:
+        """Read the blackout and write down what is on it. Sends nothing.
+
+        Two facts decide whether a legend can be picked by name, and neither
+        is knowable from here: whether the roster draws the name on the card,
+        and whether picking one needs a second click to confirm. A frame plus
+        the text on it answers both — so collect them, and leave the choosing
+        to a later change that can be written against evidence.
+        """
+        if self.legend_mode != "probe" or self.overlay_detector is None:
+            return
+        if self._legend_probes >= self.legend_probe_max or now < self._legend_next_probe:
+            return
+        region = self.overlay_detector.regions.get("fullFrame")
+        if region is None:
+            return
+        self._legend_probes += 1
+        self._legend_next_probe = now + self.legend_probe_s
+        try:
+            tokens = self.overlay_detector.provider.read(frame, region)
+        except Exception as error:
+            self.recorder.log("LEGEND_PROBE_OCR_ERROR", error=str(error))
+            return
+        if not tokens:
+            return
+        if not self._legend_text_logged:
+            # The whole page once, not once per probe: this is the artifact
+            # that says which words a rule could key on at all.
+            self._legend_text_logged = True
+            self.recorder.log(
+                "LEGEND_SCREEN_TEXT",
+                probe=self._legend_probes,
+                tokens=[
+                    {
+                        "text": token.text,
+                        "confidence": round(token.confidence, 3),
+                        "roi": list(token.roi) if token.roi else None,
+                    }
+                    for token in tokens[:60]
+                ],
+            )
+        if not self.legend_preferred:
+            return
+        wanted = normalize_ocr_text(self.legend_preferred)
+        for token in tokens:
+            if wanted in token.normalized:
+                self.counters["legendNameSeen"] += 1
+                self.recorder.log(
+                    "LEGEND_NAME_FOUND",
+                    legend=self.legend_preferred,
+                    text=token.text,
+                    confidence=round(token.confidence, 3),
+                    roi=list(token.roi) if token.roi else None,
+                    probe=self._legend_probes,
+                )
+                self.notify(f"  ↳ 传奇选择页上读到了「{self.legend_preferred}」")
+                return
+
+    def _promote_stall(
+        self,
+        observation: StateObservation,
+        base_state: str | None,
+        now: float,
+    ) -> StateObservation:
+        """Name a screen that has gone unrecognised for minutes, so it can be acted on.
+
+        The promotion is deliberately narrow. It requires the *fast* detector
+        to be blank too, so a lobby waiting on its overlay scan is never
+        touched, and it only holds for a short window at a time: outside that
+        window the frame goes back to being an ordinary unknown that nothing
+        will click. What acts on `STALLED_UNKNOWN` is a capability like any
+        other, and it reads the button before pressing anything.
+        """
+        if observation.state is not None or base_state is not None:
+            self._last_known_state = observation.state or base_state
+            if self._stall_since is not None:
+                self.recorder.log(
+                    "STALL_RECOVERED",
+                    stalledForMs=round((now - self._stall_since) * 1000),
+                    rounds=self._stall_rounds,
+                    state=observation.state,
+                    reason=(
+                        f"停滞 {now - self._stall_since:.0f} 秒后恢复，"
+                        f"共 {self._stall_rounds} 轮处置"
+                    ),
+                )
+                self.notify(f"停滞解除：画面回到 {observation.state or base_state}。")
+                self._stall_since = None
+                self._stall_rounds = 0
+            return observation
+        if not self.stall_enabled or self._unknown_since is None:
+            return observation
+        grace = (
+            self.stall_queue_grace_s
+            if self._last_known_state == "LOBBY_QUEUEING"
+            else self.stall_grace_s
+        )
+        if now - self._unknown_since < grace:
+            return observation
+
+        if self._stall_since is None:
+            self._stall_since = now
+            self._stall_rounds = 0
+            self._stall_round_until = 0.0
+            self._stall_next_round_at = now
+            self.counters["stalls"] += 1
+            self.recorder.log(
+                "STALL_DETECTED",
+                unknownForMs=round((now - self._unknown_since) * 1000),
+                reason=f"画面连续 {now - self._unknown_since:.0f} 秒无法识别",
+            )
+            self.notify("停滞：画面已经连续无法识别，开始尝试恢复。")
+
+        if (
+            self.stall_give_up_s
+            and now - self._stall_since >= self.stall_give_up_s
+            and self.session_outcome is None
+        ):
+            # Ending loudly beats heartbeating `RUNNING` at a screen that has
+            # not changed in half an hour. The lease closes with a reason and
+            # the evidence stays in the run directory.
+            self.session_outcome = "STALLED"
+            self.recorder.log(
+                "STALL_UNRECOVERED",
+                stalledForMs=round((now - self._stall_since) * 1000),
+                rounds=self._stall_rounds,
+                reason=(
+                    f"停滞 {now - self._stall_since:.0f} 秒仍未恢复，"
+                    f"{self._stall_rounds} 轮处置全部无效"
+                ),
+            )
+            self.notify("停滞无法恢复：结束本次会话，画面已留证。")
+            return observation
+
+        if now >= self._stall_next_round_at:
+            self._stall_rounds += 1
+            self._stall_round_until = now + self.stall_window_s
+            self._stall_next_round_at = now + self.stall_retry_s
+            self.recorder.log("STALL_RECOVERY_ROUND", round=self._stall_rounds)
+        if now >= self._stall_round_until:
+            return observation
+        return StateObservation(STALLED_UNKNOWN, "stallWatchdog", "stall-watchdog", 1.0)
+
     def _snapshot(self, stage: str, frame: np.ndarray) -> None:
         if self.screenshot_count >= self.max_screenshots:
             return
@@ -908,7 +1281,20 @@ class CapabilityPilot:
         # this is the last point where refusing still costs nothing.
         self.guard.ensure_target_foreground()
         self.guard.ensure_not_aborted()
-        detail = self._execute(capability)
+        detail = self._execute(capability, frame)
+        if detail.get("skipped"):
+            # A text-driven action that found no text sent nothing, and the
+            # counters exist to answer "did this runner press anything".
+            self.counters[f"skipped:{capability.id}"] += 1
+            self.recorder.log(
+                "ACTION_SKIPPED",
+                capability=capability.id,
+                action=capability.action,
+                state=state,
+                attempt=decision.attempt,
+                detail=detail,
+            )
+            return
         self.actions_sent += 1
         self.counters[f"sent:{capability.id}"] += 1
         self._released = False
@@ -918,6 +1304,10 @@ class CapabilityPilot:
             action=capability.action,
             kind=capability.kind,
             actionClass=capability.action_class,
+            # The reporter drops periodic sends so a match does not fill the
+            # remote event stream with one row per melee. It reads this field,
+            # which until now only melee's own id supplied.
+            trigger=capability.trigger,
             state=state,
             attempt=decision.attempt,
             reason=decision.reason,
@@ -935,6 +1325,11 @@ class CapabilityPilot:
         self._release_all("FOREGROUND_LOST")
         self.dispatcher.reset_for_pause()
         self._reset_overlay_for_pause()
+        # Time spent behind another window is not time the runner was stuck,
+        # and whatever is on screen when it comes back deserves a fresh look.
+        self._unknown_since = None
+        self._stall_since = None
+        self._stall_rounds = 0
         self.recorder.log("FOREGROUND_PAUSED")
         self.notify("暂停：Apex 不在前台。")
 
@@ -983,7 +1378,6 @@ class CapabilityPilot:
         record["state"] = state
         record["baseState"] = base_state
         self._update_visit_tracking(base_state)
-        self._note_unknown(state, frame, now)
 
         self._settle_pending(state)
         self.dispatcher.note_state(state, now)

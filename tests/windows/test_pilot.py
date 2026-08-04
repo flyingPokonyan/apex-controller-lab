@@ -31,17 +31,27 @@ FRAME = np.zeros((1440, 2560, 3), dtype=np.uint8)
 
 
 class ScriptedProvider:
-    """Returns whatever the test says the screen currently reads."""
+    """Returns whatever the test says the screen currently reads.
+
+    A reading is either one `(text, confidence)` pair — the common case, with
+    no position, exactly like a region fallback read — or a list of
+    `(text, confidence, roi)` triples for the tests that care about where on
+    the screen a word was read.
+    """
 
     def __init__(self) -> None:
-        self.readings: dict[str, tuple[str, float]] = {}
+        self.readings: dict[str, object] = {}
         self.error: Exception | None = None
 
     def read(self, frame: np.ndarray, region) -> tuple[OcrToken, ...]:
         if self.error is not None:
             raise self.error
         item = self.readings.get(region.name)
-        return () if item is None else (OcrToken(item[0], item[1]),)
+        if item is None:
+            return ()
+        if isinstance(item, list):
+            return tuple(OcrToken(text, confidence, roi) for text, confidence, roi in item)
+        return (OcrToken(item[0], item[1]),)
 
 
 class FakeSender:
@@ -192,8 +202,10 @@ class PilotTest(unittest.TestCase):
         self.assertEqual(self.recorder.names().count("SCREENSHOT_SAVED"), 1)
 
         # A recognised screen ends the episode, so the next stall is captured.
+        # Deliberately not the queueing lobby: that one arms the legend-select
+        # sampler, and this test is about the generic unknown-screen evidence.
         self.now = 41.0
-        self.screen(lobbyPrimaryButton=("取消", 1.0))
+        self.screen(spectateTabs=("观战", 1.0))
         self.pilot.step()
         self.now = 60.0
         self.screen()
@@ -671,7 +683,218 @@ class PilotTest(unittest.TestCase):
                 fired += 1
         self.assertGreater(fired, 1)
         melee = self.payload["actions"]["meleeScanCode"]
-        self.assertTrue(all(call[0] == "tap" and call[1] == melee for call in self.sender.calls))
+        tactical = self.payload["actions"]["tacticalScanCode"]
+        # Nothing but the two periodic keys, and no clicking: a match screen
+        # has no coordinates anyone has measured.
+        self.assertTrue(
+            all(call[0] == "tap" and call[1] in {melee, tactical} for call in self.sender.calls)
+        )
+
+    def test_the_tactical_ability_fires_on_its_own_interval_beside_melee(self) -> None:
+        # Twenty seconds of match at one frame a second: melee every one to
+        # five, the tactical every nine to twelve. Ranking them by priority
+        # alone would have let the faster one starve the slower one out.
+        self.screen(squadCountAlive=("20 剩余小队数量", 0.98))
+        for step in range(20):
+            self.now = step * 1.0
+            self.pilot.step()
+        tactical = self.payload["actions"]["tacticalScanCode"]
+        sent = [call for call in self.sender.calls if call[1] == tactical]
+        self.assertGreaterEqual(len(sent), 2)
+
+    # ------------------------------------------------------------ 停滞看门狗
+
+    def stall(self, *, at: float = 130.0) -> dict[str, object]:
+        """Sit on an unrecognised screen long enough for the watchdog to name it."""
+        self.now = 0.0
+        self.pilot.step()
+        self.now = at
+        return self.pilot.step()
+
+    def test_a_screen_nothing_recognises_for_minutes_gets_its_button_pressed(self) -> None:
+        # 20260803-083835 returned to the lobby, met a screen no rule named
+        # nine seconds later, and heartbeated `RUNNING` for 75 minutes without
+        # sending one input. Two minutes is longer than any normal silence in
+        # the loop — the queue-to-dropship blackout measured 100 to 130s.
+        self.enable_overlays()
+        self.screen()
+        self.overlay_provider.readings = {
+            "fullFrame": [("返回", 0.95, (100, 1300, 200, 1340)), ("重试", 0.95, (1200, 900, 1360, 960))]
+        }
+
+        record = self.stall()
+        self.assertEqual(record["state"], "STALLED_UNKNOWN")
+        self.assertIn("STALL_DETECTED", self.recorder.names())
+        # 重试 is declared before 返回, so a disconnect box retries rather than
+        # backing out — and the click lands where the word was actually read.
+        self.assertIn(("click", 1280, 930), self.sender.calls)
+
+    def test_the_blackout_after_pressing_ready_is_not_treated_as_a_stall(self) -> None:
+        # Queueing, legend select and loading name nothing, and that stretch
+        # measured 72 to 116 seconds on 20260803. Pressing ESC in there could
+        # cancel the queue, so it gets its own much longer grace.
+        self.enable_overlays()
+        self.now = 0.0
+        self.screen(lobbyPrimaryButton=("取消", 1.0))
+        self.pilot.step()
+        self.screen()
+        self.overlay_provider.readings = {}
+        self.now = 1.0
+        self.pilot.step()
+
+        # Well past the ordinary two minute grace, which is what would have
+        # fired here without the queue-specific one.
+        self.now = 200.0
+        record = self.pilot.step()
+        self.assertIsNone(record["state"])
+        self.assertNotIn("STALL_DETECTED", self.recorder.names())
+        self.assertEqual(self.sender.calls, [])
+
+        # It is a longer grace, not an exemption.
+        self.now = 500.0
+        record = self.pilot.step()
+        self.assertEqual(record["state"], "STALLED_UNKNOWN")
+
+    def test_the_watchdog_leaves_a_screen_the_fast_detector_still_knows(self) -> None:
+        # Overlay OCR failing over a lobby leaves the effective state blank for
+        # as long as the failure lasts. That is a screen the runner knows and
+        # is deliberately refusing to click, not a screen nobody can name.
+        self.enable_overlays()
+        self.screen(lobbyPrimaryButton=("准备", 1.0), lobbyModeName=("机器人", 1.0))
+        self.overlay_provider.error = RuntimeError("OCR 引擎不可用")
+
+        for step in range(0, 600, 30):
+            self.now = float(step)
+            record = self.pilot.step()
+
+        self.assertIsNone(record["state"])
+        self.assertEqual(record["baseState"], "LOBBY_READY_TARGET")
+        self.assertNotIn("STALL_DETECTED", self.recorder.names())
+        self.assertEqual(self.sender.calls, [])
+
+    def test_recovery_falls_back_to_escape_when_no_button_can_be_read(self) -> None:
+        self.enable_overlays()
+        self.screen()
+        self.overlay_provider.readings = {}
+
+        self.stall()
+        self.assertEqual(self.sender.calls, [("tap", 1, 80)])
+
+    def test_a_word_read_without_a_position_is_never_clicked(self) -> None:
+        # The full-frame reader degrades to per-region OCR when the engine
+        # returns no boxes. Knowing 继续 is somewhere on screen is not knowing
+        # where to click, and the middle of the region is a guess.
+        self.enable_overlays()
+        self.screen()
+        self.overlay_provider.readings = {"fullFrame": ("继续", 0.99)}
+
+        self.stall()
+        self.assertEqual(self.sender.calls, [("tap", 1, 80)])
+        self.assertEqual(self.pilot.counters["clickTextNoPosition"], 1)
+
+    def test_the_watchdog_stands_down_between_rounds(self) -> None:
+        self.enable_overlays()
+        self.screen()
+        self.overlay_provider.readings = {}
+
+        self.stall()
+        # The recovery window is 20s wide; outside it the frame is an ordinary
+        # unknown again and nothing in the runner may touch it.
+        self.now = 160.0
+        record = self.pilot.step()
+        self.assertIsNone(record["state"])
+        self.assertEqual(record["decision"]["reason"], "NO_STATE")
+
+    def test_a_stall_that_never_clears_ends_the_session_instead_of_pretending(self) -> None:
+        self.enable_overlays()
+        self.screen()
+        self.overlay_provider.readings = {}
+
+        self.stall()
+        for step in range(130, 2100, 30):
+            self.now = float(step)
+            self.pilot.step()
+
+        self.assertEqual(self.pilot.session_outcome, "STALLED")
+        self.assertIn("STALL_UNRECOVERED", self.recorder.names())
+
+    def test_a_stall_that_clears_is_recorded_as_recovered(self) -> None:
+        self.enable_overlays()
+        self.screen()
+        self.overlay_provider.readings = {}
+
+        self.stall()
+        self.now = 140.0
+        self.screen(lobbyPrimaryButton=("准备", 1.0), lobbyModeName=("机器人", 1.0))
+        self.pilot.step()
+
+        self.assertIn("STALL_RECOVERED", self.recorder.names())
+        self.assertIsNone(self.pilot._stall_since)
+
+    # -------------------------------------------------------- 传奇选择取证
+
+    def stages(self) -> list[str]:
+        return [
+            str(payload["stage"])
+            for event, payload in self.recorder.events
+            if event == "SCREENSHOT_SAVED"
+        ]
+
+    def test_the_blackout_after_queueing_is_kept_frame_by_frame(self) -> None:
+        # Legend select lives in there and has never been photographed: the
+        # generic sampler keeps a frame every 20s and skips near-identical
+        # ones, which is what a page with only a countdown ticking looks like.
+        self.now = 0.0
+        self.screen(lobbyPrimaryButton=("取消", 1.0))
+        self.pilot.step()
+        for step in (1.0, 6.0, 11.0):
+            self.now = step
+            self.screen()
+            self.pilot.step()
+
+        self.assertEqual(self.stages().count("legend-select"), 3)
+
+    def test_the_blackout_is_read_for_the_chosen_legend_but_never_clicked(self) -> None:
+        # Whether 命脉 can be picked by name depends on the roster drawing the
+        # name on the card. The probe answers that from a real match without
+        # anyone reproducing the screen — and without sending an input at a
+        # page nobody has measured.
+        self.enable_overlays()
+        self.now = 0.0
+        self.screen(lobbyPrimaryButton=("取消", 1.0))
+        self.pilot.step()
+        self.screen()
+        self.overlay_provider.readings = {
+            "fullFrame": [("命脉", 0.97, (820, 1180, 900, 1220)), ("锁定", 0.95, (1240, 1300, 1330, 1340))]
+        }
+        self.now = 1.0
+        self.pilot.step()
+
+        found = next(p for e, p in self.recorder.events if e == "LEGEND_NAME_FOUND")
+        self.assertEqual(found["legend"], "命脉")
+        self.assertEqual(found["roi"], [820, 1180, 900, 1220])
+        # The whole page's text is kept once, so the next change can be
+        # written against what is actually on it.
+        page = next(p for e, p in self.recorder.events if e == "LEGEND_SCREEN_TEXT")
+        self.assertEqual([token["text"] for token in page["tokens"]], ["命脉", "锁定"])
+        self.assertEqual(self.sender.calls, [])
+
+    def test_only_the_first_matches_of_a_session_keep_that_blackout(self) -> None:
+        # One page needs measuring once. Sampling every match for a whole night
+        # would spend the screenshot budget on the same screen.
+        for round_number in range(3):
+            base = round_number * 100.0
+            self.now = base
+            self.screen(lobbyPrimaryButton=("取消", 1.0))
+            self.pilot.step()
+            self.now = base + 1.0
+            self.screen()
+            self.pilot.step()
+            self.now = base + 10.0
+            self.screen(squadCountAlive=("20 剩余小队数量", 0.98))
+            self.pilot.step()
+
+        self.assertEqual(self.stages().count("legend-select"), 2)
 
     def test_a_run_always_releases_input_when_it_ends(self) -> None:
         self.screen(squadCountAlive=("20 剩余小队数量", 0.98))

@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 import json
 from pathlib import Path
 from typing import Any
@@ -44,6 +44,11 @@ class RunnerConfig:
     game_states: dict[str, Any]
     lobby_progress: dict[str, Any]
     capability_set: str | None
+    # Both default to empty because every consumer already treats a missing
+    # block as "use the built-in numbers"; a profile that says nothing about
+    # stalls still gets the watchdog.
+    stall: dict[str, Any] = field(default_factory=dict)
+    legend_select: dict[str, Any] = field(default_factory=dict)
 
 
 def _repository_path(value: str) -> Path:
@@ -96,5 +101,7 @@ def load_config(path: Path | str = DEFAULT_CONFIG_PATH) -> RunnerConfig:
         control_api=dict(payload.get("controlApi", {})),
         game_states=dict(payload.get("gameStates", {})),
         lobby_progress=dict(payload.get("lobbyProgress", {})),
+        stall=dict(payload.get("stall", {})),
+        legend_select=dict(payload.get("legendSelect", {})),
         capability_set=payload.get("capabilitySet"),
     )

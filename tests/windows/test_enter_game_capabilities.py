@@ -22,6 +22,7 @@ from apex_automation.ocr_obstacles import (
     parse_regions,
 )
 from apex_automation.ocr_states import OcrStateDetector
+from apex_automation.pilot import producible_states
 
 
 CONFIG = REPOSITORY_ROOT / "windows" / "config" / "enter-game.zh-CN.json"
@@ -100,8 +101,16 @@ class EnterGameCapabilityTest(unittest.TestCase):
                 self.assertIn(capability.action, actions)
 
     def test_every_state_and_postcondition_is_one_the_detector_can_produce(self) -> None:
-        known = {rule.state for rule in OcrStateDetector.from_path(object(), STATES).rules}
-        known.update(OcrStateDetector.from_path(object(), OVERLAYS).states)
+        # Asks the same function the launcher asks, so the shipped capability
+        # set cannot pass here and then be rejected at startup on the target
+        # machine. That includes `STALLED_UNKNOWN`, which no dictionary
+        # produces because it is not a page: the watchdog raises it when
+        # nothing has matched a frame for minutes.
+        known = producible_states(
+            OcrStateDetector.from_path(object(), STATES),
+            OcrStateDetector.from_path(object(), OVERLAYS),
+        )
+        known.update(rule.state for rule in OcrStateDetector.from_path(object(), STATES).rules)
         known.update(OcrObstacleDetector.from_path(object(), OBSTACLES).states)
         for capability in self.capabilities.capabilities:
             for state in (*capability.states, *capability.allowed_next_states):
@@ -374,8 +383,12 @@ class EnterGameCapabilityTest(unittest.TestCase):
         dispatcher = self._dispatcher()
         first = dispatcher.decide("IN_MATCH_ALIVE", 1, 0.0)
         self.assertEqual(first.capability.action, "meleeScanCode")
+        # The tactical ability shares this screen and keeps its own ten second
+        # interval, so a decision taken while melee cools down belongs to it.
+        second = dispatcher.decide("IN_MATCH_ALIVE", 1, 0.1)
+        self.assertEqual(second.capability.action, "tacticalScanCode")
         self.assertEqual(dispatcher.decide("IN_MATCH_ALIVE", 1, 1.0).reason, "PERIODIC_COOLDOWN")
-        self.assertEqual(dispatcher.decide("IN_MATCH_ALIVE", 1, 4.0).kind, "fire")
+        self.assertEqual(dispatcher.decide("IN_MATCH_ALIVE", 1, 6.0).kind, "fire")
 
         for state in ("SPECTATING", "POST_MATCH_SUMMARY", "LOBBY_READY_TARGET"):
             with self.subTest(state=state):

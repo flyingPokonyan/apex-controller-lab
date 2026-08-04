@@ -43,6 +43,7 @@ from .lease_keeper import LeaseKeeper
 from .observer import ObservationSession
 from .ocr_obstacles import FullFrameOcrProvider, OcrObstacleDetector, RapidOcrProvider
 from .ocr_states import OcrStateDetector
+from .pilot import producible_states
 from .play_session import PlaySessionRunner, SessionIdentity
 from .progression_policy import ContinuePlayPolicy
 from .recorder import RunRecorder
@@ -436,9 +437,7 @@ def _build_play_session_runner(
         )
     )
 
-    known_states = set(state_detector.states)
-    if overlay_detector is not None:
-        known_states.update(overlay_detector.states)
+    known_states = producible_states(state_detector, overlay_detector)
     unknown = {
         state
         for capability in capabilities.capabilities

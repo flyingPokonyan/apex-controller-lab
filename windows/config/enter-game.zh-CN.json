@@ -23,10 +23,18 @@
       {"type": "tapKey", "scanCode": 57, "durationMs": 2000}
     ],
     "meleeScanCode": 47,
+    "tacticalScanCode": 16,
     "detachScanCode": 29,
-    "launchScanCode": 18
+    "launchScanCode": 18,
+    "stallRecovery": {
+      "region": "fullFrame",
+      "any": ["继续", "重试", "确定", "确认", "接受", "返回大厅", "好的", "关闭", "返回"],
+      "fallbackScanCode": 1,
+      "minConfidence": 0.7,
+      "_note": "词按优先级排列，先匹配到的先点：一张断线弹窗上同时有「重试」和「返回」时，要的是重试。只点 OCR 真的读出来、并且引擎给了坐标的那一块；引擎没给坐标（逐区域降级）就不点，退回 ESC。"
+    }
   },
-  "_keyBindings": "扫描码写死在这里，等于假定了游戏里的键位。这些假定必须和目标账号实际绑的键一致，否则动作照发、游戏没反应，而画面上和「输入没送到」长得一模一样——2026-07-30 就栽在这上面：配置写 V(47)，当时账号绑在 N 上，白查了一轮反作弊。当前假定：1=ESC 安全返回，28=ENTER 安全继续，15=TAB 返回大厅，57=SPACE 确认返回大厅，47=V 近战，29=LCTRL 单独发射，18=E 发射。改键位的话这里也要跟着改；windows/probe-input.cmd 可以逐个验。另外 Apex 里有相当一批提示是长按而不是点按，那种要靠能力自己的 holdMs 或动作序列内的 durationMs 声明，默认的 keyTapMs 太短。",
+  "_keyBindings": "扫描码写死在这里，等于假定了游戏里的键位。这些假定必须和目标账号实际绑的键一致，否则动作照发、游戏没反应，而画面上和「输入没送到」长得一模一样——2026-07-30 就栽在这上面：配置写 V(47)，当时账号绑在 N 上，白查了一轮反作弊。当前假定：1=ESC 安全返回，28=ENTER 安全继续，15=TAB 返回大厅，57=SPACE 确认返回大厅，47=V 近战，16=Q 战术技能，29=LCTRL 单独发射，18=E 发射。改键位的话这里也要跟着改；windows/probe-input.cmd 可以逐个验。另外 Apex 里有相当一批提示是长按而不是点按，那种要靠能力自己的 holdMs 或动作序列内的 durationMs 声明，默认的 keyTapMs 太短。",
   "capabilities": [
     {
       "id": "dismiss-level-up",
@@ -283,6 +291,29 @@
       "minIntervalMs": 1000,
       "maxIntervalMs": 5000,
       "_note": "画面不变时按间隔重复，没有后置画面可验，所以只能是 idempotent。闸门是 IN_MATCH_ALIVE：观战和结算页都不会命中它，原来的 LANDED 模板实测余量只有 0.002 不能当闸门。"
+    },
+    {
+      "id": "in-match-tactical",
+      "priority": 9,
+      "states": ["IN_MATCH_ALIVE"],
+      "action": "tacticalScanCode",
+      "kind": "key",
+      "actionClass": "idempotent",
+      "trigger": "periodic",
+      "minIntervalMs": 9000,
+      "maxIntervalMs": 12000,
+      "_note": "Q 战术技能，落地后每十秒左右放一次。和近战同一个闸门、同一种分级：没有后置画面可验，冷却好了就生效、没好就什么都不发生，重复按无害。间隔比技能冷却宽，多按的那几次是空的。优先级比近战低一档，只是让两条周期能力在同一帧里有稳定的先后，各自的间隔互不影响。真正决定它有没有用的是选了谁——目前进对局的英雄仍由游戏自动分配。"
+    },
+    {
+      "id": "stall-recover",
+      "priority": 5,
+      "states": ["STALLED_UNKNOWN"],
+      "action": "stallRecovery",
+      "kind": "clickText",
+      "actionClass": "idempotent",
+      "confirmMs": 4000,
+      "maxAttempts": 3,
+      "_note": "只挂在看门狗合成的画面上：快速识别和覆盖层 OCR 都连续两分钟以上认不出这一帧，才会有 STALLED_UNKNOWN。20260803-083835 就是这样丢了 75 分钟——回到大厅九秒后画面变成没有任何规则认识的东西，然后心跳报了七十五分钟的 RUNNING，一次输入都没发。它先全屏 OCR 找页面自己写着的按钮（继续、重试之类）并点在读到那几个字的位置上，找不到才退回 ESC；引擎没返回文字坐标时不点，同样退回 ESC。一轮最多三次，隔三分钟再来一轮。"
     }
   ]
 }

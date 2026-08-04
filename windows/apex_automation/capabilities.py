@@ -13,7 +13,7 @@ Trigger = Literal["onState", "periodic"]
 
 ACTION_CLASSES: frozenset[str] = frozenset({"idempotent", "toggle", "commit"})
 TRIGGERS: frozenset[str] = frozenset({"onState", "periodic"})
-ACTION_KINDS: frozenset[str] = frozenset({"click", "key", "sequence"})
+ACTION_KINDS: frozenset[str] = frozenset({"click", "key", "sequence", "clickText"})
 
 
 @dataclass(frozen=True)
@@ -327,8 +327,16 @@ class CapabilityDispatcher:
         # means, and they carry no postcondition to wait for.
         if on_state and observation_version not in self.handled_observation_versions:
             return self._start(on_state[0], state, observation_version, now)
+        for capability in periodic:
+            # Each periodic behaviour keeps its own interval, so the highest
+            # priority one being mid-cooldown must not silence the others.
+            # Melee repeats every few seconds and a tactical ability every ten;
+            # ranking them would mean only the faster one ever fired.
+            decision = self._periodic_decision(capability, now)
+            if decision.kind == "fire":
+                return decision
         if periodic:
-            return self._periodic_decision(periodic[0], now)
+            return Decision("wait", reason="PERIODIC_COOLDOWN", capability=periodic[0])
         return Decision("wait", reason="ALREADY_HANDLED")
 
     def _start(
