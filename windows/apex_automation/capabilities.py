@@ -256,8 +256,14 @@ class CapabilityDispatcher:
         self._current_state = state
         self._current_state_since = now
         # A delay is measured per visit: leaving the dropship and boarding the
-        # next one starts the wait again from the top.
-        self.delay_deadlines.clear()
+        # next one starts the wait again from the top. A frame nobody could
+        # name is not evidence of having left, though — over a 35 second wait
+        # a single missed OCR read would otherwise restart the clock, and
+        # enough of them would ride the flight to its forced drop.
+        if state is not None:
+            for capability in self.capabilities.capabilities:
+                if state not in capability.states:
+                    self.delay_deadlines.pop(capability.id, None)
         if previous is not None:
             # Leaving a screen ends that visit: a later return gets a fresh
             # budget, which is what makes "handle whatever shows up" workable.

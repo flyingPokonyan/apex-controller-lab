@@ -333,6 +333,27 @@ class DelayedActionTest(unittest.TestCase):
         self.assertEqual(dispatcher.decide("DROPSHIP", 2, 610.0).reason, "ACTION_DELAYED")
         self.assertEqual(dispatcher.decide("DROPSHIP", 2, 636.0).kind, "fire")
 
+    def test_a_frame_nobody_could_name_does_not_restart_the_wait(self) -> None:
+        # Over 35 seconds of dropship the prompt will fail to read at least
+        # once. Treating that as having left the screen would restart the
+        # clock, and enough restarts would ride the flight to its forced drop
+        # at the far edge — the exact landing this change exists to avoid.
+        dispatcher = self.dispatcher()
+        dispatcher.note_state("DROPSHIP", 0.0)
+        dispatcher.decide("DROPSHIP", 1, 1.0)
+        dispatcher.note_state(None, 20.0)
+        dispatcher.note_state("DROPSHIP", 20.3)
+        self.assertEqual(dispatcher.decide("DROPSHIP", 2, 36.0).kind, "fire")
+
+    def test_actually_leaving_the_screen_does_restart_the_wait(self) -> None:
+        dispatcher = self.dispatcher()
+        dispatcher.note_state("DROPSHIP", 0.0)
+        dispatcher.decide("DROPSHIP", 1, 1.0)
+        dispatcher.note_state("IN_MATCH", 20.0)
+        dispatcher.note_state("DROPSHIP", 30.0)
+        self.assertEqual(dispatcher.decide("DROPSHIP", 2, 50.0).reason, "ACTION_DELAYED")
+        self.assertEqual(dispatcher.decide("DROPSHIP", 2, 66.0).kind, "fire")
+
     def test_the_jitter_is_rolled_once_a_visit_rather_than_every_frame(self) -> None:
         # Re-rolling per frame would average the jitter away and put every
         # landing back on one spot, which is the whole reason it is here.
