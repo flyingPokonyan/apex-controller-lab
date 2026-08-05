@@ -24,6 +24,7 @@ from .ea_app import (
     EaAppAutomationError,
     EaApexStartFailed,
     EaCaptchaRequired,
+    EaCaptureUnavailable,
     EaIdentityFact,
     EaIdentityMismatch,
     EaLoginRejected,
@@ -432,9 +433,22 @@ class WindowsEaHybridDriver:
         grab = getattr(self.capture_source, "grab", None)
         if not callable(grab):
             raise EaAppAutomationError("EA App 驱动缺少截图源")
-        frame = grab()
+        try:
+            frame = grab()
+        except EaAppAutomationError:
+            raise
+        except Exception as error:
+            # A capture that dies here used to leave the orchestrator's
+            # catch-all to end the process, which strands the lease until it
+            # expires — the account is unusable for the whole window and
+            # nothing says why. It is the same kind of failure as a window that
+            # went away: worth another look, and worth a clean close if it
+            # keeps failing.
+            raise EaCaptureUnavailable(
+                f"读不到画面：{type(error).__name__}：{error}"
+            ) from error
         if not isinstance(frame, np.ndarray) or frame.size == 0:
-            raise EaAppAutomationError("EA App 截图为空")
+            raise EaCaptureUnavailable("EA App 截图为空")
         return frame
 
     def _clip_rect(self, hwnd: int, frame: np.ndarray) -> tuple[int, int, int, int]:

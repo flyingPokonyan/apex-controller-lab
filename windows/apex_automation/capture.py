@@ -223,6 +223,7 @@ class DxcamFrameSource:
         sleep: Callable[[float], None] = time.sleep,
         notify: Callable[[str], None] = print,
         recovery_timeout: float = 20.0,
+        rebuild_delays: tuple[float, ...] = (1.0, 2.0, 4.0, 8.0, 15.0),
     ):
         self.backend = backend
         self.output_index = output_index
@@ -230,6 +231,7 @@ class DxcamFrameSource:
         self.sleep = sleep
         self.notify = notify
         self.recovery_timeout = recovery_timeout
+        self.rebuild_delays = rebuild_delays
         self._camera: Any = None
         self._started = False
         self._camera_lost = False
@@ -330,8 +332,35 @@ class DxcamFrameSource:
                 self._mark_released(camera)
         self._camera_lost = False
         self._recovery_gave_up = False
-        self.sleep(1.0)
         self._camera = self._create()
+
+    def _rebuild_until_a_frame_arrives(self) -> np.ndarray | None:
+        """Keep rebuilding while the desktop is still moving.
+
+        A display coming back — a mode change finishing, a driver resetting,
+        Windows re-applying a configuration — can take longer than one attempt,
+        and until it does there is no output to build a camera on. Giving up on
+        the first failure turns a transition the machine would have survived
+        into a dead run and a lease nobody released.
+        """
+
+        self.notify("捕获失效，正在重建截图源…")
+        self.notify(describe_displays())
+        last_error: Exception | None = None
+        for delay in self.rebuild_delays:
+            self.sleep(delay)
+            try:
+                self._rebuild()
+            except Exception as error:
+                last_error = error
+                self.notify(f"重建失败：{type(error).__name__}：{error}")
+                continue
+            frame = self._safe_grab()
+            if frame is not None:
+                return frame
+        if last_error is not None:
+            raise last_error
+        return None
 
     def grab(self) -> np.ndarray:
         if not self._started:
@@ -345,10 +374,7 @@ class DxcamFrameSource:
             self.sleep(1.0)
             frame = self._safe_grab()
         if frame is None:
-            self.notify("捕获失效，正在重建截图源…")
-            self.notify(describe_displays())
-            self._rebuild()
-            frame = self._safe_grab()
+            frame = self._rebuild_until_a_frame_arrives()
         if frame is None:
             raise RuntimeError("DXcam 没有返回画面帧")
         return frame.copy()

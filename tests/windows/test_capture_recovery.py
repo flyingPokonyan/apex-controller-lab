@@ -46,6 +46,7 @@ class CaptureRecoveryTest(unittest.TestCase):
                 camera_factory=factory,
                 sleep=lambda _: None,
                 notify=messages.append,
+                rebuild_delays=(0.0,),
             ),
             messages,
         )
@@ -173,6 +174,46 @@ class CaptureRecoveryTest(unittest.TestCase):
     def test_grabbing_before_start_is_refused(self) -> None:
         source, _ = self.source(FakeCamera([]))
         with self.assertRaisesRegex(RuntimeError, "尚未启动"):
+            source.grab()
+
+    def test_a_rebuild_keeps_trying_while_the_display_is_still_moving(self) -> None:
+        # No output exists to build on until the mode change finishes, and how
+        # long that takes is the driver's business, not ours.
+        frame = np.ones((2, 2, 4), dtype=np.uint8)
+        rounds: list[int] = []
+
+        def factory(*, output_idx: int, **_: object) -> FakeCamera:
+            if output_idx != 0:
+                raise IndexError("no such output")
+            rounds.append(len(rounds))
+            if len(rounds) <= 2:
+                raise OSError("display not ready")
+            return FakeCamera([frame])
+
+        source = DxcamFrameSource(
+            camera_factory=factory,
+            sleep=lambda _: None,
+            notify=lambda _: None,
+            rebuild_delays=(0.0, 0.0, 0.0),
+        )
+        source._camera = FakeCamera([None, None])
+        source._started = True
+        self.assertTrue(np.array_equal(source.grab(), frame))
+        self.assertEqual(len(rounds), 3)
+
+    def test_a_rebuild_that_never_comes_back_reports_the_last_failure(self) -> None:
+        def factory(**_: object) -> FakeCamera:
+            raise OSError("display not ready")
+
+        source = DxcamFrameSource(
+            camera_factory=factory,
+            sleep=lambda _: None,
+            notify=lambda _: None,
+            rebuild_delays=(0.0, 0.0),
+        )
+        source._camera = FakeCamera([None, None])
+        source._started = True
+        with self.assertRaises(OSError):
             source.grab()
 
     def test_the_probe_looks_past_more_than_one_missing_output(self) -> None:

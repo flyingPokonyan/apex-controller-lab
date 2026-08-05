@@ -12,6 +12,16 @@ class EaAppAutomationError(RuntimeError):
     reason_code = "EA_UI_UNKNOWN"
 
 
+class EaCaptureUnavailable(EaAppAutomationError):
+    """The screen could not be read at all, so no page can be named.
+
+    Distinct from an unknown page: nothing about EA is wrong, and the evidence
+    worth keeping is what the desktop was doing, not what EA was showing.
+    """
+
+    reason_code = "CAPTURE_UNAVAILABLE"
+
+
 class EaCaptchaRequired(EaAppAutomationError):
     reason_code = "CAPTCHA"
 
