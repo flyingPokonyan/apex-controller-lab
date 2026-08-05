@@ -80,7 +80,17 @@ OTP_TERMS = (
     "验证码",
 )
 
-OTP_FIELD_TERMS = ("enter6digitcode", "digitcode", "code", "验证码")
+# Only field-specific copy belongs here. A bare "code" also appears in the
+# heading and explanatory paragraph; clicking either one leaves the CEF page
+# focused, so the following Ctrl+A selects the whole document instead of the
+# input. Falling back to the measured field ratio is safer when OCR misses the
+# placeholder.
+OTP_FIELD_TERMS = (
+    "enter6digitcode",
+    "digitcode",
+    "输入6位验证码",
+    "请输入验证码",
+)
 
 # The code page reached through the email option. A generated TOTP will never
 # match it, so recognising it is the difference between a clear failure and
@@ -152,7 +162,9 @@ SIGN_OUT_CONFIRM_TERMS = ("signout", "logout", "confirm", "yes", "确认", "确�
 # Folding both sides of a comparison keeps a real account id from being
 # rejected, and stays far away from the fuzzy matching that could accept a
 # different account.
-_IDENTITY_FOLD = str.maketrans({"0": "o", "1": "l", "5": "s", "8": "b"})
+_IDENTITY_FOLD = str.maketrans(
+    {"0": "o", "1": "l", "i": "l", "5": "s", "8": "b"}
+)
 
 _IDENTITY_CANDIDATE = re.compile(r"[a-z0-9]{8,20}")
 

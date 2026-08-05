@@ -562,6 +562,10 @@ class WindowsEaHybridDriver:
         if not candidates:
             return None
         confidence, account_id = max(candidates)
+        if self.evidence is not None:
+            # The badge is operational evidence, but the stable EA ID should
+            # not remain readable in every later diagnostic screenshot.
+            self.evidence.protect(account_id)
         return EaIdentityFact(
             ea_account_id=account_id,
             source=f"ea-window-ocr:{confidence:.3f}",
@@ -589,6 +593,8 @@ class WindowsEaHybridDriver:
                 for candidate in identity_candidates([text])
             )
             if found:
+                if self.evidence is not None:
+                    self.evidence.protect(expected)
                 return EaIdentityFact(
                     ea_account_id=expected,
                     source=f"ea-window-ocr:{token.confidence:.3f}",
