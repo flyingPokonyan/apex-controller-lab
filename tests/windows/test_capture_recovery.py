@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from pathlib import Path
 from types import ModuleType
+from unittest.mock import patch
+import os
 import sys
 import unittest
 
@@ -246,6 +248,38 @@ class CaptureRecoveryTest(unittest.TestCase):
         source, _ = self.source(broken, FakeCamera([frame]))
         with source as capture:
             capture.grab()
+
+
+class BackendChoiceTest(unittest.TestCase):
+    def settle(self, backend: str, *, winrt_installed: bool) -> tuple[str, list[str]]:
+        messages: list[str] = []
+        source = DxcamFrameSource(backend=backend, notify=messages.append)
+        spec = object() if winrt_installed else None
+        with patch.object(capture_module.importlib.util, "find_spec", return_value=spec):
+            source._settle_backend()
+        return source.backend, messages
+
+    def test_a_missing_winrt_install_falls_back_and_says_so(self) -> None:
+        # Refusing to start is worse than the older backend, but silently
+        # running the backend that was just ruled out is worse than both.
+        backend, messages = self.settle("winrt", winrt_installed=False)
+        self.assertEqual(backend, "dxgi")
+        self.assertTrue(any("winrt" in message for message in messages))
+        self.assertTrue(any("pip install" in message for message in messages))
+
+    def test_winrt_keeps_the_cursor_and_border_out_of_the_frame(self) -> None:
+        for name in ("DXCAM_WINRT_BORDER_REQUIRED", "DXCAM_WINRT_CURSOR_CAPTURE"):
+            os.environ.pop(name, None)
+            self.addCleanup(os.environ.pop, name, None)
+        backend, _ = self.settle("winrt", winrt_installed=True)
+        self.assertEqual(backend, "winrt")
+        self.assertEqual(os.environ["DXCAM_WINRT_BORDER_REQUIRED"], "0")
+        self.assertEqual(os.environ["DXCAM_WINRT_CURSOR_CAPTURE"], "0")
+
+    def test_dxgi_is_left_alone(self) -> None:
+        backend, messages = self.settle("dxgi", winrt_installed=False)
+        self.assertEqual(backend, "dxgi")
+        self.assertEqual(messages, [])
 
 
 class RecoveryDeadlineTest(unittest.TestCase):

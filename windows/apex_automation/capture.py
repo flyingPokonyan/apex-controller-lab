@@ -1,9 +1,13 @@
 from __future__ import annotations
 
 import ctypes
+import importlib.util
 import logging
+import os
 import sys
 import time
+from datetime import datetime, timezone
+from pathlib import Path
 from typing import Any, Callable
 
 import numpy as np
@@ -47,6 +51,28 @@ def _ignore_known_dxcam_release_warning(unraisable: sys.UnraisableHookArgs) -> N
     ):
         return
     _original_unraisable_hook(unraisable)
+
+
+def report(message: str) -> None:
+    """Say it on the console and keep a copy on disk.
+
+    Everything capture knows used to live only in the console, and the console
+    lives in a window an operator closes. Sign-in has no run directory to fall
+    back on either, so a cycle that ends there leaves nothing behind at all —
+    and what capture was doing when a run stopped is precisely the thing that
+    cannot be reconstructed afterwards.
+    """
+
+    print(message)
+    try:
+        path = Path(__file__).resolve().parents[1] / "runs" / "capture.log"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        stamp = datetime.now(timezone.utc).isoformat(timespec="seconds")
+        with path.open("a", encoding="utf-8") as handle:
+            handle.write(f"{stamp} {message}\n")
+    except Exception:
+        # Diagnostics must never be the reason a run dies.
+        pass
 
 
 class _NotifyHandler(logging.Handler):
@@ -221,7 +247,7 @@ class DxcamFrameSource:
         *,
         camera_factory: Callable[..., Any] | None = None,
         sleep: Callable[[float], None] = time.sleep,
-        notify: Callable[[str], None] = print,
+        notify: Callable[[str], None] = report,
         recovery_timeout: float = 20.0,
         rebuild_delays: tuple[float, ...] = (1.0, 2.0, 4.0, 8.0, 15.0),
     ):
@@ -244,9 +270,38 @@ class DxcamFrameSource:
             import dxcam
         except ImportError as error:
             raise RuntimeError("缺少 dxcam，请先运行 windows\\setup.ps1") from error
+        self._settle_backend()
         _route_dxcam_logs(self.notify)
         _bound_dxcam_recovery(self.recovery_timeout, self.notify)
         return dxcam.create
+
+    def _settle_backend(self) -> None:
+        """Choose the backend this machine can actually run.
+
+        Windows.Graphics.Capture rides out the display transitions that end a
+        desktop duplication — a mode change, a fullscreen switch, a
+        configuration Windows re-applies — but it needs packages the DXGI path
+        does not. A runner that refuses to start is worse than one on the older
+        backend, so a missing install falls back and says so.
+        """
+
+        if self.backend != "winrt":
+            return
+        try:
+            available = importlib.util.find_spec("winrt.windows.graphics.capture")
+        except Exception:
+            available = None
+        if available is None:
+            self.notify(
+                "配置要求 winrt 捕获后端，但依赖没装，先用 dxgi。"
+                '装法：windows\\.venv\\Scripts\\python -m pip install "dxcam[winrt]==0.3.0"'
+            )
+            self.backend = "dxgi"
+            return
+        # WGC composites the cursor and draws a capture border by default, and
+        # both land inside the frames the regions are matched against.
+        os.environ.setdefault("DXCAM_WINRT_BORDER_REQUIRED", "0")
+        os.environ.setdefault("DXCAM_WINRT_CURSOR_CAPTURE", "0")
 
     def _create_at(self, output_index: int) -> Any:
         return self._factory()(

@@ -130,6 +130,21 @@ WHERE r.client_run_id = '<runId>' GROUP BY type;
 - **dxcam 的日志现在接进控制台**（`[dxcam] …`）。它恢复过程中说的话全是 `INFO`，
   本项目又没配过 logging，所以以前只有开场那两行 warning 能看见，
   恢复成功还是卡死完全分不出来。捕获出问题时还会打一行当前显示器列表。
+- **捕获的这些话同时落盘到 `windows\runs\capture.log`**。控制台是会被关掉的窗口，
+  而 EA 登录阶段还没有 run 目录可以留证 —— 出事之后最没法复原的恰恰就是
+  "捕获当时在干什么"。查故障先看这个文件，不要依赖控制台还开着。
+- **换捕获后端是逃离桌面复制的正路**。桌面复制的语义就是"任何模式变化 = ACCESS_LOST"，
+  这是 API 本身的性质，不是配置能调好的。`captureBackend` 改成 `winrt` 就切到
+  Windows.Graphics.Capture（OBS 那类工具做游戏捕获用的就是它），它能扛住模式切换、
+  全屏切换和显示配置重下发。代价是要额外装一组包：
+
+  ```
+  windows\.venv\Scripts\python -m pip install "dxcam[winrt]==0.3.0"
+  ```
+
+  没装就会自动退回 dxgi 并在日志里说明，不会因此起不来。切过去时会自动关掉 WGC 的
+  捕获边框和鼠标合成（`DXCAM_WINRT_BORDER_REQUIRED=0`、`DXCAM_WINRT_CURSOR_CAPTURE=0`），
+  否则这两样会进画面、干扰识别。
 - **锁屏、屏保、睡眠会停但不会崩** —— 前台守卫发现前台不是 Apex，
   `_pause_for_foreground()` 释放按键并暂停发送，等 Apex 回到前台才继续
 - **RDP 会顶掉控制台会话**，断开后桌面停止渲染、捕获全黑。要远程盯就用不接管会话的方案，
