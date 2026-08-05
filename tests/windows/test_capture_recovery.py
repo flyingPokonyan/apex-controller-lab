@@ -178,6 +178,28 @@ class CaptureRecoveryTest(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeError, "尚未启动"):
             source.grab()
 
+    def test_a_lost_camera_rebuilds_against_a_fresh_enumeration(self) -> None:
+        frame = np.ones((2, 2, 4), dtype=np.uint8)
+        source, _ = self.source(
+            FakeCamera([OSError("access lost")]), FakeCamera([frame])
+        )
+        calls: list[int] = []
+        source._reenumerate_outputs = lambda: calls.append(1)
+        with source as capture:
+            capture.grab()
+        self.assertEqual(len(calls), 1)
+
+    def test_a_merely_empty_frame_does_not_re_enumerate(self) -> None:
+        # Nothing says the displays moved, and the old duplicator still holds
+        # the output a fresh enumeration would try to duplicate again.
+        frame = np.ones((2, 2, 4), dtype=np.uint8)
+        source, _ = self.source(FakeCamera([None, None]), FakeCamera([frame]))
+        calls: list[int] = []
+        source._reenumerate_outputs = lambda: calls.append(1)
+        with source as capture:
+            capture.grab()
+        self.assertEqual(calls, [])
+
     def test_a_rebuild_keeps_trying_while_the_display_is_still_moving(self) -> None:
         # No output exists to build on until the mode change finishes, and how
         # long that takes is the driver's business, not ours.
@@ -248,6 +270,70 @@ class CaptureRecoveryTest(unittest.TestCase):
         source, _ = self.source(broken, FakeCamera([frame]))
         with source as capture:
             capture.grab()
+
+
+class OutputReenumerationTest(unittest.TestCase):
+    """DXcam enumerates displays once, at import.
+
+    Shaped after `dxcam.__init__`: a singleton factory built at import time,
+    whose cached outputs every later `create()` is served from.
+    """
+
+    def install(self) -> ModuleType:
+        class Singleton(type):
+            _instances: dict = {}
+
+            def __call__(cls, *args: object, **kwargs: object):
+                if cls not in cls._instances:
+                    cls._instances[cls] = super().__call__(*args, **kwargs)
+                return cls._instances[cls]
+
+        class DXFactory(metaclass=Singleton):
+            _camera_instances: dict = {}
+            builds = 0
+
+            def __init__(self) -> None:
+                DXFactory.builds += 1
+
+        package = ModuleType("dxcam")
+        package.DXFactory = DXFactory
+        setattr(package, "__factory", DXFactory())
+
+        saved = sys.modules.get("dxcam")
+        sys.modules["dxcam"] = package
+
+        def restore() -> None:
+            if saved is None:
+                sys.modules.pop("dxcam", None)
+            else:
+                sys.modules["dxcam"] = saved
+
+        self.addCleanup(restore)
+        return package
+
+    def test_rebuilding_looks_at_the_displays_that_exist_now(self) -> None:
+        package = self.install()
+        first = getattr(package, "__factory")
+        package.DXFactory._camera_instances[(0, 0, "dxgi")] = object()
+        messages: list[str] = []
+
+        source = DxcamFrameSource(notify=messages.append)
+        source._reenumerate_outputs()
+
+        self.assertEqual(package.DXFactory.builds, 2)
+        self.assertIsNot(getattr(package, "__factory"), first)
+        # Its keys are output indices, which the topology change renumbered.
+        self.assertEqual(package.DXFactory._camera_instances, {})
+        self.assertTrue(any("重新枚举" in message for message in messages))
+
+    def test_an_injected_factory_is_left_alone(self) -> None:
+        package = self.install()
+        source = DxcamFrameSource(
+            camera_factory=lambda **_: None,
+            notify=lambda _: None,
+        )
+        source._reenumerate_outputs()
+        self.assertEqual(package.DXFactory.builds, 1)
 
 
 class BackendChoiceTest(unittest.TestCase):

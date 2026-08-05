@@ -311,6 +311,34 @@ class DxcamFrameSource:
             processor_backend="numpy",
         )
 
+    def _reenumerate_outputs(self) -> None:
+        """Make DXcam look at the displays that exist now.
+
+        `DXFactory` enumerates adapters and outputs once, when the module is
+        imported, and every later `create()` hands back an `Output` from that
+        first look. So after a monitor is switched off or the desktop is moved
+        to another one, rebuilding aims at pointers into a topology that is
+        gone — including the probe across every index, which is why a dummy
+        plug that was there the whole time never got picked up. A new factory
+        is the only thing short of a new process that sees the current one.
+        """
+
+        if self.camera_factory is not None:
+            return
+        try:
+            import dxcam
+
+            factory_type = dxcam.DXFactory
+            type(factory_type)._instances.pop(factory_type, None)
+            # Keyed by output index, which a topology change has just
+            # renumbered; every camera in there belongs to the old look.
+            factory_type._camera_instances.clear()
+            setattr(dxcam, "__factory", factory_type())
+        except Exception as error:
+            self.notify(f"重新枚举显示输出失败：{type(error).__name__}：{error}")
+            return
+        self.notify("已按当前显示器重新枚举 dxcam 的输出")
+
     def _candidate_indices(self) -> list[int]:
         others = [index for index in range(_OUTPUT_PROBE_LIMIT) if index != self.output_index]
         return [self.output_index, *others]
@@ -376,6 +404,10 @@ class DxcamFrameSource:
         # process-corrupting fault precisely when the duplicator is already
         # invalid, which is the only time this runs.
         camera, self._camera = self._camera, None
+        # Either the display went away under this camera, or an earlier
+        # attempt already failed to find one. Both mean the displays DXcam
+        # knows about are not the displays that are there.
+        stale_topology = self._camera_lost or camera is None
         if camera is not None:
             _camera_keepalive.append(camera)
             if self._recovery_gave_up:
@@ -387,6 +419,8 @@ class DxcamFrameSource:
                 self._mark_released(camera)
         self._camera_lost = False
         self._recovery_gave_up = False
+        if stale_topology:
+            self._reenumerate_outputs()
         self._camera = self._create()
 
     def _rebuild_until_a_frame_arrives(self) -> np.ndarray | None:
