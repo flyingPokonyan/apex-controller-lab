@@ -441,20 +441,25 @@ class ReportSession:
                 "ACTION_POSTCONDITION_REJECTED": "REJECTED",
                 "ACTION_ERROR": "FAILED",
             }[name]
-            result.append(
-                (
-                    "ACTION_RESULT",
-                    {
-                        "capability": payload.get("capability"),
-                        "action": payload.get("action"),
-                        "status": status,
-                        "attempt": payload.get("attempt"),
-                        "originState": payload.get("originState", payload.get("state")),
-                        "evidenceState": payload.get("evidenceState"),
-                        "reason": payload.get("reason", payload.get("error")),
-                    },
-                )
-            )
+            reported = {
+                "capability": payload.get("capability"),
+                "action": payload.get("action"),
+                "status": status,
+                "attempt": payload.get("attempt"),
+                "originState": payload.get("originState", payload.get("state")),
+                "evidenceState": payload.get("evidenceState"),
+                "reason": payload.get("reason", payload.get("error")),
+            }
+            # What a text-driven action actually did. Without these a stall
+            # reads as N identical opaque sends: 20260806-083706 spent thirty
+            # of them clicking 「按住以确认」 dead centre at 0.9998 confidence,
+            # and from the server every one looked the same as pressing ESC
+            # into the void. Only added when the local event carries them, so
+            # ordinary clicks and keys report exactly what they did before.
+            for key in ("matchedText", "hold", "fallback"):
+                if payload.get(key) is not None:
+                    reported[key] = payload[key]
+            result.append(("ACTION_RESULT", reported))
         elif name in REPORTABLE_INCIDENTS:
             result.append(
                 (

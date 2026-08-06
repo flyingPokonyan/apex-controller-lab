@@ -22,6 +22,7 @@
       {"type": "wait", "durationMs": 1500},
       {"type": "tapKey", "scanCode": 57, "durationMs": 2000}
     ],
+    "confirmHoldScanCode": 57,
     "meleeScanCode": 47,
     "tacticalScanCode": 16,
     "detachScanCode": 29,
@@ -31,7 +32,10 @@
       "any": ["继续", "重试", "确定", "确认", "接受", "返回大厅", "好的", "关闭", "返回"],
       "fallbackScanCode": 1,
       "minConfidence": 0.7,
-      "_note": "词按优先级排列，先匹配到的先点：一张断线弹窗上同时有「重试」和「返回」时，要的是重试。只点 OCR 真的读出来、并且引擎给了坐标的那一块；引擎没给坐标（逐区域降级）就不点，退回 ESC。"
+      "holdWords": ["按住", "长按"],
+      "holdScanCode": 57,
+      "holdMs": 2000,
+      "_note": "词按优先级排列，先匹配到的先点：一张断线弹窗上同时有「重试」和「返回」时，要的是重试。只点 OCR 真的读出来、并且引擎给了坐标的那一块；引擎没给坐标（逐区域降级）就不点，退回 ESC。holdWords 是 20260806-083706 加的：那次读到的是「按住以确认」，「确认」二字匹配得完美（0.9998）、坐标也精确，于是对着一个长按控件点了三十次——点击对它永远无效。匹配到的那段文字里但凡带「按住」「长按」，它描述的就是一个键而不是一个按钮，这时候要按住 holdScanCode（SPACE，和 returnLobbySequence 末尾那一步同一个键同一个时长），而不是点它。"
     }
   },
   "_keyBindings": "扫描码写死在这里，等于假定了游戏里的键位。这些假定必须和目标账号实际绑的键一致，否则动作照发、游戏没反应，而画面上和「输入没送到」长得一模一样——2026-07-30 就栽在这上面：配置写 V(47)，当时账号绑在 N 上，白查了一轮反作弊。当前假定：1=ESC 安全返回，28=ENTER 安全继续，15=TAB 返回大厅，57=SPACE 确认返回大厅，47=V 近战，16=Q 战术技能，29=LCTRL 单独发射，18=E 发射。改键位的话这里也要跟着改；windows/probe-input.cmd 可以逐个验。另外 Apex 里有相当一批提示是长按而不是点按，那种要靠能力自己的 holdMs 或动作序列内的 durationMs 声明，默认的 keyTapMs 太短。",
@@ -141,6 +145,18 @@
       "confirmMs": 2000,
       "maxAttempts": 2,
       "_note": "任何左下角写着「ESC 返回」而快速识别不认识的全屏页，一律按它自己写的那个键退出去。20260730-215512 的奖励页（004-unknown）就死在这里：reward-continue 要求标题区读到「奖励」、底部读到「继续/领取」，而那一页的标题在 titleCenter 左边界之外，且压根没有继续按钮，动作却配的是 ENTER。ESC 是这一族页面上唯一被页面自己写出来的键。"
+    },
+    {
+      "id": "confirm-hold-prompt",
+      "priority": 100,
+      "states": ["FULLSCREEN_HOLD_CONFIRM"],
+      "action": "confirmHoldScanCode",
+      "kind": "key",
+      "actionClass": "idempotent",
+      "holdMs": 2000,
+      "confirmMs": 4000,
+      "maxAttempts": 3,
+      "_note": "和 dismiss-esc-back 对称的另一半：那族页面自己写着 ESC，这族写着「SPACE 按住以确认」，一律按页面自己写出来的键。关键是按住而不是点按——20260806-083706 的排位定级页上，点击这个控件三十次毫无反应，而 returnLobbySequence 末尾那一步（SPACE 按住 2000ms）本来就能关掉它，只是当时画面已经不在 POST_MATCH_SUMMARY，那条能力够不着。holdMs 沿用同一个 2000。不声明 allowedNextStates：这一族页面背后可能是大厅，也可能是下一张一次性提示，能确认掉就是进展。"
     },
     {
       "id": "lobby-disable-fill",

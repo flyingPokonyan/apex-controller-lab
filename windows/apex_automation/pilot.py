@@ -281,6 +281,9 @@ class CapabilityPilot:
         self.page_probe_max = int(page_probe.get("maxPerSession", 8))
         if not bool(page_probe.get("enabled", True)):
             self.page_probe_states = frozenset()
+        # Same budget, different trigger: pageProbe describes a page the rules
+        # *did* name, this one describes a frame nothing could name.
+        self.click_text_miss_max = int(page_probe.get("maxUnmatchedPerSession", 8))
 
         # Full-frame and multi-region obstacle OCR is intentionally not part of
         # the 300ms fast loop. It runs once before a menu action, or after an
@@ -343,6 +346,7 @@ class CapabilityPilot:
         self._last_page_tokens: tuple[Any, ...] = ()
         self._page_probes = 0
         self._page_probed_state: str | None = None
+        self._click_text_misses = 0
         self._base_state: str | None = None
         self._base_state_version = 0
         self._base_unknown_since: float | None = None
@@ -408,6 +412,20 @@ class CapabilityPilot:
         fallback = spec.get("fallbackScanCode")
         if fallback is not None and not isinstance(fallback, int):
             raise ValueError(f"文字点击动作 {action_name} 的兜底扫描码不是整数")
+        hold_words = spec.get("holdWords")
+        hold_scan_code = spec.get("holdScanCode")
+        if hold_words is not None:
+            if not isinstance(hold_words, list) or not hold_words:
+                raise ValueError(f"文字点击动作 {action_name} 的长按词表为空")
+            if not all(isinstance(word, str) and word for word in hold_words):
+                raise ValueError(f"文字点击动作 {action_name} 的长按词必须是非空字符串")
+            if not isinstance(hold_scan_code, int):
+                raise ValueError(f"文字点击动作 {action_name} 声明了长按词却没有扫描码")
+            hold_ms = spec.get("holdMs", 2000)
+            if not isinstance(hold_ms, int) or not 0 < hold_ms <= 10_000:
+                raise ValueError(f"文字点击动作 {action_name} 的长按时长无效")
+        elif hold_scan_code is not None:
+            raise ValueError(f"文字点击动作 {action_name} 声明了长按扫描码却没有长按词")
         confidence = float(spec.get("minConfidence", 0.62))
         if not 0 <= confidence <= 1:
             raise ValueError(f"文字点击动作 {action_name} 的置信度无效")
@@ -498,7 +516,61 @@ class CapabilityPilot:
                     continue
                 x1, y1, x2, y2 = token.roi
                 return (x1 + x2) // 2, (y1 + y2) // 2, token.text, token.confidence
+        self._log_unmatched_page(spec, tokens)
         return None
+
+    def _log_unmatched_page(
+        self,
+        spec: dict[str, Any],
+        tokens: tuple[Any, ...],
+    ) -> None:
+        """Keep what the page said when none of the declared words were on it.
+
+        A match already reports itself: the send event carries `matchedText`.
+        A miss used to report nothing at all, and the frame this runs on is by
+        definition the one nobody has a rule for — so the full-frame OCR that
+        was just paid for is the only description of it that exists outside a
+        PNG on the runner's disk. Capped per session because a screen that
+        stays unrecognised is retried for half an hour.
+        """
+        if self._click_text_misses >= self.click_text_miss_max:
+            return
+        self._click_text_misses += 1
+        self.recorder.log(
+            "CLICK_TEXT_NO_MATCH",
+            region=spec.get("region"),
+            wanted=list(spec.get("any", [])),
+            tokens=[
+                {
+                    "text": token.text,
+                    "confidence": round(token.confidence, 3),
+                    "roi": list(token.roi) if token.roi else None,
+                }
+                for token in tokens[:80]
+            ],
+        )
+
+    def _hold_for_text(
+        self,
+        spec: dict[str, Any],
+        text: str,
+    ) -> tuple[int, int] | None:
+        """Decide whether the matched text names a key to hold, not a button.
+
+        Apex writes a fair number of its confirmations as `SPACE 按住以确认`.
+        The word the profile is hunting for (确认) sits inside that sentence,
+        so the match is perfect and the coordinates are exact — and the click
+        does nothing, because there is no button there, only a printed
+        instruction. The sentence says which it is; this reads that.
+        """
+        hold_words = spec.get("holdWords")
+        scan_code = spec.get("holdScanCode")
+        if not hold_words or scan_code is None:
+            return None
+        normalized = normalize_ocr_text(text)
+        if not any(normalize_ocr_text(str(word)) in normalized for word in hold_words):
+            return None
+        return int(scan_code), int(spec.get("holdMs", 2000))
 
     def _execute(self, capability: Capability, frame: np.ndarray) -> dict[str, object]:
         spec = self.actions[capability.action]
@@ -515,6 +587,17 @@ class CapabilityPilot:
             found = self._find_button(spec, frame)
             if found is not None:
                 x, y, text, confidence = found
+                hold = self._hold_for_text(spec, text)
+                if hold is not None:
+                    hold_scan_code, hold_ms = hold
+                    self.sender.tap_scan_code(hold_scan_code, hold_ms)
+                    return {
+                        "matchedText": text,
+                        "confidence": round(confidence, 4),
+                        "scanCode": hold_scan_code,
+                        "durationMs": hold_ms,
+                        "hold": "HOLD_PROMPT",
+                    }
                 self.sender.click(x, y)
                 return {
                     "x": x,
