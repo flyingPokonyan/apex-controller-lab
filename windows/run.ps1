@@ -9,8 +9,8 @@ $PrefixArgs = @()
 if ($args.Count -ge 1) {
     $Command = [string]$args[0]
 }
-if (@("validate", "observe", "live", "start", "play", "account-cycle", "account-cycle-check", "ea-preflight", "ea-login-check", "probe-input") -notcontains $Command) {
-    throw "Unknown command: $Command (supported: validate, observe, live, start, play, account-cycle, account-cycle-check, ea-preflight, ea-login-check, probe-input)"
+if (@("validate", "observe", "live", "start", "play", "account-cycle", "account-cycle-check", "ea-preflight", "ea-login-check", "probe-input", "display-watch") -notcontains $Command) {
+    throw "Unknown command: $Command (supported: validate, observe, live, start, play, account-cycle, account-cycle-check, ea-preflight, ea-login-check, probe-input, display-watch)"
 }
 if ($args.Count -gt 1) {
     for ($Index = 1; $Index -lt $args.Count; $Index++) {
@@ -40,7 +40,7 @@ elseif ($Command -eq "observe") {
     # cannot score the in-match states is missing the ones with no data at all.
     $PrefixArgs = @("--config", (Join-Path $WindowsDir "config\observe-2560x1440.zh-CN.json"))
 }
-elseif ($Command -eq "probe-input") {
+elseif (@("probe-input", "display-watch") -contains $Command) {
     $PrefixArgs = @("--config", (Join-Path $WindowsDir "config\play-2560x1440.zh-CN.json"))
 }
 elseif (@("play", "account-cycle", "ea-preflight", "ea-login-check") -contains $Command) {

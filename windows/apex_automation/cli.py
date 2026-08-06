@@ -22,7 +22,7 @@ from .account_provider import (
     OtpCode,
 )
 from .capabilities import CapabilityDispatcher, CapabilitySet
-from .capture import DxcamFrameSource
+from .capture import DxcamFrameSource, describe_displays, report
 from .config import (
     DEFAULT_CONFIG_PATH,
     PLAY_CONFIG_PATH,
@@ -243,6 +243,59 @@ def run_live(config_path: Path, countdown: int) -> int:
         return 1
 
     print(f"运行完成，截图和日志位于：{recorder.run_dir}")
+    return 0
+
+
+def run_display_watch(config_path: Path, *, duration_s: float) -> int:
+    """Report what the displays and the capture do while someone changes them.
+
+    Whether switching this monitor off on this cable actually moves the desktop
+    out from under the capture is not answerable by reading: it depends on the
+    panel, the connector and the driver. Until now the only way to ask cost an
+    account lease, a login and a whole run — which is why it kept being asked
+    by breaking a real one.
+    """
+
+    if sys.platform != "win32":
+        print("display-watch 只能在 Windows 上运行。", file=sys.stderr)
+        return 2
+
+    config = load_config(config_path)
+    expected = (
+        int(config.environment["width"]),
+        int(config.environment["height"]),
+    )
+    print("显示器观察：不领账号、不启动 Apex、不发送任何输入。")
+    print("现在去关显示器、切显示模式、拔线，做什么都行，这里会说发生了什么。")
+    print(f"按 Ctrl+C 结束，最长 {duration_s:.0f} 秒。识别需要的分辨率是 {expected[0]}x{expected[1]}。")
+
+    deadline = time.monotonic() + duration_s
+    previous: tuple[str, str] | None = None
+    try:
+        with DxcamFrameSource(
+            backend=str(config.environment["captureBackend"]),
+            output_index=int(config.environment["outputIndex"]),
+        ) as source:
+            while time.monotonic() < deadline:
+                displays = describe_displays()
+                try:
+                    frame = source.grab()
+                    height, width = frame.shape[:2]
+                    size = f"{width}x{height}"
+                    capture = f"抓帧正常 {size}" + (
+                        "" if (width, height) == expected else "  ← 和识别配置不一致！"
+                    )
+                except Exception as error:
+                    capture = f"抓帧失败：{type(error).__name__}：{error}"
+                current = (displays, capture)
+                if current != previous:
+                    report(f"[显示器] {displays}")
+                    report(f"[捕获] {capture}")
+                    previous = current
+                time.sleep(1.0)
+    except KeyboardInterrupt:
+        pass
+    print("观察结束。完整记录在 windows\\runs\\capture.log。")
     return 0
 
 
@@ -1259,6 +1312,11 @@ def build_parser() -> argparse.ArgumentParser:
         type=Path,
         help="托管设备私有配置；默认读取 windows/account-cycle.private.json",
     )
+    display_watch = subparsers.add_parser(
+        "display-watch",
+        help="盯着显示器和捕获，用来验证关屏、切显示模式会不会打断捕获；不领账号也不启动 Apex",
+    )
+    display_watch.add_argument("--duration-s", type=float, default=600.0)
     probe = subparsers.add_parser(
         "probe-input",
         help="向游戏发几个明显动作，用来确认 SendInput 到底进不进得去",
@@ -1292,6 +1350,8 @@ def main(argv: list[str] | None = None) -> int:
             duration_s=args.duration_s,
             with_ocr=args.with_ocr,
         )
+    if command == "display-watch":
+        return run_display_watch(args.config, duration_s=max(10.0, args.duration_s))
     if command == "probe-input":
         return run_probe_input(args.config, countdown=max(0, args.countdown))
     if command == "play":

@@ -95,6 +95,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\setup.ps1
 | --- | --- | --- |
 | `run.ps1 account-cycle-check` | 只验证配置、网络和 Provider 鉴权，不领号、不碰 EA | 怀疑是 Token 或接口地址问题 |
 | `ea-preflight.cmd` | 只读识别 EA 窗口和当前页面，不领号 | 怀疑 EA 页面识别有问题 |
+| `display-watch.cmd` | 盯着显示器和捕获，你去关屏/切显示模式/拔线，它说发生了什么；不领号也不启动 Apex | 想知道关显示器会不会打断捕获 |
 | `ea-login-check.cmd` | 领 1 个号只验证登录再登出，不启动 Apex | 专门调登录时。**要求 EA 先手动登出并停在登录页**，已登录状态下会直接退出 |
 
 `account-cycle-check` 看到“Runner 配置与 Provider 鉴权正常”即为通过。若提示
