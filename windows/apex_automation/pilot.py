@@ -4,8 +4,10 @@ from collections import defaultdict
 from dataclasses import dataclass
 import json
 from pathlib import Path
+import re
 import time
 from typing import Any, Callable, Protocol
+import unicodedata
 
 import numpy as np
 
@@ -39,6 +41,9 @@ SUPPORTED_KINDS = frozenset({"click", "key", "sequence", "clickText"})
 # frame for minutes", which is a fact about the runner rather than about a
 # page. Capabilities may attach to it exactly as they do to a real screen.
 STALLED_UNKNOWN = "STALLED_UNKNOWN"
+RING_PROGRESS_PATTERN = re.compile(
+    r"(?:经历)?缩圈[^0-9]{0,8}([0-9]{1,3})/([0-9]{1,3})"
+)
 
 
 def producible_states(
@@ -346,6 +351,7 @@ class CapabilityPilot:
         self._last_page_tokens: tuple[Any, ...] = ()
         self._page_probes = 0
         self._page_probed_state: str | None = None
+        self._ring_progress: tuple[int, int] | None = None
         self._click_text_misses = 0
         self._base_state: str | None = None
         self._base_state_version = 0
@@ -791,6 +797,7 @@ class CapabilityPilot:
             self._overlay_candidate = None
             self._overlay_candidate_count = 0
             self._active_overlay = None
+            self._page_probed_state = None
             if base.state in self.overlay_guard_states:
                 self._overlay_checked_base_version = self._base_state_version
             self._overlay_next_scan_at = finished + self.overlay_unknown_retry_s
@@ -857,6 +864,37 @@ class CapabilityPilot:
                 for token in self._last_page_tokens[:80]
             ],
         )
+        self._record_ring_progress()
+
+    def _record_ring_progress(self) -> None:
+        tokens = self._last_page_tokens[:80]
+        for width in range(1, min(5, len(tokens)) + 1):
+            for start in range(0, len(tokens) - width + 1):
+                group = tokens[start : start + width]
+                raw_text = " ".join(str(token.text) for token in group)
+                compact = "".join(
+                    unicodedata.normalize("NFKC", raw_text).split()
+                )
+                match = RING_PROGRESS_PATTERN.search(compact)
+                if match is None:
+                    continue
+                completed, required = (int(value) for value in match.groups())
+                if required < 1 or required > 100 or completed > required:
+                    continue
+                current = self._ring_progress
+                if current is not None and required == current[1] and completed <= current[0]:
+                    return
+                self._ring_progress = (completed, required)
+                self.recorder.log(
+                    "RING_PROGRESS",
+                    completed=completed,
+                    required=required,
+                    rawText=raw_text,
+                    confidence=round(
+                        min(float(token.confidence) for token in group), 3
+                    ),
+                )
+                return
 
     def _record_observation(
         self,

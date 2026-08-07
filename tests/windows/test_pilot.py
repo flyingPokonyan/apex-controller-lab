@@ -281,9 +281,10 @@ class PilotTest(unittest.TestCase):
         self.assertEqual(record["decision"]["capability"], "dropship-launch")
         self.assertEqual(self.sender.calls, [("tap", 18, 80)])
 
-    def test_a_following_dropship_still_detaches_before_launching(self) -> None:
-        # The solo rule must not shadow the squad path: a followed dropship
-        # shows both lines, and LCTRL has to come first.
+    def test_a_following_dropship_stays_with_the_jumpmaster(self) -> None:
+        # The solo rule must not shadow the squad path: a followed dropship can
+        # show nearby launch text, but the runner should send no input and let
+        # the squad jumpmaster choose the drop.
         self.screen(
             dropshipPrompt=("LCTRL单独发射", 0.91),
             dropshipLaunchPrompt=("建议", 0.98),
@@ -291,7 +292,8 @@ class PilotTest(unittest.TestCase):
         record = self.pilot.step()
 
         self.assertEqual(record["state"], "DROPSHIP_FOLLOWING")
-        self.assertEqual(self.sender.calls, [("tap", 29, 2000)])
+        self.assertEqual(record["decision"]["reason"], "NO_CAPABILITY")
+        self.assertEqual(self.sender.calls, [])
 
     def test_a_queueing_lobby_waits_because_it_owns_no_capability(self) -> None:
         self.screen(lobbyPrimaryButton=("取消", 1.0))
@@ -521,6 +523,10 @@ class PilotTest(unittest.TestCase):
         page = next(p for e, p in self.recorder.events if e == "PAGE_TEXT")
         self.assertEqual(page["state"], "FULLSCREEN_ESC_BACK")
         self.assertIn("经历缩圈 12/30", [token["text"] for token in page["tokens"]])
+        progress = next(p for e, p in self.recorder.events if e == "RING_PROGRESS")
+        self.assertEqual(progress["completed"], 12)
+        self.assertEqual(progress["required"], 30)
+        self.assertEqual(progress["confidence"], 0.94)
         # Reading it changes nothing about closing it.
         self.assertEqual(self.sender.calls, [("tap", 1, 80)])
 
@@ -665,20 +671,15 @@ class PilotTest(unittest.TestCase):
         self.assertEqual(confirmed["capability"], "post-match-return-lobby")
         self.assertEqual(confirmed["evidenceState"], "LOBBY_READY_TARGET")
 
-    def test_a_capability_may_hold_its_key_longer_than_the_default_tap(self) -> None:
-        # An 80ms tap of this same scan code crouches in the firing range but
-        # did nothing on the dropship, so the duration has to be per action.
+    def test_following_the_jumpmaster_does_not_detach(self) -> None:
         self.screen(dropshipPrompt=("LCTRL单独发射", 0.91))
-        self.pilot.step()
-        detach = next(
-            c for c in self.pilot.dispatcher.capabilities.capabilities if c.id == "dropship-detach"
-        )
-        self.assertEqual(detach.hold_ms, 2000)
-        self.assertEqual(self.sender.calls, [("tap", 29, detach.hold_ms)])
-        self.assertGreater(detach.hold_ms, self.pilot.key_tap_ms)
+        record = self.pilot.step()
+        self.assertEqual(record["state"], "DROPSHIP_FOLLOWING")
+        self.assertEqual(record["decision"]["reason"], "NO_CAPABILITY")
+        self.assertEqual(self.sender.calls, [])
 
     def test_losing_the_foreground_releases_input_and_forgets_the_pending_action(self) -> None:
-        self.screen(dropshipPrompt=("LCTRL单独发射", 0.91))
+        self.screen(lobbyPrimaryButton=("准备", 0.99), lobbyModeName=("进化版机器人大逃杀", 0.99))
         self.pilot.step()
         self.assertEqual(len(self.sender.calls), 1)
         self.assertIsNotNone(self.pilot.dispatcher.pending)
@@ -692,17 +693,12 @@ class PilotTest(unittest.TestCase):
         # the outstanding LCTRL must not be confirmed by whatever shows up.
         self.assertIsNone(self.pilot.dispatcher.pending)
 
-    def test_the_dropship_toggle_is_never_pressed_twice(self) -> None:
-        # LCTRL rejoins the squad when repeated, so a screen that stays put
-        # must not produce a second press even after the window expires.
+    def test_following_the_jumpmaster_remains_inert_while_the_prompt_persists(self) -> None:
         self.screen(dropshipPrompt=("LCTRL单独发射", 0.91))
         for moment in (0.0, 0.3, 3.5, 7.0, 11.0):
             self.now = moment
             self.pilot.step()
-        detach = self.payload["actions"]["detachScanCode"]
-        taps = [call for call in self.sender.calls if call[0] == "tap" and call[1] == detach]
-        self.assertEqual(len(taps), 1)
-        self.assertIn("DECISION_PAUSED", self.recorder.names())
+        self.assertEqual(self.sender.calls, [])
 
     def test_melee_repeats_while_the_match_screen_persists(self) -> None:
         self.screen(squadCountAlive=("20 剩余小队数量", 0.98))

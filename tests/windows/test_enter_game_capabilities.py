@@ -367,7 +367,7 @@ class EnterGameCapabilityTest(unittest.TestCase):
         self.assertEqual(dispatcher.decide("LOBBY_READY_TARGET", 1, 0.0).kind, "fire")
         dispatcher.note_state("DROPSHIP_FOLLOWING", 90.0)
         decision = dispatcher.decide("DROPSHIP_FOLLOWING", 2, 90.0)
-        self.assertEqual(decision.capability.id, "dropship-detach")
+        self.assertEqual(decision.reason, "NO_CAPABILITY")
 
     def test_the_jump_waits_out_part_of_the_flight_but_never_all_of_it(self) -> None:
         # Pressing E on sight landed every match on the same spot at the start
@@ -379,10 +379,8 @@ class EnterGameCapabilityTest(unittest.TestCase):
         launch = next(c for c in self.capabilities.capabilities if c.id == "dropship-launch")
         self.assertGreater(launch.delay_ms, 0)
         self.assertLess(launch.delay_ms + launch.delay_jitter_ms, 25_000)
-        # Detaching from the squad is not delayed with it: that only says the
-        # runner picks its own landing, and doing it early costs nothing.
-        detach = next(c for c in self.capabilities.capabilities if c.id == "dropship-detach")
-        self.assertEqual(detach.delay_ms, 0)
+        self.assertEqual(self.capabilities.for_state("DROPSHIP_FOLLOWING"), ())
+        self.assertIn("DROPSHIP_SOLO_JUMPMASTER", launch.states)
 
     def test_confirming_a_mode_is_a_commit_that_must_be_verified(self) -> None:
         confirm = next(c for c in self.capabilities.capabilities if c.id == "mode-panel-confirm-hovered")

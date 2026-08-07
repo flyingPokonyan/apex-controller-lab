@@ -50,10 +50,10 @@
     "probeMaxPerRound": 5
   },
   "pageProbe": {
-    "_note": "被 fullscreen-esc-back 一律 ESC 掉的那族全屏页，关掉之前先把整页文字连坐标记一条 PAGE_TEXT。这族页面里有排位之路——20260730-215512 的证据帧 035 就是它——上面写着「经历缩圈 x/30」这类任务计数，而这正是决定要不要为缩圈做工程的那个数。这一帧的全屏 OCR 本来就已经付过钱了，原来只是把结果丢掉。每次进入这张页面记一条，一次会话最多八条。",
+    "_note": "被 fullscreen-esc-back 一律 ESC 掉的那族全屏页，关掉之前先把整页文字连坐标记一条 PAGE_TEXT。这族页面里有排位之路——20260730-215512 的证据帧 035 就是它——上面写着「经历缩圈 x/30」这类任务计数。Runner 会额外提取 RING_PROGRESS，并只上报增长后的计数。每次重新进入页面可读取一次；64 次预算覆盖长时间托管，又避免异常页面无限 OCR。",
     "enabled": true,
     "states": ["FULLSCREEN_ESC_BACK", "FULLSCREEN_HOLD_CONFIRM"],
-    "maxPerSession": 8
+    "maxPerSession": 64
   },
   "overlayOcr": {
     "enabled": true,

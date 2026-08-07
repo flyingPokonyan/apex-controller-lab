@@ -871,6 +871,82 @@ class AccountOrchestratorTest(unittest.TestCase):
             # Nothing to clear on an already active checkpoint.
             self.assertFalse(orchestrator.resume())
 
+    def test_server_safe_release_clears_a_stale_pause_without_resume(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            lease = FakeAccountProvider.lease("acct_1")
+            provider = FakeAccountProvider([lease])
+            provider.claim("claim_1", "LEVEL_TO_TARGET")
+            provider._statuses[lease.lease_id] = LeaseStatus(
+                lease_id=lease.lease_id,
+                lease_fence=lease.lease_fence,
+                account_id=lease.account_id,
+                state=LeaseState.CLOSED,
+                provider_status="RELEASED",
+            )
+            provider._current_lease_id = None
+            store = AtomicCheckpointStore(
+                Path(directory) / "account-cycle-status.json"
+            )
+            store.save(
+                OrchestrationCheckpoint(
+                    device_id="device_1",
+                    lease_id=lease.lease_id,
+                    lease_fence=lease.lease_fence,
+                    account_id=lease.account_id,
+                    target_level=lease.target_level,
+                    run_state=OrchestratorRunState.PAUSED_MANUAL,
+                    last_error_code="LEASE_STALE",
+                )
+            )
+            notices: list[str] = []
+            orchestrator = AccountOrchestrator(
+                provider=provider,
+                ea_driver=object(),
+                play_session=object(),
+                checkpoint_store=store,
+                device_id="device_1",
+                capture_source=object(),
+                notify=notices.append,
+            )
+
+            cycle = orchestrator.run_once()
+
+            self.assertEqual(cycle.outcome, AccountCycleOutcome.NO_ACCOUNT)
+            checkpoint = store.load()
+            self.assertEqual(checkpoint.run_state, OrchestratorRunState.ACTIVE)
+            self.assertFalse(checkpoint.has_lease)
+            self.assertTrue(any("自动清除本地暂停" in item for item in notices))
+
+    def test_non_lease_manual_pause_never_contacts_provider_for_auto_resume(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            store = AtomicCheckpointStore(
+                Path(directory) / "account-cycle-status.json"
+            )
+            store.save(
+                OrchestrationCheckpoint(
+                    device_id="device_1",
+                    run_state=OrchestratorRunState.PAUSED_MANUAL,
+                    last_error_code="CAPTCHA",
+                )
+            )
+
+            class MustNotCall(FakeAccountProvider):
+                def current(self):
+                    raise AssertionError("CAPTCHA pause must remain local and sticky")
+
+            cycle = AccountOrchestrator(
+                provider=MustNotCall(),
+                ea_driver=object(),
+                play_session=object(),
+                checkpoint_store=store,
+                device_id="device_1",
+                capture_source=object(),
+                notify=lambda _: None,
+            ).run_once()
+
+            self.assertEqual(cycle.outcome, AccountCycleOutcome.PAUSED)
+            self.assertEqual(cycle.error_code, "CAPTCHA")
+
     def test_manual_pause_survives_restart_and_retryable_pause_recovers(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             store = AtomicCheckpointStore(

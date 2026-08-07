@@ -78,6 +78,19 @@ class AccountCycleResult:
 class AccountOrchestrator:
     """Crash-aware outer workflow for one leased EA account at a time."""
 
+    SERVER_RELEASABLE_PAUSES = frozenset(
+        {
+            "LEASE_STALE",
+            "LEASE_NOT_ACTIVE",
+            "LEASE_CLOSE_PENDING",
+            "COMPLETION_RECOVERY_REQUIRED",
+            "ORPHAN_RUN_RECOVERY_REQUIRED",
+            "REMOTE_RUNNING_RECOVERY_REQUIRED",
+            "REMOTE_COMPLETION_PENDING_RECOVERY_REQUIRED",
+            "REMOTE_EXPIRED_UNCONFIRMED_RECOVERY_REQUIRED",
+        }
+    )
+
     def __init__(
         self,
         *,
@@ -206,6 +219,50 @@ class AccountOrchestrator:
         completed = self.checkpoint_store.clear_completed_lease(self._checkpoint)
         with self._checkpoint_lock:
             self._checkpoint = completed
+
+    def _stop_lease_runtime(self) -> None:
+        if self._report_drain is not None:
+            self._report_drain.stop(flush_timeout_s=5.0)
+            self._report_drain = None
+        if self._lease_keeper is not None:
+            self._lease_keeper.stop()
+            self._lease_keeper = None
+
+    def _reconcile_server_release(self) -> bool:
+        checkpoint = self._checkpoint
+        if (
+            checkpoint.run_state is not OrchestratorRunState.PAUSED_MANUAL
+            or checkpoint.last_error_code not in self.SERVER_RELEASABLE_PAUSES
+            or not checkpoint.has_lease
+        ):
+            return False
+
+        try:
+            remote = self.provider.current()
+            released = remote is None
+            if remote is not None and (
+                remote.lease_id != checkpoint.lease_id
+                or remote.lease_fence != checkpoint.lease_fence
+            ):
+                status = self.provider.status(
+                    checkpoint.lease_id or "",
+                    checkpoint.lease_fence or 0,
+                )
+                released = status.terminal
+            elif remote is not None:
+                released = remote.terminal
+        except LeaseProviderError:
+            return False
+
+        if not released:
+            return False
+        previous = checkpoint.last_error_code
+        self._stop_lease_runtime()
+        self._clear_lease_checkpoint()
+        self.notify(
+            f"服务端已确认旧租约释放，自动清除本地暂停（原因 {previous}）"
+        )
+        return True
 
     def _obtain_lease(self) -> AccountLease | None:
         checkpoint = self._checkpoint
@@ -755,6 +812,7 @@ class AccountOrchestrator:
     def run_once(self) -> AccountCycleResult:
         if self._stop.is_set():
             return AccountCycleResult(AccountCycleOutcome.STOPPED)
+        self._reconcile_server_release()
         if self._checkpoint.run_state is not OrchestratorRunState.ACTIVE:
             return AccountCycleResult(
                 AccountCycleOutcome.PAUSED,
@@ -862,7 +920,10 @@ class AccountOrchestrator:
             if result.outcome is AccountCycleOutcome.PAUSED:
                 self.notify(f"账号编排已暂停：{result.error_code}")
                 if self._checkpoint.run_state is OrchestratorRunState.PAUSED_MANUAL:
-                    return 1
+                    if result.error_code not in self.SERVER_RELEASABLE_PAUSES:
+                        return 1
+                    self.sleep(max(1.0, idle_s))
+                    continue
                 delay = max(1.0, idle_s)
                 retry_after = getattr(self.provider, "claim_retry_after_s", None)
                 if isinstance(retry_after, (int, float)):
@@ -887,9 +948,4 @@ class AccountOrchestrator:
 
     def stop(self) -> None:
         self._stop.set()
-        if self._report_drain is not None:
-            self._report_drain.stop(flush_timeout_s=5.0)
-            self._report_drain = None
-        if self._lease_keeper is not None:
-            self._lease_keeper.stop()
-            self._lease_keeper = None
+        self._stop_lease_runtime()

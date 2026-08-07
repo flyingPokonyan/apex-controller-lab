@@ -323,6 +323,60 @@ class ReporterTest(unittest.TestCase):
                 {"leaseId": "lease_1", "leaseFence": 17},
             )
 
+    def test_ring_progress_is_structured_and_bound_to_the_current_round(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            run_dir = write_run(
+                root,
+                "run_ring_progress",
+                account_id="acct_current",
+                events=[
+                    (
+                        "STATE_DETECTED",
+                        {
+                            "state": "DROPSHIP_SOLO_JUMPMASTER",
+                            "previousState": "LOBBY_QUEUEING",
+                            "confidence": 0.98,
+                        },
+                    ),
+                    (
+                        "RING_PROGRESS",
+                        {
+                            "completed": 12,
+                            "required": 30,
+                            "rawText": "经历缩圈 12/30",
+                            "confidence": 0.94,
+                        },
+                    ),
+                ],
+            )
+            transport = FakeTransport()
+            reporter = RemoteReporter(
+                settings(),
+                root,
+                run_dir,
+                transport=transport,
+                heartbeat_interval_s=9999,
+            )
+
+            reporter.process_once()
+
+            event = next(
+                item
+                for item in transport.requests[0]["events"]
+                if item["type"] == "RING_PROGRESS"
+            )
+            self.assertEqual(
+                event["payload"],
+                {
+                    "completed": 12,
+                    "required": 30,
+                    "rawText": "经历缩圈 12/30",
+                    "confidence": 0.94,
+                    "roundNumber": 1,
+                },
+            )
+
     def test_a_retry_reuses_the_same_sequence_and_does_not_duplicate_outbox(
         self,
     ) -> None:

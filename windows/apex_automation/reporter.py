@@ -406,6 +406,19 @@ class ReportSession:
             result.append(("RUN_FINISHED", payload))
         elif name == "LOBBY_PROGRESS":
             result.append(("LOBBY_PROGRESS", payload))
+        elif name == "RING_PROGRESS":
+            result.append(
+                (
+                    "RING_PROGRESS",
+                    {
+                        "completed": payload.get("completed"),
+                        "required": payload.get("required"),
+                        "rawText": payload.get("rawText"),
+                        "confidence": payload.get("confidence"),
+                        "roundNumber": self._round_number,
+                    },
+                )
+            )
         elif name == "STATE_DETECTED":
             state = str(payload.get("state", ""))
             result.append(
