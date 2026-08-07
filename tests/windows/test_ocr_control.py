@@ -83,6 +83,21 @@ class OcrRulesTest(unittest.TestCase):
         missing_button = self.detector(include_button=False).analyze(self.frame)
         self.assertIsNone(missing_button.decision)
 
+    def test_reticle_unlock_uses_the_space_rule_before_generic_reward(self) -> None:
+        values = {
+            self.regions["titleCenter"]: (OcrToken("光圈已解锁", 0.99),),
+            # SPACE is small enough that OCR may omit it; the exact title and
+            # the visible command still uniquely identify this page.
+            self.regions["bottomCenter"]: (OcrToken("继续", 0.98),),
+        }
+        detector = OcrObstacleDetector.from_path(FakeProvider(values), self.rules_path)
+
+        decision = detector.analyze(self.frame).decision
+
+        self.assertIsNotNone(decision)
+        self.assertEqual(decision.rule_id, "reticle-unlock-space-continue")
+        self.assertEqual(decision.state, "RETICLE_UNLOCKED")
+
     def test_low_confidence_text_never_authorizes_rule(self) -> None:
         values = {
             self.regions["titleCenter"]: (OcrToken("奖励", 0.40),),

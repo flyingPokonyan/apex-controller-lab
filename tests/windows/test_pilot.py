@@ -460,6 +460,20 @@ class PilotTest(unittest.TestCase):
         self.assertEqual(confirmed["state"], "GENERIC_MODAL")
         self.assertEqual(self.sender.calls, [("tap", 1, 80)])
 
+    def test_reticle_unlock_short_taps_space_instead_of_enter_or_escape(self) -> None:
+        self.enable_overlays()
+        self.screen()
+        self.overlay_provider.readings = {
+            "titleCenter": ("光圈已解锁", 0.99),
+            "bottomCenter": ("继续", 0.99),
+            "bottomLeftBack": ("ESC 返回", 0.99),
+        }
+
+        record = self._settle_overlay()
+
+        self.assertEqual(record["state"], "RETICLE_UNLOCKED")
+        self.assertEqual(self.sender.calls, [("tap", 57, 80)])
+
     def test_a_clear_overlay_scan_allows_the_lobby_action_immediately(self) -> None:
         self.enable_overlays()
         self.screen(lobbyPrimaryButton=("准备", 1.0), lobbyModeName=("进化版机器人大逃杀", 1.0))

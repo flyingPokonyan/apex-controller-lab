@@ -10,6 +10,28 @@
   },
   "rules": [
     {
+      "id": "reticle-unlock-space-continue",
+      "enabled": true,
+      "state": "RETICLE_UNLOCKED",
+      "safePage": true,
+      "requirements": [
+        {
+          "region": "titleCenter",
+          "any": ["光圈已解锁", "光圈解锁"]
+        },
+        {
+          "region": "bottomCenter",
+          "all": ["继续"]
+        }
+      ],
+      "action": {
+        "name": "spaceScanCode",
+        "kind": "key",
+        "maxAttempts": 2,
+        "confirmMs": 2500
+      }
+    },
+    {
       "id": "level-up-continue",
       "enabled": true,
       "state": "LEVEL_UP_VIDEO",

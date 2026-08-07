@@ -62,6 +62,15 @@
       ]
     },
     {
+      "id": "reticle-unlock-space-continue",
+      "state": "RETICLE_UNLOCKED",
+      "_note": "20260807 实际页面标题是「光圈已解锁」，底部明确写着「SPACE 继续」，左下角同时有「ESC 返回」。这不是此前修过的「SPACE 按住以确认」页；按页面给出的键短按 SPACE，并且放在通用 reward-continue 前面，避免它先匹配「已解锁 + 继续」后发送 ENTER。SPACE 字样很小，不把它作为识别前提；明确标题加「继续」已经唯一定位该页。",
+      "requirements": [
+        {"region": "titleCenter", "any": ["光圈已解锁", "光圈解锁"], "minConfidence": 0.65},
+        {"region": "bottomCenter", "all": ["继续"], "minConfidence": 0.65}
+      ]
+    },
+    {
       "id": "level-up-continue",
       "state": "LEVEL_UP_VIDEO",
       "requirements": [
