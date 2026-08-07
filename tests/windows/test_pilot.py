@@ -474,6 +474,56 @@ class PilotTest(unittest.TestCase):
         self.assertEqual(record["state"], "RETICLE_UNLOCKED")
         self.assertEqual(self.sender.calls, [("tap", 57, 80)])
 
+    def test_reticle_unlock_uses_its_evidenced_escape_fallback_once(self) -> None:
+        self.enable_overlays()
+        self.screen()
+        self.overlay_provider.readings = {
+            "titleCenter": ("光圈已解锁", 0.99),
+            "bottomCenter": ("继续", 0.99),
+            "bottomLeftBack": ("ESC 返回", 0.99),
+        }
+        self._settle_overlay()
+
+        self.now = 5.1
+        second = self.pilot.step()
+        self.now = 7.7
+        fallback = self.pilot.step()
+
+        self.assertEqual(second["decision"]["capability"], "dismiss-reticle-unlock")
+        self.assertEqual(fallback["decision"]["capability"], "back-out-reticle-unlock")
+        self.assertEqual(fallback["decision"]["reason"], "FALLBACK_AFTER_EXHAUSTED")
+        self.assertEqual(
+            self.sender.calls,
+            [("tap", 57, 80), ("tap", 57, 80), ("tap", 1, 80)],
+        )
+
+    def test_reticle_fallback_sends_nothing_without_its_escape_evidence(self) -> None:
+        self.enable_overlays()
+        self.pilot.known_stall_give_up_s = 5.0
+        self.screen()
+        self.overlay_provider.readings = {
+            "titleCenter": ("光圈已解锁", 0.99),
+            "bottomCenter": ("继续", 0.99),
+        }
+        self._settle_overlay()
+        self.now = 5.1
+        self.pilot.step()
+        self.now = 7.7
+        skipped = self.pilot.step()
+        self.now = 9.8
+        exhausted = self.pilot.step()
+        self.now = 14.9
+        self.pilot.step()
+
+        self.assertEqual(skipped["decision"]["capability"], "back-out-reticle-unlock")
+        self.assertEqual(exhausted["decision"]["reason"], "ATTEMPTS_EXHAUSTED")
+        taps = [call for call in self.sender.calls if call[0] == "tap"]
+        self.assertEqual(taps, [("tap", 57, 80), ("tap", 57, 80)])
+        self.assertIn("ACTION_SKIPPED", self.recorder.names())
+        self.assertIn("STALL_DETECTED", self.recorder.names())
+        self.assertIn("STALL_UNRECOVERED", self.recorder.names())
+        self.assertEqual(self.pilot.session_outcome, "STALLED_KNOWN")
+
     def test_a_clear_overlay_scan_allows_the_lobby_action_immediately(self) -> None:
         self.enable_overlays()
         self.screen(lobbyPrimaryButton=("准备", 1.0), lobbyModeName=("进化版机器人大逃杀", 1.0))

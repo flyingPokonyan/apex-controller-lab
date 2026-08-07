@@ -82,7 +82,7 @@
       "id": "reward-continue",
       "state": "REWARD",
       "requirements": [
-        {"region": "titleCenter", "any": ["奖励", "已解锁", "获得奖励"], "minConfidence": 0.65},
+        {"region": "titleCenter", "any": ["奖励", "获得奖励"], "minConfidence": 0.65},
         {"region": "bottomCenter", "any": ["继续", "领取"], "minConfidence": 0.65}
       ]
     },

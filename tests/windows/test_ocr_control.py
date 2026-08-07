@@ -98,6 +98,15 @@ class OcrRulesTest(unittest.TestCase):
         self.assertEqual(decision.rule_id, "reticle-unlock-space-continue")
         self.assertEqual(decision.state, "RETICLE_UNLOCKED")
 
+    def test_bare_unlocked_text_is_not_assumed_to_use_enter(self) -> None:
+        values = {
+            self.regions["titleCenter"]: (OcrToken("武器已解锁", 0.99),),
+            self.regions["bottomCenter"]: (OcrToken("继续", 0.98),),
+        }
+        detector = OcrObstacleDetector.from_path(FakeProvider(values), self.rules_path)
+
+        self.assertIsNone(detector.analyze(self.frame).decision)
+
     def test_low_confidence_text_never_authorizes_rule(self) -> None:
         values = {
             self.regions["titleCenter"]: (OcrToken("奖励", 0.40),),

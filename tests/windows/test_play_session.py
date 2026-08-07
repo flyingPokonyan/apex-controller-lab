@@ -45,6 +45,7 @@ class FakeGuard:
 
 class FakePilot:
     dispatchers: list[object] = []
+    outcome = "COMPLETED"
 
     def __init__(self, config, source, sender, guard, recorder, **kwargs) -> None:
         self.recorder = recorder
@@ -59,7 +60,7 @@ class FakePilot:
         self.monotonic = lambda: 1.0
 
     def run(self, duration_s=None) -> str:
-        return "COMPLETED"
+        return self.outcome
 
     def write_summary(self) -> Path:
         path = self.recorder.run_dir / "pilot-summary.json"
@@ -91,6 +92,7 @@ def config(path: Path) -> RunnerConfig:
 class PlaySessionRunnerTest(unittest.TestCase):
     def setUp(self) -> None:
         FakePilot.dispatchers.clear()
+        FakePilot.outcome = "COMPLETED"
         self.temporary = tempfile.TemporaryDirectory()
         self.addCleanup(self.temporary.cleanup)
         self.root = Path(self.temporary.name)
@@ -151,6 +153,20 @@ class PlaySessionRunnerTest(unittest.TestCase):
 
         with self.assertRaisesRegex(ValueError, "必须启用远程上报"):
             self.runner.run(identity, ContinuePlayPolicy(), object())
+
+    def test_a_known_page_stall_keeps_its_specific_error_code(self) -> None:
+        identity = SessionIdentity.from_runner_settings(
+            self.settings,
+            self.verification,
+        )
+        FakePilot.outcome = "STALLED_KNOWN"
+
+        with patch("apex_automation.play_session.CapabilityPilot", FakePilot):
+            result = self.runner.run(identity, ContinuePlayPolicy(), object())
+
+        self.assertEqual(result.status, "PLAYED")
+        self.assertEqual(result.error_code, "KNOWN_STATE_STALL_UNRECOVERED")
+        self.assertIn("已知页面", result.error)
 
     def test_managed_identity_requires_complete_lease_tuple(self) -> None:
         with self.assertRaisesRegex(ValueError, "leaseId/leaseFence"):

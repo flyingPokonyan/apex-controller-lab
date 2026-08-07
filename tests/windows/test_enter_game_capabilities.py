@@ -14,6 +14,7 @@ sys.path.insert(0, str(REPOSITORY_ROOT / "windows"))
 
 from apex_automation.capabilities import CapabilityDispatcher, CapabilitySet
 from apex_automation.ocr_obstacles import (
+    SAFE_KEY_ACTIONS,
     FullFrameOcrProvider,
     OcrObstacleDetector,
     OcrPositionUnavailable,
@@ -146,6 +147,44 @@ class EnterGameCapabilityTest(unittest.TestCase):
             with self.subTest(rule=rule.rule_id):
                 self.assertEqual(len(matches), 1)
 
+    def test_every_fallback_is_a_safe_key_with_existing_ocr_evidence(self) -> None:
+        safety = OcrObstacleDetector.from_path(object(), OBSTACLES)
+        overlays = OcrStateDetector.from_path(object(), OVERLAYS)
+        safe_states = {rule.state for rule in safety.rules if rule.enabled}
+        evidence = {
+            (
+                requirement.region,
+                requirement.any_terms,
+                requirement.all_terms,
+                requirement.min_confidence,
+            )
+            for rule in overlays.rules
+            if rule.enabled
+            for requirement in rule.requirements
+        }
+        fallbacks = [
+            item
+            for item in self.capabilities.capabilities
+            if item.fallback_for is not None
+        ]
+        self.assertTrue(fallbacks)
+        for capability in fallbacks:
+            with self.subTest(capability=capability.id):
+                self.assertIn(capability.action, SAFE_KEY_ACTIONS)
+                self.assertTrue(set(capability.states).issubset(safe_states))
+                self.assertIsNotNone(capability.evidence)
+                item = capability.evidence
+                assert item is not None
+                self.assertIn(
+                    (
+                        item.region,
+                        item.any_terms,
+                        item.all_terms,
+                        item.min_confidence,
+                    ),
+                    evidence,
+                )
+
     def test_known_overlay_pages_are_all_routed_into_the_capability_set(self) -> None:
         detector = OcrStateDetector.from_path(object(), OVERLAYS)
         overlay_states = detector.states
@@ -156,7 +195,12 @@ class EnterGameCapabilityTest(unittest.TestCase):
         self.assertEqual(self.capabilities.for_state("AUTH_REQUIRED"), ())
         for state in overlay_states - {"AUTH_REQUIRED"}:
             with self.subTest(state=state):
-                self.assertEqual(len(self.capabilities.for_state(state)), 1)
+                capabilities = self.capabilities.for_state(state)
+                primary = [item for item in capabilities if item.fallback_for is None]
+                self.assertEqual(len(primary), 1)
+                self.assertTrue(
+                    all(item.fallback_for == primary[0].id for item in capabilities[1:])
+                )
 
         self.assertEqual(self.payload["actions"]["escapeScanCode"], 1)
         self.assertEqual(self.payload["actions"]["guideAccountContinue"], [610, 150])

@@ -17,6 +17,16 @@ ACTION_KINDS: frozenset[str] = frozenset({"click", "key", "sequence", "clickText
 
 
 @dataclass(frozen=True)
+class CapabilityEvidence:
+    """Text that must still be visible immediately before an action is sent."""
+
+    region: str
+    any_terms: tuple[str, ...] = ()
+    all_terms: tuple[str, ...] = ()
+    min_confidence: float = 0.65
+
+
+@dataclass(frozen=True)
 class Capability:
     """One thing the runner knows how to do, and the rules for doing it safely.
 
@@ -49,6 +59,11 @@ class Capability:
     # default tap. Some prompts do not accept a tap at all, so this has to be
     # per-capability rather than one number for the whole session.
     hold_ms: int = 0
+    # A fallback is never an alternative interpretation of a frame. It may run
+    # only after one named capability has spent its budget on the same visit,
+    # and only while its own on-screen evidence is still visible.
+    fallback_for: str | None = None
+    evidence: CapabilityEvidence | None = None
 
     def __post_init__(self) -> None:
         if not self.states:
@@ -63,6 +78,24 @@ class Capability:
             raise ValueError(f"只有按键动作可以设置按住时长：{self.id}")
         if not 0 <= self.hold_ms <= 2000:
             raise ValueError(f"能力 {self.id} 的按住时长必须为 0 到 2000ms")
+
+        if self.fallback_for is not None:
+            if self.trigger != "onState" or self.action_class != "idempotent":
+                raise ValueError(f"兜底能力必须是 onState idempotent：{self.id}")
+            if self.max_attempts != 1:
+                raise ValueError(f"兜底能力只允许一次尝试：{self.id}")
+            if self.kind != "key" or self.evidence is None:
+                raise ValueError(f"兜底能力必须是带文字证据的键盘动作：{self.id}")
+        elif self.evidence is not None:
+            raise ValueError(f"只有显式兜底能力可以声明动作证据：{self.id}")
+
+        if self.evidence is not None:
+            if not self.evidence.region:
+                raise ValueError(f"兜底能力没有声明证据区域：{self.id}")
+            if not self.evidence.any_terms and not self.evidence.all_terms:
+                raise ValueError(f"兜底能力没有声明任何文字证据：{self.id}")
+            if not 0 <= self.evidence.min_confidence <= 1:
+                raise ValueError(f"兜底能力的证据置信度无效：{self.id}")
 
         # A toggle undoes itself when repeated, so a retry without positive
         # evidence is never safe. LCTRL on the dropship is the example that
@@ -137,9 +170,31 @@ class CapabilitySet:
             if capability.id in seen:
                 raise ValueError(f"能力 id 重复：{capability.id}")
             seen.add(capability.id)
+        by_id = {capability.id: capability for capability in items}
+        fallback_parents: set[str] = set()
+        for capability in items:
+            if capability.fallback_for is None:
+                continue
+            parent = by_id.get(capability.fallback_for)
+            if parent is None:
+                raise ValueError(
+                    f"兜底能力 {capability.id} 引用了不存在的能力 {capability.fallback_for}"
+                )
+            if parent.fallback_for is not None:
+                raise ValueError(f"兜底能力不能继续串联兜底：{capability.id}")
+            if parent.trigger != "onState":
+                raise ValueError(f"兜底能力的主能力必须是 onState：{capability.id}")
+            if not set(capability.states).issubset(parent.states):
+                raise ValueError(f"兜底能力的画面必须包含在主能力中：{capability.id}")
+            if capability.priority >= parent.priority:
+                raise ValueError(f"兜底能力优先级必须低于主能力：{capability.id}")
+            if parent.id in fallback_parents:
+                raise ValueError(f"一个主能力只能声明一个兜底：{parent.id}")
+            fallback_parents.add(parent.id)
         # Highest priority first; ties broken by id so arbitration is stable
         # across runs and reorderings of the config file.
         self.capabilities = tuple(sorted(items, key=lambda item: (-item.priority, item.id)))
+        self.by_id = by_id
 
     def for_state(self, state: str) -> tuple[Capability, ...]:
         return tuple(item for item in self.capabilities if state in item.states)
@@ -165,6 +220,25 @@ class CapabilitySet:
                 delay_ms=int(item.get("delayMs", 0)),
                 delay_jitter_ms=int(item.get("delayJitterMs", 0)),
                 hold_ms=int(item.get("holdMs", 0)),
+                fallback_for=(
+                    None if item.get("fallbackFor") is None else str(item["fallbackFor"])
+                ),
+                evidence=(
+                    None
+                    if item.get("evidence") is None
+                    else CapabilityEvidence(
+                        region=str(item["evidence"]["region"]),
+                        any_terms=tuple(
+                            str(value) for value in item["evidence"].get("any", [])
+                        ),
+                        all_terms=tuple(
+                            str(value) for value in item["evidence"].get("all", [])
+                        ),
+                        min_confidence=float(
+                            item["evidence"].get("minConfidence", 0.65)
+                        ),
+                    )
+                ),
             )
             for item in payload.get("capabilities", [])
         )
@@ -350,9 +424,6 @@ class CapabilityDispatcher:
             return Decision("wait", reason="CYCLE_PAUSED")
         self._cycle_paused = False
 
-        if self.blocked_observation_version == observation_version:
-            return Decision("wait", reason="OBSERVATION_BLOCKED")
-
         if self.pending is not None:
             if now < self.pending.retry_at:
                 return Decision("wait", reason="AWAITING_POSTCONDITION")
@@ -367,7 +438,9 @@ class CapabilityDispatcher:
                 state in retry.capability.states
                 and self.delay_remaining(retry.capability, now) <= 0
             ):
-                return self._start(retry.capability, state, observation_version, now)
+                attempts = self.attempts.get(retry.capability.id, 0)
+                if attempts < retry.capability.max_attempts:
+                    return self._start(retry.capability, state, observation_version, now)
 
         candidates = self.capabilities.for_state(state)
         if not candidates:
@@ -375,14 +448,42 @@ class CapabilityDispatcher:
 
         periodic = [item for item in candidates if item.trigger == "periodic"]
         on_state = [item for item in candidates if item.trigger == "onState"]
-        waiting = [item for item in on_state if self.delay_remaining(item, now) > 0]
-        ready = [item for item in on_state if self.delay_remaining(item, now) <= 0]
+
+        def eligible(item: Capability) -> bool:
+            attempts = self.attempts.get(item.id, 0)
+            if attempts >= item.max_attempts:
+                return False
+            if item.fallback_for is None:
+                return True
+            parent = self.capabilities.by_id[item.fallback_for]
+            return self.attempts.get(parent.id, 0) >= parent.max_attempts
+
+        eligible_on_state = [item for item in on_state if eligible(item)]
+        waiting = [
+            item for item in eligible_on_state if self.delay_remaining(item, now) > 0
+        ]
+        ready = [item for item in eligible_on_state if self.delay_remaining(item, now) <= 0]
 
         # A screen that has already been acted on still lets periodic
         # behaviours run: they are what "keep doing this while in a match"
         # means, and they carry no postcondition to wait for.
-        if ready and observation_version not in self.handled_observation_versions:
-            return self._start(ready[0], state, observation_version, now)
+        if ready:
+            capability = ready[0]
+            if (
+                observation_version not in self.handled_observation_versions
+                or capability.fallback_for is not None
+            ):
+                return self._start(
+                    capability,
+                    state,
+                    observation_version,
+                    now,
+                    reason=(
+                        "ON_STATE"
+                        if capability.fallback_for is None
+                        else "FALLBACK_AFTER_EXHAUSTED"
+                    ),
+                )
         if waiting and not ready and not periodic:
             return Decision(
                 "wait",
@@ -403,6 +504,28 @@ class CapabilityDispatcher:
                 return decision
         if periodic:
             return Decision("wait", reason="PERIODIC_COOLDOWN", capability=periodic[0])
+
+        if self.blocked_observation_version == observation_version:
+            return Decision("wait", reason="OBSERVATION_BLOCKED")
+        exhausted = [
+            item
+            for item in on_state
+            if self.attempts.get(item.id, 0) >= item.max_attempts
+        ]
+        if exhausted:
+            terminal = exhausted[-1]
+            self.blocked_observation_version = observation_version
+            return Decision(
+                "pause",
+                capability=terminal,
+                attempt=self.attempts.get(terminal.id, 0),
+                reason="ATTEMPTS_EXHAUSTED",
+                detail={
+                    "state": state,
+                    "action": terminal.action,
+                    "fallbackFor": terminal.fallback_for,
+                },
+            )
         return Decision("wait", reason="ALREADY_HANDLED")
 
     def _start(
@@ -411,6 +534,8 @@ class CapabilityDispatcher:
         state: str,
         observation_version: int,
         now: float,
+        *,
+        reason: str = "ON_STATE",
     ) -> Decision:
         attempts = self.attempts.get(capability.id, 0)
         if attempts >= capability.max_attempts:
@@ -432,4 +557,14 @@ class CapabilityDispatcher:
             attempt=attempt,
             retry_at=now + capability.confirm_ms / 1000,
         )
-        return Decision("fire", capability=capability, attempt=attempt, reason="ON_STATE")
+        return Decision(
+            "fire",
+            capability=capability,
+            attempt=attempt,
+            reason=reason,
+            detail=(
+                {}
+                if capability.fallback_for is None
+                else {"fallbackFor": capability.fallback_for}
+            ),
+        )

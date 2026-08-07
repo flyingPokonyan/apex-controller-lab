@@ -658,6 +658,12 @@ class AccountOrchestratorTest(unittest.TestCase):
             ("FAILED", "PLAY_SESSION_FAILED", "FAILED", AccountCycleOutcome.COMPLETED),
             ("STOPPED", "OPERATOR_STOPPED", "RELEASED", AccountCycleOutcome.STOPPED),
             ("PLAYED", None, "RELEASED", AccountCycleOutcome.PAUSED),
+            (
+                "PLAYED",
+                "KNOWN_STATE_STALL_UNRECOVERED",
+                "RELEASED",
+                AccountCycleOutcome.PAUSED,
+            ),
         )
         for status, error_code, expected_outcome, expected_cycle in cases:
             with self.subTest(status=status), tempfile.TemporaryDirectory() as directory:
@@ -711,6 +717,8 @@ class AccountOrchestratorTest(unittest.TestCase):
                 close_call = [item for item in provider.calls if item[0] == "close"][-1]
                 self.assertEqual(close_call[1][3], expected_outcome)
                 self.assertEqual(cycle.outcome, expected_cycle)
+                if status == "PLAYED" and error_code is not None:
+                    self.assertEqual(cycle.error_code, error_code)
 
     def test_failed_restart_with_level_never_becomes_target_reached(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

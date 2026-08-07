@@ -244,6 +244,9 @@ class CapabilityPilot:
         self.stall_window_s = int(stall.get("recoverWindowMs", 20_000)) / 1000
         self.stall_retry_s = int(stall.get("retryMs", 180_000)) / 1000
         self.stall_give_up_s = int(stall.get("giveUpMs", 1_800_000)) / 1000
+        self.known_stall_give_up_s = int(
+            stall.get("knownStateGiveUpMs", 120_000)
+        ) / 1000
         if self.stall_grace_s <= 0 or self.stall_window_s <= 0:
             raise ValueError("停滞看门狗的宽限和处置窗口必须大于 0")
         if self.stall_queue_grace_s < self.stall_grace_s:
@@ -252,6 +255,8 @@ class CapabilityPilot:
             raise ValueError("停滞看门狗的重试间隔不能短于一次处置窗口")
         if self.stall_give_up_s and self.stall_give_up_s <= self.stall_grace_s:
             raise ValueError("停滞看门狗的放弃时限必须长于宽限")
+        if self.known_stall_give_up_s <= 0:
+            raise ValueError("已知画面动作耗尽后的放弃时限必须大于 0")
 
         # Legend select is the one screen the runner passes through every match
         # and has never seen: it lives inside the unknown stretch between
@@ -341,6 +346,8 @@ class CapabilityPilot:
         self._stall_rounds = 0
         self._stall_round_until = 0.0
         self._stall_next_round_at = 0.0
+        self._known_stall_key: tuple[str, int, str] | None = None
+        self._known_stall_since: float | None = None
         self._legend_armed = False
         self._legend_kept = 0
         self._legend_rounds_captured = 0
@@ -404,6 +411,15 @@ class CapabilityPilot:
                 self._validate_sequence(capability.action, spec)
             elif capability.kind == "clickText":
                 self._validate_click_text(capability.action, spec)
+            if (
+                capability.evidence is not None
+                and self.overlay_detector is not None
+                and capability.evidence.region not in self.overlay_detector.regions
+            ):
+                raise ValueError(
+                    f"兜底能力 {capability.id} 引用了未知区域 "
+                    f"{capability.evidence.region}"
+                )
 
     def _validate_click_text(self, action_name: str, spec: object) -> None:
         if not isinstance(spec, dict):
@@ -585,10 +601,19 @@ class CapabilityPilot:
             self.sender.click(x, y)
             return {"x": x, "y": y}
         if capability.kind == "key":
+            evidence = capability.evidence
+            if evidence is not None:
+                matched, detail = self._action_evidence(capability, frame)
+                if not matched:
+                    return {"skipped": "ACTION_EVIDENCE_MISSING", **detail}
             scan_code = int(spec)
             duration_ms = capability.hold_ms or self.key_tap_ms
             self.sender.tap_scan_code(scan_code, duration_ms)
-            return {"scanCode": scan_code, "durationMs": duration_ms}
+            return {
+                "scanCode": scan_code,
+                "durationMs": duration_ms,
+                **({} if evidence is None else detail),
+            }
         if capability.kind == "clickText":
             found = self._find_button(spec, frame)
             if found is not None:
@@ -646,6 +671,55 @@ class CapabilityPilot:
                 }
             )
         return {"steps": executed}
+
+    def _action_evidence(
+        self,
+        capability: Capability,
+        frame: np.ndarray,
+    ) -> tuple[bool, dict[str, object]]:
+        """Re-read a fallback's printed key hint before sending the key."""
+
+        evidence = capability.evidence
+        assert evidence is not None
+        if self.overlay_detector is None:
+            return False, {"evidenceRegion": evidence.region, "evidenceError": "NO_DETECTOR"}
+        region = self.overlay_detector.regions.get(evidence.region)
+        if region is None:
+            return False, {"evidenceRegion": evidence.region, "evidenceError": "NO_REGION"}
+        provider = self.overlay_detector.provider
+        begin_frame = getattr(provider, "begin_frame", None)
+        if callable(begin_frame):
+            begin_frame(frame)
+        try:
+            tokens = provider.read(frame, region)
+        except Exception as error:
+            self.recorder.log(
+                "ACTION_EVIDENCE_ERROR",
+                capability=capability.id,
+                region=evidence.region,
+                error=str(error),
+            )
+            return False, {
+                "evidenceRegion": evidence.region,
+                "evidenceError": type(error).__name__,
+            }
+        eligible = tuple(
+            token for token in tokens if token.confidence >= evidence.min_confidence
+        )
+        joined = "".join(token.normalized for token in eligible)
+        any_terms = tuple(normalize_ocr_text(value) for value in evidence.any_terms)
+        all_terms = tuple(normalize_ocr_text(value) for value in evidence.all_terms)
+        matched = (
+            (not any_terms or any(term and term in joined for term in any_terms))
+            and all(term and term in joined for term in all_terms)
+        )
+        return matched, {
+            "evidenceRegion": evidence.region,
+            "evidenceText": [token.text for token in eligible],
+            "evidenceConfidence": round(
+                min((token.confidence for token in eligible), default=0.0), 4
+            ),
+        }
 
     # ------------------------------------------------------------- pending
 
@@ -1436,6 +1510,81 @@ class CapabilityPilot:
             return observation
         return StateObservation(STALLED_UNKNOWN, "stallWatchdog", "stall-watchdog", 1.0)
 
+    def _track_known_stall(
+        self,
+        decision: Decision,
+        state: str | None,
+        now: float,
+        frame: np.ndarray,
+    ) -> None:
+        """End a run that exhausted every declared action on a known page."""
+
+        current_key = None if state is None else (state, self.state_version)
+        if self._known_stall_key is not None:
+            stalled_state, stalled_version, capability_id = self._known_stall_key
+            if current_key != (stalled_state, stalled_version):
+                self.recorder.log(
+                    "STALL_RECOVERED",
+                    stallKind="KNOWN_STATE",
+                    state=state,
+                    previousState=stalled_state,
+                    capability=capability_id,
+                    stalledForMs=(
+                        0
+                        if self._known_stall_since is None
+                        else round((now - self._known_stall_since) * 1000)
+                    ),
+                )
+                self._known_stall_key = None
+                self._known_stall_since = None
+
+        if (
+            decision.kind == "pause"
+            and decision.reason == "ATTEMPTS_EXHAUSTED"
+            and decision.capability is not None
+            and state is not None
+            and self._known_stall_key is None
+        ):
+            self._known_stall_key = (state, self.state_version, decision.capability.id)
+            self._known_stall_since = now
+            self.recorder.log(
+                "STALL_DETECTED",
+                stallKind="KNOWN_STATE",
+                state=state,
+                capability=decision.capability.id,
+                action=decision.capability.action,
+                attempts=decision.attempt,
+                reason="已知页面的可用动作均未让画面变化",
+                tokens=[
+                    {
+                        "text": token.text,
+                        "confidence": round(token.confidence, 3),
+                        "roi": list(token.roi) if token.roi else None,
+                    }
+                    for token in self._last_page_tokens[:80]
+                ],
+            )
+            self.notify(
+                f"停滞：{state} 的可用动作已经用尽，停止输入并等待画面变化。"
+            )
+
+        if self._known_stall_key is None or self._known_stall_since is None:
+            return
+        if now - self._known_stall_since < self.known_stall_give_up_s:
+            return
+        stalled_state, _, capability_id = self._known_stall_key
+        self.recorder.log(
+            "STALL_UNRECOVERED",
+            stallKind="KNOWN_STATE",
+            state=stalled_state,
+            capability=capability_id,
+            stalledForMs=round((now - self._known_stall_since) * 1000),
+            reason="已知页面动作耗尽后仍未变化",
+        )
+        self._snapshot("known-stall-unrecovered", frame)
+        self.session_outcome = "STALLED_KNOWN"
+        self.notify("已知页面持续无法处理：结束本次会话并安全收口。")
+
     def _snapshot(self, stage: str, frame: np.ndarray) -> None:
         if self.screenshot_count >= self.max_screenshots:
             return
@@ -1499,6 +1648,8 @@ class CapabilityPilot:
         self._unknown_since = None
         self._stall_since = None
         self._stall_rounds = 0
+        self._known_stall_key = None
+        self._known_stall_since = None
         self.recorder.log("FOREGROUND_PAUSED")
         self.notify("暂停：Apex 不在前台。")
 
@@ -1579,6 +1730,7 @@ class CapabilityPilot:
         decision = self.dispatcher.decide(state, self.state_version, now)
         record["decision"] = {"kind": decision.kind, "reason": decision.reason}
         self.counters[f"{decision.kind}:{decision.reason}"] += 1
+        self._track_known_stall(decision, state, now, frame)
 
         if decision.kind == "fire" and state is not None:
             record["decision"]["capability"] = decision.capability.id

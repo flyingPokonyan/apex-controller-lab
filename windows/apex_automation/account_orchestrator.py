@@ -787,7 +787,7 @@ class AccountOrchestrator:
                     )
                 if result.status not in {"TARGET_REACHED", "FAILED"}:
                     return self._pause(
-                        "SESSION_ENDED_WITHOUT_TARGET",
+                        result.error_code or "SESSION_ENDED_WITHOUT_TARGET",
                         manual=True,
                     )
                 # The cycle completing says nothing about how the game session

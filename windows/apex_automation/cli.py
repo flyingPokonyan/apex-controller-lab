@@ -41,7 +41,12 @@ from .input_win32 import EmergencyStop, Win32InputSender, Win32SafetyGuard
 from .instance_lock import AlreadyRunningError, SingleInstanceLock
 from .lease_keeper import LeaseKeeper
 from .observer import ObservationSession
-from .ocr_obstacles import FullFrameOcrProvider, OcrObstacleDetector, RapidOcrProvider
+from .ocr_obstacles import (
+    SAFE_KEY_ACTIONS,
+    FullFrameOcrProvider,
+    OcrObstacleDetector,
+    RapidOcrProvider,
+)
 from .ocr_states import OcrStateDetector
 from .pilot import producible_states
 from .play_session import PlaySessionRunner, SessionIdentity
@@ -573,6 +578,44 @@ def _build_play_session_runner(
             if not matches:
                 raise ValueError(
                     f"清障规则 {rule.rule_id} 与能力集动作不一致：{rule.state}"
+                )
+
+        safe_states = {
+            rule.state for rule in safety_detector.rules if rule.enabled
+        }
+        overlay_evidence = {
+            (
+                requirement.region,
+                requirement.any_terms,
+                requirement.all_terms,
+                requirement.min_confidence,
+            )
+            for rule in overlay_detector.rules
+            if rule.enabled
+            for requirement in rule.requirements
+        }
+        for capability in capabilities.capabilities:
+            if capability.fallback_for is None:
+                continue
+            if capability.action not in SAFE_KEY_ACTIONS:
+                raise ValueError(
+                    f"兜底能力 {capability.id} 的动作不在安全键白名单"
+                )
+            if any(state not in safe_states for state in capability.states):
+                raise ValueError(
+                    f"兜底能力 {capability.id} 没有安全页面规则"
+                )
+            evidence = capability.evidence
+            assert evidence is not None
+            signature = (
+                evidence.region,
+                evidence.any_terms,
+                evidence.all_terms,
+                evidence.min_confidence,
+            )
+            if signature not in overlay_evidence:
+                raise ValueError(
+                    f"兜底能力 {capability.id} 的动作证据没有对应 OCR 规则"
                 )
 
     guard = Win32SafetyGuard(config.environment["foregroundExecutables"])

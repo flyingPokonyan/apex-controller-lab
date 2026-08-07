@@ -340,6 +340,14 @@ class PlaySessionRunner:
                 error_code = "STALL_UNRECOVERED"
                 error_message = "画面长时间无法识别且无法恢复"
                 finish_detail["reason"] = error_message
+            elif outcome == "STALLED_KNOWN":
+                # The page was recognised and every action was bounded, but
+                # neither the primary action nor its explicitly evidenced
+                # fallback moved it. Close cleanly and stop the managed loop
+                # instead of spending another account on the same UI fault.
+                error_code = "KNOWN_STATE_STALL_UNRECOVERED"
+                error_message = "已知页面的安全动作全部耗尽且画面仍未变化"
+                finish_detail["reason"] = error_message
         except (EmergencyStop, KeyboardInterrupt) as error:
             finish_status = "STOPPED"
             error_message = str(error) or "用户停止"

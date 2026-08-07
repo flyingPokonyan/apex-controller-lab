@@ -61,7 +61,7 @@
       "requirements": [
         {
           "region": "titleCenter",
-          "any": ["奖励", "已解锁", "获得奖励"]
+          "any": ["奖励", "获得奖励"]
         },
         {
           "region": "bottomCenter",

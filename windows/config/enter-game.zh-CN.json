@@ -53,6 +53,23 @@
       "_note": "光圈解锁页明确写着「SPACE 继续」，所以按页面给出的 SPACE 短按，而不是沿用通用奖励页的 ENTER。没有「按住」或「长按」字样，不走 FULLSCREEN_HOLD_CONFIRM 的 2000ms 长按。"
     },
     {
+      "id": "back-out-reticle-unlock",
+      "priority": 124,
+      "states": ["RETICLE_UNLOCKED"],
+      "action": "escapeScanCode",
+      "kind": "key",
+      "actionClass": "idempotent",
+      "confirmMs": 2000,
+      "maxAttempts": 1,
+      "fallbackFor": "dismiss-reticle-unlock",
+      "evidence": {
+        "region": "bottomLeftBack",
+        "all": ["esc", "返回"],
+        "minConfidence": 0.65
+      },
+      "_note": "只有 SPACE 两次都没有让同一页面变化时才有资格运行；发送前会在当前帧重新 OCR，必须仍能读到页面自己给出的「ESC 返回」。证据缺失就不发送，也不会继续轮试 ENTER。"
+    },
+    {
       "id": "dismiss-level-up",
       "priority": 120,
       "states": ["LEVEL_UP_VIDEO"],

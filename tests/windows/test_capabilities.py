@@ -11,6 +11,7 @@ sys.path.insert(0, str(REPOSITORY_ROOT / "windows"))
 from apex_automation.capabilities import (
     Capability,
     CapabilityDispatcher,
+    CapabilityEvidence,
     CapabilitySet,
 )
 
@@ -70,6 +71,74 @@ class CapabilityValidationTest(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "能力 id 重复"):
             CapabilitySet([click("a", "CONTINUE"), click("a", "LOBBY_READY")])
 
+    def test_a_fallback_must_name_a_real_higher_priority_parent(self) -> None:
+        evidence = CapabilityEvidence(region="bottomLeft", all_terms=("esc", "返回"))
+        fallback = Capability(
+            id="back",
+            priority=40,
+            states=("PROMPT",),
+            action="escapeScanCode",
+            kind="key",
+            action_class="idempotent",
+            max_attempts=1,
+            fallback_for="missing",
+            evidence=evidence,
+        )
+        with self.assertRaisesRegex(ValueError, "不存在的能力"):
+            CapabilitySet([fallback])
+
+        parent = Capability(
+            id="continue",
+            priority=30,
+            states=("PROMPT",),
+            action="spaceScanCode",
+            kind="key",
+            action_class="idempotent",
+        )
+        fallback = Capability(
+            id="back",
+            priority=40,
+            states=("PROMPT",),
+            action="escapeScanCode",
+            kind="key",
+            action_class="idempotent",
+            max_attempts=1,
+            fallback_for="continue",
+            evidence=evidence,
+        )
+        with self.assertRaisesRegex(ValueError, "优先级必须低于"):
+            CapabilitySet([parent, fallback])
+
+    def test_a_fallback_parent_must_be_on_state(self) -> None:
+        parent = Capability(
+            id="periodic",
+            priority=50,
+            states=("PROMPT",),
+            action="spaceScanCode",
+            kind="key",
+            action_class="idempotent",
+            trigger="periodic",
+            min_interval_ms=1000,
+            max_interval_ms=2000,
+        )
+        fallback = Capability(
+            id="back",
+            priority=40,
+            states=("PROMPT",),
+            action="escapeScanCode",
+            kind="key",
+            action_class="idempotent",
+            max_attempts=1,
+            fallback_for="periodic",
+            evidence=CapabilityEvidence(
+                region="bottomLeft",
+                all_terms=("esc", "返回"),
+            ),
+        )
+
+        with self.assertRaisesRegex(ValueError, "主能力必须是 onState"):
+            CapabilitySet([parent, fallback])
+
 
 class DispatcherTest(unittest.TestCase):
     def setUp(self) -> None:
@@ -87,6 +156,48 @@ class DispatcherTest(unittest.TestCase):
         decision = dispatcher.decide("LOBBY", 1, self.now)
         self.assertEqual(decision.kind, "fire")
         self.assertEqual(decision.capability.id, "popup")
+
+    def test_an_explicit_fallback_runs_once_after_the_parent_exhausts(self) -> None:
+        primary = Capability(
+            id="space",
+            priority=80,
+            states=("PROMPT",),
+            action="spaceScanCode",
+            kind="key",
+            action_class="idempotent",
+            confirm_ms=1000,
+            max_attempts=2,
+        )
+        fallback = Capability(
+            id="escape",
+            priority=70,
+            states=("PROMPT",),
+            action="escapeScanCode",
+            kind="key",
+            action_class="idempotent",
+            confirm_ms=1000,
+            max_attempts=1,
+            fallback_for="space",
+            evidence=CapabilityEvidence(
+                region="bottomLeft",
+                all_terms=("esc", "返回"),
+            ),
+        )
+        dispatcher = self._dispatcher(primary, fallback)
+        dispatcher.note_state("PROMPT", 0.0)
+
+        first = dispatcher.decide("PROMPT", 1, 0.0)
+        second = dispatcher.decide("PROMPT", 1, 1.1)
+        third = dispatcher.decide("PROMPT", 1, 2.2)
+        exhausted = dispatcher.decide("PROMPT", 1, 3.3)
+
+        self.assertEqual(first.capability.id, "space")
+        self.assertEqual(second.capability.id, "space")
+        self.assertEqual(third.capability.id, "escape")
+        self.assertEqual(third.reason, "FALLBACK_AFTER_EXHAUSTED")
+        self.assertEqual(exhausted.kind, "pause")
+        self.assertEqual(exhausted.capability.id, "escape")
+        self.assertEqual(exhausted.reason, "ATTEMPTS_EXHAUSTED")
 
     def test_unknown_state_never_fires_anything(self) -> None:
         dispatcher = self._dispatcher(click("continue", "CONTINUE"))
