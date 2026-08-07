@@ -28,6 +28,15 @@
     "tacticalScanCode": 16,
     "detachScanCode": 29,
     "launchScanCode": 18,
+    "knownStateRecovery": {
+      "region": "fullFrame",
+      "any": ["继续", "重试", "保持原样", "返回大厅", "关闭", "确定", "确认", "好的", "接受", "返回"],
+      "minConfidence": 0.7,
+      "holdWords": ["按住", "长按"],
+      "holdScanCode": 57,
+      "holdMs": 2000,
+      "_note": "已知低风险页面的主动作耗尽后，用当前帧全屏 OCR 重新定位页面真正写出的安全命令，以不同的输入方式再尝试一次。必须有文字坐标才点击；「按住/长按」改为 SPACE 长按；找不到时不发任何键，也不会轮按 SPACE/ENTER/ESC。"
+    },
     "stallRecovery": {
       "region": "fullFrame",
       "any": ["继续", "重试", "确定", "确认", "接受", "返回大厅", "好的", "关闭", "返回"],
@@ -51,23 +60,6 @@
       "confirmMs": 2500,
       "maxAttempts": 2,
       "_note": "光圈解锁页明确写着「SPACE 继续」，所以按页面给出的 SPACE 短按，而不是沿用通用奖励页的 ENTER。没有「按住」或「长按」字样，不走 FULLSCREEN_HOLD_CONFIRM 的 2000ms 长按。"
-    },
-    {
-      "id": "back-out-reticle-unlock",
-      "priority": 124,
-      "states": ["RETICLE_UNLOCKED"],
-      "action": "escapeScanCode",
-      "kind": "key",
-      "actionClass": "idempotent",
-      "confirmMs": 2000,
-      "maxAttempts": 1,
-      "fallbackFor": "dismiss-reticle-unlock",
-      "evidence": {
-        "region": "bottomLeftBack",
-        "all": ["esc", "返回"],
-        "minConfidence": 0.65
-      },
-      "_note": "只有 SPACE 两次都没有让同一页面变化时才有资格运行；发送前会在当前帧重新 OCR，必须仍能读到页面自己给出的「ESC 返回」。证据缺失就不发送，也不会继续轮试 ENTER。"
     },
     {
       "id": "dismiss-level-up",
@@ -239,6 +231,48 @@
         "CLIMB_SETTINGS_MODAL"
       ],
       "_note": "操作者确认返回大厅需要完整执行 TAB，再长按 SPACE。序列轻按 TAB 80ms，等待 1500ms 让确认页稳定出现，再长按 SPACE 2000ms；不要求额外识别确认页，也绝不在未知画面上单独发送 SPACE。20260730-191304 已记录程序发出旧版 800ms 序列并进入黑屏加载；这里把间隔放宽以兼容慢切页，最后仍只以已认识的大厅态或攀爬设置弹窗作为成功后置。"
+    },
+    {
+      "id": "recover-known-page-by-visible-prompt",
+      "priority": 69,
+      "states": [
+        "RETICLE_UNLOCKED",
+        "LEVEL_UP_VIDEO",
+        "REWARD",
+        "GENERIC_MODAL",
+        "NEWS_WELCOME",
+        "NEWS_MEMORIAL",
+        "GUIDE_ACCOUNT",
+        "GUIDE_FRIENDS",
+        "GUIDE_SETTINGS",
+        "GUIDE_PROGRESS",
+        "FULLSCREEN_ESC_BACK",
+        "CLIMB_SETTINGS_MODAL",
+        "CONTINUE",
+        "POST_MATCH_SUMMARY"
+      ],
+      "action": "knownStateRecovery",
+      "kind": "clickText",
+      "actionClass": "idempotent",
+      "confirmMs": 4000,
+      "maxAttempts": 1,
+      "fallbackFor": [
+        "dismiss-reticle-unlock",
+        "dismiss-level-up",
+        "dismiss-reward",
+        "dismiss-announcement",
+        "dismiss-news-welcome",
+        "dismiss-news-memorial",
+        "guide-account-continue",
+        "guide-friends-continue",
+        "guide-settings-continue",
+        "guide-progress-continue",
+        "dismiss-esc-back",
+        "dismiss-climb-settings",
+        "title-continue",
+        "post-match-return-lobby"
+      ],
+      "_note": "这是已知安全页面的共用兜底，不是光圈页特判。每个画面的主能力耗尽后才有资格运行，最多一次；大厅排队、模式切换、跳伞和局内能力不在这个列表里。"
     },
     {
       "id": "lobby-open-mode-panel",

@@ -595,27 +595,35 @@ def _build_play_session_runner(
             for requirement in rule.requirements
         }
         for capability in capabilities.capabilities:
-            if capability.fallback_for is None:
+            if not capability.fallback_for:
                 continue
-            if capability.action not in SAFE_KEY_ACTIONS:
-                raise ValueError(
-                    f"兜底能力 {capability.id} 的动作不在安全键白名单"
+            if capability.kind == "key":
+                if capability.action not in SAFE_KEY_ACTIONS:
+                    raise ValueError(
+                        f"兜底能力 {capability.id} 的动作不在安全键白名单"
+                    )
+                if any(state not in safe_states for state in capability.states):
+                    raise ValueError(
+                        f"兜底能力 {capability.id} 没有安全页面规则"
+                    )
+                evidence = capability.evidence
+                assert evidence is not None
+                signature = (
+                    evidence.region,
+                    evidence.any_terms,
+                    evidence.all_terms,
+                    evidence.min_confidence,
                 )
-            if any(state not in safe_states for state in capability.states):
+                if signature not in overlay_evidence:
+                    raise ValueError(
+                        f"兜底能力 {capability.id} 的动作证据没有对应 OCR 规则"
+                    )
+                continue
+
+            action = payload.get("actions", {}).get(capability.action)
+            if not isinstance(action, dict) or action.get("fallbackScanCode") is not None:
                 raise ValueError(
-                    f"兜底能力 {capability.id} 没有安全页面规则"
-                )
-            evidence = capability.evidence
-            assert evidence is not None
-            signature = (
-                evidence.region,
-                evidence.any_terms,
-                evidence.all_terms,
-                evidence.min_confidence,
-            )
-            if signature not in overlay_evidence:
-                raise ValueError(
-                    f"兜底能力 {capability.id} 的动作证据没有对应 OCR 规则"
+                    f"clickText 兜底能力 {capability.id} 不能包含无证据按键"
                 )
 
     guard = Win32SafetyGuard(config.environment["foregroundExecutables"])

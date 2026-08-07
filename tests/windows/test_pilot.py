@@ -474,51 +474,63 @@ class PilotTest(unittest.TestCase):
         self.assertEqual(record["state"], "RETICLE_UNLOCKED")
         self.assertEqual(self.sender.calls, [("tap", 57, 80)])
 
-    def test_reticle_unlock_uses_its_evidenced_escape_fallback_once(self) -> None:
+    def test_a_known_page_uses_its_visible_prompt_after_primary_exhausts(self) -> None:
         self.enable_overlays()
         self.screen()
         self.overlay_provider.readings = {
-            "titleCenter": ("光圈已解锁", 0.99),
-            "bottomCenter": ("继续", 0.99),
-            "bottomLeftBack": ("ESC 返回", 0.99),
+            "fullFrame": [
+                ("账户", 0.99, (300, 100, 420, 150)),
+                ("账号经验值", 0.99, (300, 200, 520, 250)),
+                ("奖励进度", 0.99, (300, 300, 500, 350)),
+                ("继续", 0.99, (1000, 800, 1200, 860)),
+            ],
         }
         self._settle_overlay()
 
-        self.now = 5.1
+        self.now = 3.8
         second = self.pilot.step()
-        self.now = 7.7
+        self.now = 5.1
         fallback = self.pilot.step()
 
-        self.assertEqual(second["decision"]["capability"], "dismiss-reticle-unlock")
-        self.assertEqual(fallback["decision"]["capability"], "back-out-reticle-unlock")
+        self.assertEqual(second["decision"]["capability"], "guide-account-continue")
+        self.assertEqual(
+            fallback["decision"]["capability"],
+            "recover-known-page-by-visible-prompt",
+        )
         self.assertEqual(fallback["decision"]["reason"], "FALLBACK_AFTER_EXHAUSTED")
         self.assertEqual(
             self.sender.calls,
-            [("tap", 57, 80), ("tap", 57, 80), ("tap", 1, 80)],
+            [
+                ("click", 610, 150),
+                ("click", 610, 150),
+                ("click", 1100, 830),
+            ],
         )
 
-    def test_reticle_fallback_sends_nothing_without_its_escape_evidence(self) -> None:
+    def test_known_page_fallback_sends_nothing_without_position_evidence(self) -> None:
         self.enable_overlays()
         self.pilot.known_stall_give_up_s = 5.0
         self.screen()
         self.overlay_provider.readings = {
-            "titleCenter": ("光圈已解锁", 0.99),
-            "bottomCenter": ("继续", 0.99),
+            "fullFrame": ("账户 账号经验值 奖励进度 继续", 0.99),
         }
         self._settle_overlay()
-        self.now = 5.1
+        self.now = 3.8
         self.pilot.step()
-        self.now = 7.7
+        self.now = 5.1
         skipped = self.pilot.step()
-        self.now = 9.8
+        self.now = 9.2
         exhausted = self.pilot.step()
-        self.now = 14.9
+        self.now = 14.3
         self.pilot.step()
 
-        self.assertEqual(skipped["decision"]["capability"], "back-out-reticle-unlock")
+        self.assertEqual(
+            skipped["decision"]["capability"],
+            "recover-known-page-by-visible-prompt",
+        )
         self.assertEqual(exhausted["decision"]["reason"], "ATTEMPTS_EXHAUSTED")
-        taps = [call for call in self.sender.calls if call[0] == "tap"]
-        self.assertEqual(taps, [("tap", 57, 80), ("tap", 57, 80)])
+        clicks = [call for call in self.sender.calls if call[0] == "click"]
+        self.assertEqual(clicks, [("click", 610, 150), ("click", 610, 150)])
         self.assertIn("ACTION_SKIPPED", self.recorder.names())
         self.assertIn("STALL_DETECTED", self.recorder.names())
         self.assertIn("STALL_UNRECOVERED", self.recorder.names())

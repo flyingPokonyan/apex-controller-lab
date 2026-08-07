@@ -81,7 +81,7 @@ class CapabilityValidationTest(unittest.TestCase):
             kind="key",
             action_class="idempotent",
             max_attempts=1,
-            fallback_for="missing",
+            fallback_for=("missing",),
             evidence=evidence,
         )
         with self.assertRaisesRegex(ValueError, "不存在的能力"):
@@ -103,7 +103,7 @@ class CapabilityValidationTest(unittest.TestCase):
             kind="key",
             action_class="idempotent",
             max_attempts=1,
-            fallback_for="continue",
+            fallback_for=("continue",),
             evidence=evidence,
         )
         with self.assertRaisesRegex(ValueError, "优先级必须低于"):
@@ -129,14 +129,14 @@ class CapabilityValidationTest(unittest.TestCase):
             kind="key",
             action_class="idempotent",
             max_attempts=1,
-            fallback_for="periodic",
+            fallback_for=("periodic",),
             evidence=CapabilityEvidence(
                 region="bottomLeft",
                 all_terms=("esc", "返回"),
             ),
         )
 
-        with self.assertRaisesRegex(ValueError, "主能力必须是 onState"):
+        with self.assertRaisesRegex(ValueError, "主能力必须是 onState idempotent"):
             CapabilitySet([parent, fallback])
 
 
@@ -177,7 +177,7 @@ class DispatcherTest(unittest.TestCase):
             action_class="idempotent",
             confirm_ms=1000,
             max_attempts=1,
-            fallback_for="space",
+            fallback_for=("space",),
             evidence=CapabilityEvidence(
                 region="bottomLeft",
                 all_terms=("esc", "返回"),
@@ -198,6 +198,30 @@ class DispatcherTest(unittest.TestCase):
         self.assertEqual(exhausted.kind, "pause")
         self.assertEqual(exhausted.capability.id, "escape")
         self.assertEqual(exhausted.reason, "ATTEMPTS_EXHAUSTED")
+
+    def test_one_text_fallback_can_cover_multiple_known_pages(self) -> None:
+        first = click("first", "FIRST", priority=80, confirm_ms=1000, max_attempts=1)
+        second = click("second", "SECOND", priority=80, confirm_ms=1000, max_attempts=1)
+        fallback = Capability(
+            id="read-visible-prompt",
+            priority=70,
+            states=("FIRST", "SECOND"),
+            action="knownStateRecovery",
+            kind="clickText",
+            action_class="idempotent",
+            confirm_ms=1000,
+            max_attempts=1,
+            fallback_for=("first", "second"),
+        )
+        dispatcher = self._dispatcher(first, second, fallback)
+        dispatcher.note_state("SECOND", 0.0)
+
+        primary = dispatcher.decide("SECOND", 1, 0.0)
+        recovery = dispatcher.decide("SECOND", 1, 1.1)
+
+        self.assertEqual(primary.capability.id, "second")
+        self.assertEqual(recovery.capability.id, "read-visible-prompt")
+        self.assertEqual(recovery.detail["fallbackFor"], "second")
 
     def test_unknown_state_never_fires_anything(self) -> None:
         dispatcher = self._dispatcher(click("continue", "CONTINUE"))

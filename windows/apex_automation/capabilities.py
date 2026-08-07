@@ -60,9 +60,9 @@ class Capability:
     # per-capability rather than one number for the whole session.
     hold_ms: int = 0
     # A fallback is never an alternative interpretation of a frame. It may run
-    # only after one named capability has spent its budget on the same visit,
-    # and only while its own on-screen evidence is still visible.
-    fallback_for: str | None = None
+    # only after the named capability for the current state has spent its
+    # budget on the same visit, and only while current-frame evidence remains.
+    fallback_for: tuple[str, ...] = ()
     evidence: CapabilityEvidence | None = None
 
     def __post_init__(self) -> None:
@@ -79,13 +79,17 @@ class Capability:
         if not 0 <= self.hold_ms <= 2000:
             raise ValueError(f"能力 {self.id} 的按住时长必须为 0 到 2000ms")
 
-        if self.fallback_for is not None:
+        if self.fallback_for:
             if self.trigger != "onState" or self.action_class != "idempotent":
                 raise ValueError(f"兜底能力必须是 onState idempotent：{self.id}")
             if self.max_attempts != 1:
                 raise ValueError(f"兜底能力只允许一次尝试：{self.id}")
-            if self.kind != "key" or self.evidence is None:
-                raise ValueError(f"兜底能力必须是带文字证据的键盘动作：{self.id}")
+            if self.kind == "key" and self.evidence is None:
+                raise ValueError(f"键盘兜底能力必须带文字证据：{self.id}")
+            if self.kind not in {"key", "clickText"}:
+                raise ValueError(f"兜底能力只允许 key 或 clickText：{self.id}")
+            if self.kind == "clickText" and self.evidence is not None:
+                raise ValueError(f"clickText 兜底使用动作自身的 OCR 证据：{self.id}")
         elif self.evidence is not None:
             raise ValueError(f"只有显式兜底能力可以声明动作证据：{self.id}")
 
@@ -173,24 +177,34 @@ class CapabilitySet:
         by_id = {capability.id: capability for capability in items}
         fallback_parents: set[str] = set()
         for capability in items:
-            if capability.fallback_for is None:
+            if not capability.fallback_for:
                 continue
-            parent = by_id.get(capability.fallback_for)
-            if parent is None:
-                raise ValueError(
-                    f"兜底能力 {capability.id} 引用了不存在的能力 {capability.fallback_for}"
-                )
-            if parent.fallback_for is not None:
-                raise ValueError(f"兜底能力不能继续串联兜底：{capability.id}")
-            if parent.trigger != "onState":
-                raise ValueError(f"兜底能力的主能力必须是 onState：{capability.id}")
-            if not set(capability.states).issubset(parent.states):
-                raise ValueError(f"兜底能力的画面必须包含在主能力中：{capability.id}")
-            if capability.priority >= parent.priority:
-                raise ValueError(f"兜底能力优先级必须低于主能力：{capability.id}")
-            if parent.id in fallback_parents:
-                raise ValueError(f"一个主能力只能声明一个兜底：{parent.id}")
-            fallback_parents.add(parent.id)
+            parents: list[Capability] = []
+            for parent_id in capability.fallback_for:
+                parent = by_id.get(parent_id)
+                if parent is None:
+                    raise ValueError(
+                        f"兜底能力 {capability.id} 引用了不存在的能力 {parent_id}"
+                    )
+                if parent.fallback_for:
+                    raise ValueError(f"兜底能力不能继续串联兜底：{capability.id}")
+                if parent.trigger != "onState" or parent.action_class != "idempotent":
+                    raise ValueError(
+                        f"兜底能力的主能力必须是 onState idempotent：{capability.id}"
+                    )
+                if capability.priority >= parent.priority:
+                    raise ValueError(f"兜底能力优先级必须低于主能力：{capability.id}")
+                if parent.id in fallback_parents:
+                    raise ValueError(f"一个主能力只能声明一个兜底：{parent.id}")
+                fallback_parents.add(parent.id)
+                parents.append(parent)
+            for state in capability.states:
+                matches = [parent for parent in parents if state in parent.states]
+                if len(matches) != 1:
+                    raise ValueError(
+                        f"兜底能力 {capability.id} 的画面 {state} "
+                        "必须恰好对应一个主能力"
+                    )
         # Highest priority first; ties broken by id so arbitration is stable
         # across runs and reorderings of the config file.
         self.capabilities = tuple(sorted(items, key=lambda item: (-item.priority, item.id)))
@@ -221,7 +235,13 @@ class CapabilitySet:
                 delay_jitter_ms=int(item.get("delayJitterMs", 0)),
                 hold_ms=int(item.get("holdMs", 0)),
                 fallback_for=(
-                    None if item.get("fallbackFor") is None else str(item["fallbackFor"])
+                    ()
+                    if item.get("fallbackFor") is None
+                    else (
+                        (str(item["fallbackFor"]),)
+                        if isinstance(item["fallbackFor"], str)
+                        else tuple(str(value) for value in item["fallbackFor"])
+                    )
                 ),
                 evidence=(
                     None
@@ -449,13 +469,25 @@ class CapabilityDispatcher:
         periodic = [item for item in candidates if item.trigger == "periodic"]
         on_state = [item for item in candidates if item.trigger == "onState"]
 
+        def fallback_parent(item: Capability) -> Capability | None:
+            if not item.fallback_for:
+                return None
+            return next(
+                (
+                    self.capabilities.by_id[parent_id]
+                    for parent_id in item.fallback_for
+                    if state in self.capabilities.by_id[parent_id].states
+                ),
+                None,
+            )
+
         def eligible(item: Capability) -> bool:
             attempts = self.attempts.get(item.id, 0)
             if attempts >= item.max_attempts:
                 return False
-            if item.fallback_for is None:
+            parent = fallback_parent(item)
+            if parent is None:
                 return True
-            parent = self.capabilities.by_id[item.fallback_for]
             return self.attempts.get(parent.id, 0) >= parent.max_attempts
 
         eligible_on_state = [item for item in on_state if eligible(item)]
@@ -471,7 +503,7 @@ class CapabilityDispatcher:
             capability = ready[0]
             if (
                 observation_version not in self.handled_observation_versions
-                or capability.fallback_for is not None
+                or bool(capability.fallback_for)
             ):
                 return self._start(
                     capability,
@@ -480,7 +512,7 @@ class CapabilityDispatcher:
                     now,
                     reason=(
                         "ON_STATE"
-                        if capability.fallback_for is None
+                        if not capability.fallback_for
                         else "FALLBACK_AFTER_EXHAUSTED"
                     ),
                 )
@@ -523,7 +555,7 @@ class CapabilityDispatcher:
                 detail={
                     "state": state,
                     "action": terminal.action,
-                    "fallbackFor": terminal.fallback_for,
+                    "fallbackFor": list(terminal.fallback_for),
                 },
             )
         return Decision("wait", reason="ALREADY_HANDLED")
@@ -564,7 +596,13 @@ class CapabilityDispatcher:
             reason=reason,
             detail=(
                 {}
-                if capability.fallback_for is None
-                else {"fallbackFor": capability.fallback_for}
+                if not capability.fallback_for
+                else {
+                    "fallbackFor": next(
+                        parent_id
+                        for parent_id in capability.fallback_for
+                        if state in self.capabilities.by_id[parent_id].states
+                    )
+                }
             ),
         )

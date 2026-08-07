@@ -514,6 +514,12 @@ class CapabilityPilot:
             return None
         min_confidence = float(spec.get("minConfidence", 0.62))
         words = tuple(normalize_ocr_text(str(word)) for word in spec["any"])
+        # Capture backends may reuse one ndarray and repaint it in place. Force
+        # the batched provider to forget any tokens cached for that object so a
+        # fallback can never act on coordinates read from the previous frame.
+        begin_frame = getattr(self.overlay_detector.provider, "begin_frame", None)
+        if callable(begin_frame):
+            begin_frame(frame)
         try:
             tokens = self.overlay_detector.provider.read(frame, region)
         except Exception as error:

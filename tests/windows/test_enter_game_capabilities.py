@@ -147,7 +147,7 @@ class EnterGameCapabilityTest(unittest.TestCase):
             with self.subTest(rule=rule.rule_id):
                 self.assertEqual(len(matches), 1)
 
-    def test_every_fallback_is_a_safe_key_with_existing_ocr_evidence(self) -> None:
+    def test_every_fallback_requires_current_frame_ocr_evidence(self) -> None:
         safety = OcrObstacleDetector.from_path(object(), OBSTACLES)
         overlays = OcrStateDetector.from_path(object(), OVERLAYS)
         safe_states = {rule.state for rule in safety.rules if rule.enabled}
@@ -165,25 +165,33 @@ class EnterGameCapabilityTest(unittest.TestCase):
         fallbacks = [
             item
             for item in self.capabilities.capabilities
-            if item.fallback_for is not None
+            if item.fallback_for
         ]
         self.assertTrue(fallbacks)
         for capability in fallbacks:
             with self.subTest(capability=capability.id):
-                self.assertIn(capability.action, SAFE_KEY_ACTIONS)
-                self.assertTrue(set(capability.states).issubset(safe_states))
-                self.assertIsNotNone(capability.evidence)
-                item = capability.evidence
-                assert item is not None
-                self.assertIn(
-                    (
-                        item.region,
-                        item.any_terms,
-                        item.all_terms,
-                        item.min_confidence,
-                    ),
-                    evidence,
-                )
+                if capability.kind == "key":
+                    self.assertIn(capability.action, SAFE_KEY_ACTIONS)
+                    self.assertTrue(set(capability.states).issubset(safe_states))
+                    self.assertIsNotNone(capability.evidence)
+                    item = capability.evidence
+                    assert item is not None
+                    self.assertIn(
+                        (
+                            item.region,
+                            item.any_terms,
+                            item.all_terms,
+                            item.min_confidence,
+                        ),
+                        evidence,
+                    )
+                    continue
+
+                self.assertEqual(capability.kind, "clickText")
+                action = self.payload["actions"][capability.action]
+                self.assertIsInstance(action, dict)
+                self.assertTrue(action["any"])
+                self.assertNotIn("fallbackScanCode", action)
 
     def test_known_overlay_pages_are_all_routed_into_the_capability_set(self) -> None:
         detector = OcrStateDetector.from_path(object(), OVERLAYS)
@@ -196,10 +204,10 @@ class EnterGameCapabilityTest(unittest.TestCase):
         for state in overlay_states - {"AUTH_REQUIRED"}:
             with self.subTest(state=state):
                 capabilities = self.capabilities.for_state(state)
-                primary = [item for item in capabilities if item.fallback_for is None]
+                primary = [item for item in capabilities if not item.fallback_for]
                 self.assertEqual(len(primary), 1)
                 self.assertTrue(
-                    all(item.fallback_for == primary[0].id for item in capabilities[1:])
+                    all(primary[0].id in item.fallback_for for item in capabilities[1:])
                 )
 
         self.assertEqual(self.payload["actions"]["escapeScanCode"], 1)
@@ -207,6 +215,26 @@ class EnterGameCapabilityTest(unittest.TestCase):
         self.assertEqual(self.payload["actions"]["guideFriendsContinue"], [480, 252])
         self.assertEqual(self.payload["actions"]["guideSettingsContinue"], [1730, 155])
         self.assertEqual(self.payload["actions"]["guideProgressContinue"], [1560, 290])
+
+    def test_known_page_recovery_excludes_operational_game_states(self) -> None:
+        recovery = next(
+            item
+            for item in self.capabilities.capabilities
+            if item.id == "recover-known-page-by-visible-prompt"
+        )
+        excluded = {
+            "LOBBY_READY_TARGET",
+            "LOBBY_SELECT_REQUIRED",
+            "MODE_PANEL_TARGET_VISIBLE",
+            "MODE_PANEL_TARGET_HOVERED",
+            "LAUNCH_READY",
+            "DROPSHIP_SOLO_JUMPMASTER",
+            "IN_MATCH_ALIVE",
+            "STALLED_UNKNOWN",
+        }
+
+        self.assertTrue(excluded.isdisjoint(recovery.states))
+        self.assertEqual(len(recovery.states), len(recovery.fallback_for))
 
     def test_one_full_frame_pass_preserves_the_old_obstacle_regions(self) -> None:
         provider = FakeLayoutProvider(
