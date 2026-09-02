@@ -8,6 +8,11 @@ from typing import Any, Callable
 
 from .capabilities import CapabilityDispatcher, CapabilitySet
 from .config import RunnerConfig
+from .frame_normalization import (
+    ReferenceCanvasFrameSource,
+    capture_resolution,
+    reference_resolution,
+)
 from .input_win32 import EmergencyStop
 from .ocr_states import OcrStateDetector
 from .pilot import CapabilityPilot, PilotFrameSource, PilotGuard, PilotSender
@@ -233,13 +238,13 @@ class PlaySessionRunner:
         if identity.managed and not session_settings.enabled:
             raise ValueError("托管会话必须启用远程上报")
 
+        capture_size = capture_resolution(self.config.environment)
+        reference_size = reference_resolution(self.config.environment)
         run_context = {
             "mode": "account-cycle" if identity.managed else "play",
             "targetMode": "bot-royale",
-            "resolution": [
-                int(self.config.environment["width"]),
-                int(self.config.environment["height"]),
-            ],
+            "resolution": list(capture_size),
+            "referenceResolution": list(reference_size),
             "language": str(self.config.environment["language"]),
             "capabilitySet": str(self.config.capability_set),
             "targetLevel": identity.target_level,
@@ -308,9 +313,20 @@ class PlaySessionRunner:
                 self.notify(f"{remaining}...")
                 self.sleep(1)
 
+            apex_source = ReferenceCanvasFrameSource(
+                capture_source,
+                capture_size,
+                reference_size,
+            )
+            recorder.log(
+                "CAPTURE_CANVAS_CONFIGURED",
+                captureResolution=list(capture_size),
+                referenceResolution=list(reference_size),
+                interpolation="LANCZOS4",
+            )
             pilot = CapabilityPilot(
                 self.config,
-                capture_source,
+                apex_source,
                 self.sender,
                 self.guard,
                 recorder,
@@ -348,6 +364,16 @@ class PlaySessionRunner:
                 error_code = "KNOWN_STATE_STALL_UNRECOVERED"
                 error_message = "已知页面的安全动作全部耗尽且画面仍未变化"
                 finish_detail["reason"] = error_message
+            elif outcome == "ENVIRONMENT_INVALID":
+                # Keep the established PLAYED status vocabulary. The specific
+                # error makes AccountOrchestrator release this lease and enter a
+                # manual pause instead of immediately spending the next account
+                # on the same broken display environment.
+                error_code = "RESOLUTION_MISMATCH"
+                error_message = "物理捕获分辨率发生变化，已停止输入"
+                finish_detail["reason"] = error_message
+                finish_detail["errorCode"] = error_code
+                exit_code = 1
         except (EmergencyStop, KeyboardInterrupt) as error:
             finish_status = "STOPPED"
             error_message = str(error) or "用户停止"

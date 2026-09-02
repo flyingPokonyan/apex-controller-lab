@@ -45,11 +45,13 @@ class FakeGuard:
 
 class FakePilot:
     dispatchers: list[object] = []
+    sources: list[object] = []
     outcome = "COMPLETED"
 
     def __init__(self, config, source, sender, guard, recorder, **kwargs) -> None:
         self.recorder = recorder
         self.dispatchers.append(kwargs["dispatcher"])
+        self.sources.append(source)
         self.frames = 5
         self.actions_sent = 2
         self.rounds_started = 1
@@ -92,6 +94,7 @@ def config(path: Path) -> RunnerConfig:
 class PlaySessionRunnerTest(unittest.TestCase):
     def setUp(self) -> None:
         FakePilot.dispatchers.clear()
+        FakePilot.sources.clear()
         FakePilot.outcome = "COMPLETED"
         self.temporary = tempfile.TemporaryDirectory()
         self.addCleanup(self.temporary.cleanup)
@@ -153,6 +156,42 @@ class PlaySessionRunnerTest(unittest.TestCase):
 
         with self.assertRaisesRegex(ValueError, "必须启用远程上报"):
             self.runner.run(identity, ContinuePlayPolicy(), object())
+
+    def test_only_the_apex_pilot_receives_the_normalized_capture_wrapper(self) -> None:
+        self.runner.config.environment["captureResolution"] = [1920, 1080]
+        identity = SessionIdentity.from_runner_settings(
+            self.settings,
+            self.verification,
+        )
+        raw_source = object()
+
+        with patch("apex_automation.play_session.CapabilityPilot", FakePilot):
+            result = self.runner.run(identity, ContinuePlayPolicy(), raw_source)
+
+        apex_source = FakePilot.sources[-1]
+        self.assertIs(apex_source.source, raw_source)
+        self.assertEqual(apex_source.capture_size, (1920, 1080))
+        self.assertEqual(apex_source.reference_size, (2560, 1440))
+        manifest = json.loads((result.run_dir / "manifest.json").read_text())
+        self.assertEqual(manifest["runContext"]["resolution"], [1920, 1080])
+        self.assertEqual(
+            manifest["runContext"]["referenceResolution"],
+            [2560, 1440],
+        )
+
+    def test_resolution_failure_stops_the_local_run_and_keeps_a_specific_reason(self) -> None:
+        identity = SessionIdentity.from_runner_settings(
+            self.settings,
+            self.verification,
+        )
+        FakePilot.outcome = "ENVIRONMENT_INVALID"
+
+        with patch("apex_automation.play_session.CapabilityPilot", FakePilot):
+            result = self.runner.run(identity, ContinuePlayPolicy(), object())
+
+        self.assertEqual(result.status, "PLAYED")
+        self.assertEqual(result.error_code, "RESOLUTION_MISMATCH")
+        self.assertEqual(result.exit_code, 1)
 
     def test_a_known_page_stall_keeps_its_specific_error_code(self) -> None:
         identity = SessionIdentity.from_runner_settings(

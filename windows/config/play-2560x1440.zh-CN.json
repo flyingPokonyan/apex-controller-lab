@@ -1,9 +1,10 @@
 {
   "profile": "play-2560x1440.zh-CN",
-  "_note": "自动游玩用的机器画像。刻意只留能力闭环需要的东西：没有模板、没有离线用例、没有 task.actions 那张有序动作表。要做什么全在 capabilitySet 里，认得出什么全在 gameStates 里，这里只交代这台机器长什么样。",
+  "_note": "自动游玩用的机器画像。物理桌面和 Apex 固定为原生 1920x1080；识别入口将画面归一化到既有 2560x1440 参考画布，因此 gameStates、ROI 和点击坐标无需重标。EA 登录直接使用原始 1080p 截图，不经过归一化。",
   "environment": {
     "width": 2560,
     "height": 1440,
+    "captureResolution": [1920, 1080],
     "language": "zh-CN",
     "displayMode": "fullscreen",
     "captureBackend": "dxgi",

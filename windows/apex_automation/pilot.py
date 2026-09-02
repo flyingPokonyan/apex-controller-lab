@@ -12,6 +12,7 @@ import unicodedata
 import numpy as np
 
 from .capabilities import Capability, CapabilityDispatcher, Decision
+from .frame_normalization import CaptureResolutionMismatch
 from .config import RunnerConfig
 from .ocr_obstacles import SAFE_KEY_ACTIONS, normalize_ocr_text
 from .ocr_states import OcrStateDetector
@@ -336,7 +337,6 @@ class CapabilityPilot:
         self.counters: dict[str, int] = defaultdict(int)
         self._foreground = True
         self._released = False
-        self._resolution_warned = False
         self._unknown_since: float | None = None
         self._unknown_captured = False
         self._unknown_signature: np.ndarray | None = None
@@ -1720,6 +1720,42 @@ class CapabilityPilot:
         self.recorder.log("FOREGROUND_PAUSED")
         self.notify("暂停：Apex 不在前台。")
 
+    def _stop_for_resolution_mismatch(
+        self,
+        frame: np.ndarray,
+        *,
+        got: tuple[int, int],
+        expected: tuple[int, int],
+        reference: tuple[int, int] | None = None,
+        previous: tuple[int, int] | None = None,
+    ) -> dict[str, Any]:
+        self.counters["resolutionMismatch"] += 1
+        self._release_all("RESOLUTION_MISMATCH")
+        payload: dict[str, object] = {
+            "got": list(got),
+            "expected": list(expected),
+        }
+        if reference is not None:
+            payload["reference"] = list(reference)
+        if previous is not None:
+            payload["previous"] = list(previous)
+        message = (
+            f"物理捕获分辨率是 {got[0]}x{got[1]}，"
+            f"必须保持 {expected[0]}x{expected[1]}"
+        )
+        payload["reason"] = message
+        self.recorder.log("RESOLUTION_MISMATCH", **payload)
+        self._snapshot("resolution-mismatch", frame)
+        self.session_outcome = "ENVIRONMENT_INVALID"
+        self.notify(f"暂停：{message}。")
+        self._write_status(self.monotonic(), force=True)
+        return {
+            "elapsedMs": max(0, round((self.monotonic() - self.started) * 1000)),
+            "captureError": "RESOLUTION_MISMATCH",
+            "resolution": list(got),
+            "expectedResolution": list(expected),
+        }
+
     def step(self) -> dict[str, Any]:
         now = self.monotonic()
         self.guard.ensure_not_aborted()
@@ -1738,6 +1774,14 @@ class CapabilityPilot:
 
         try:
             frame = self.source.grab()
+        except CaptureResolutionMismatch as error:
+            return self._stop_for_resolution_mismatch(
+                error.frame,
+                got=error.got,
+                expected=error.expected,
+                reference=error.reference,
+                previous=error.previous,
+            )
         except Exception as error:
             self.counters["captureError"] += 1
             self.recorder.log("CAPTURE_ERROR", error=str(error))
@@ -1751,12 +1795,15 @@ class CapabilityPilot:
             int(self.config.environment["width"]),
             int(self.config.environment["height"]),
         )
-        if (width, height) != expected and not self._resolution_warned:
+        if (width, height) != expected:
             # Every ROI in the dictionary is absolute, so a different
-            # resolution does not degrade recognition, it invalidates it.
-            self._resolution_warned = True
-            self.recorder.log("RESOLUTION_MISMATCH", got=[width, height], expected=list(expected))
-            self.notify(f"警告：分辨率是 {width}x{height}，标定用的是 {expected[0]}x{expected[1]}。")
+            # resolution does not degrade recognition, it invalidates it. Stop
+            # before state detection can authorize any input.
+            return self._stop_for_resolution_mismatch(
+                frame,
+                got=(width, height),
+                expected=expected,
+            )
 
         state, base_state = self._observe(frame, now)
         # Overlay OCR can take seconds. Retry windows and periodic actions must

@@ -183,6 +183,28 @@ class PilotTest(unittest.TestCase):
         self.assertEqual(record["decision"]["reason"], "NO_STATE")
         self.assertEqual(self.sender.calls, [])
 
+    def test_a_non_reference_frame_stops_before_ocr_or_input(self) -> None:
+        class WrongResolutionSource:
+            def grab(self) -> np.ndarray:
+                return np.zeros((1080, 1920, 3), dtype=np.uint8)
+
+        self.pilot.source = WrongResolutionSource()
+        self.screen(lobbyPrimaryButton=("准备", 1.0))
+
+        record = self.pilot.step()
+
+        self.assertEqual(record["captureError"], "RESOLUTION_MISMATCH")
+        self.assertEqual(self.pilot.session_outcome, "ENVIRONMENT_INVALID")
+        self.assertNotIn(("click", 1280, 1295), self.sender.calls)
+        event = next(
+            payload
+            for name, payload in self.recorder.events
+            if name == "RESOLUTION_MISMATCH"
+        )
+        self.assertEqual(event["got"], [1920, 1080])
+        self.assertEqual(event["expected"], [2560, 1440])
+        self.assertIn("SCREENSHOT_SAVED", self.recorder.names())
+
     def test_a_screen_with_no_rule_keeps_one_frame_of_itself(self) -> None:
         # Future game updates can introduce a page no rule knows yet, so the
         # runner must preserve one frame without clicking it blindly.

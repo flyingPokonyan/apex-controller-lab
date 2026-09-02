@@ -3,6 +3,7 @@
   "environment": {
     "width": 2560,
     "height": 1440,
+    "captureResolution": [1920, 1080],
     "language": "zh-CN",
     "displayMode": "fullscreen",
     "captureBackend": "dxgi",

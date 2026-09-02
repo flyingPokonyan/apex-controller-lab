@@ -37,6 +37,11 @@ from .ea_app import EaAppAutomationError, EaAppDriver, EaUiState, OtpChallenge
 from .ea_app_win32 import WindowsEaHybridDriver
 from .ea_evidence import EaLoginEvidence, default_evidence_root
 from .ea_pages import mask_identity
+from .frame_normalization import (
+    ReferenceCanvasFrameSource,
+    capture_resolution,
+    reference_resolution,
+)
 from .input_win32 import EmergencyStop, Win32InputSender, Win32SafetyGuard
 from .instance_lock import AlreadyRunningError, SingleInstanceLock
 from .lease_keeper import LeaseKeeper
@@ -266,13 +271,15 @@ def run_display_watch(config_path: Path, *, duration_s: float) -> int:
         return 2
 
     config = load_config(config_path)
-    expected = (
-        int(config.environment["width"]),
-        int(config.environment["height"]),
-    )
+    expected = capture_resolution(config.environment)
+    reference = reference_resolution(config.environment)
     print("显示器观察：不领账号、不启动 Apex、不发送任何输入。")
     print("现在去关显示器、切显示模式、拔线，做什么都行，这里会说发生了什么。")
-    print(f"按 Ctrl+C 结束，最长 {duration_s:.0f} 秒。识别需要的分辨率是 {expected[0]}x{expected[1]}。")
+    print(
+        f"按 Ctrl+C 结束，最长 {duration_s:.0f} 秒。"
+        f"物理捕获必须保持 {expected[0]}x{expected[1]}，"
+        f"Apex 识别参考画布是 {reference[0]}x{reference[1]}。"
+    )
 
     deadline = time.monotonic() + duration_s
     previous: tuple[str, str] | None = None
@@ -355,7 +362,11 @@ def run_observe(
         with DxcamFrameSource(
             backend=str(config.environment["captureBackend"]),
             output_index=int(config.environment["outputIndex"]),
-        ) as source:
+        ) as raw_source:
+            source = ReferenceCanvasFrameSource.from_environment(
+                raw_source,
+                config.environment,
+            )
             session = ObservationSession(
                 config,
                 detector,
