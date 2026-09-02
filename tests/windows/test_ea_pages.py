@@ -13,8 +13,12 @@ import numpy as np
 REPOSITORY_ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(REPOSITORY_ROOT / "windows"))
 
-from apex_automation.account_provider import OtpMethod
-from apex_automation.ea_app import EaOtpUnavailable
+from apex_automation.account_provider import OtpMethod, SecretCredentials
+from apex_automation.ea_app import (
+    EaApexStartFailed,
+    EaLoginRejected,
+    EaOtpUnavailable,
+)
 from apex_automation.ea_app_win32 import EaObservation, WindowsEaHybridDriver
 from apex_automation.ea_evidence import (
     EaLoginEvidence,
@@ -328,6 +332,178 @@ class AnchorTargetingTest(unittest.TestCase):
                 "player@example.test",
             )
         )
+
+    def test_exact_play_anchor_does_not_match_free_to_play_copy(self) -> None:
+        observation = self.observation(
+            ("Apex Legends is free-to-play. Download it to start playing.", 400, 500, 0.99),
+            ("PLAY", 500, 600, 0.90),
+        )
+
+        point = WindowsEaHybridDriver._anchor(
+            observation,
+            ("play", "launch"),
+            x_range=(0.35, 0.75),
+            y_range=(0.30, 0.70),
+            exact=True,
+        )
+
+        self.assertEqual(point, (500, 600))
+
+    def test_installed_library_card_derives_its_icon_only_play_control(self) -> None:
+        observation = self.observation(
+            ("已安装 (1)", 350, 245, 0.99),
+            ("Apex Legends", 120, 220, 0.99),
+            ("Apex Legends", 335, 608, 0.98),
+        )
+
+        point = WindowsEaHybridDriver._installed_library_play_point(observation)
+
+        self.assertEqual(point, (407, 576))
+
+
+class EaLaunchRecoveryTest(unittest.TestCase):
+    WINDOW = (0, 0, 1920, 1080)
+
+    @classmethod
+    def observation(cls, *placed: tuple[str, int, int]) -> EaObservation:
+        tokens = tuple(
+            OcrToken(text, 0.99, (x - 50, y - 10, x + 50, y + 10))
+            for text, x, y in placed
+        )
+        return EaObservation(
+            rect=cls.WINDOW,
+            frame=np.zeros((1, 1), dtype=np.uint8),
+            tokens=tokens,
+            page=classify_page(token.normalized for token in tokens),
+        )
+
+    @staticmethod
+    def driver(
+        observations: list[EaObservation],
+        clicks: list[tuple[int, int]],
+        records: list[str],
+    ) -> WindowsEaHybridDriver:
+        driver = object.__new__(WindowsEaHybridDriver)
+        driver._ea_window = lambda: 1
+        driver._observe = lambda _hwnd: observations.pop(0)
+        driver._click_point = lambda _hwnd, x, y: clicks.append((x, y))
+        driver._record = lambda step, *_args, **_kwargs: records.append(step)
+        driver._process_running = lambda _name: False
+        driver.sleep = lambda _seconds: None
+        return driver
+
+    def test_download_page_fails_fast_without_clicking_playing_copy(self) -> None:
+        entry = self.observation(("Apex Legends", 120, 460))
+        download = self.observation(
+            ("Apex Legends is free-to-play. Download it to start playing.", 900, 500),
+            ("DOWNLOAD", 975, 535),
+        )
+        clicks: list[tuple[int, int]] = []
+        records: list[str] = []
+        driver = self.driver([entry, download], clicks, records)
+
+        with self.assertRaisesRegex(EaApexStartFailed, "只提供 Download"):
+            driver.start_apex()
+
+        self.assertEqual(clicks, [(120, 460)])
+        self.assertEqual(records, ["apex-entry", "apex-download-required"])
+
+    def test_installed_library_card_uses_its_icon_only_play_control(self) -> None:
+        library = self.observation(
+            ("已安装 (1)", 350, 245),
+            ("Apex Legends", 120, 460),
+            ("Apex Legends", 335, 608),
+        )
+        clicks: list[tuple[int, int]] = []
+        records: list[str] = []
+        driver = self.driver([library, library], clicks, records)
+        driver._process_running = lambda _name: len(clicks) >= 2
+
+        driver.start_apex()
+
+        self.assertEqual(clicks, [(120, 460), (565, 565)])
+        self.assertEqual(records, ["apex-entry", "apex-library-play"])
+
+
+class LoginSubmitRecoveryTest(unittest.TestCase):
+    @staticmethod
+    def observation(page_tokens: tuple[str, ...]) -> EaObservation:
+        placed = tuple(
+            OcrToken(text, 0.99, (100, 100 + index * 30, 500, 125 + index * 30))
+            for index, text in enumerate(page_tokens)
+        )
+        return EaObservation(
+            rect=(0, 0, 600, 900),
+            frame=np.zeros((1, 1), dtype=np.uint8),
+            tokens=placed,
+            page=classify_page(token.normalized for token in placed),
+        )
+
+    @staticmethod
+    def driver(
+        email: EaObservation,
+        waits: list[EaObservation],
+        submissions: list[str],
+        records: list[str],
+    ) -> WindowsEaHybridDriver:
+        driver = object.__new__(WindowsEaHybridDriver)
+        driver._click_target = lambda *_args, **_kwargs: "anchor"
+        driver._clear_focused_field = lambda: None
+        driver._type_secret = lambda _value: None
+        driver.sleep = lambda _seconds: None
+        driver._observe = lambda _hwnd: email
+        driver._submit = lambda *_args, **_kwargs: submissions.pop(0)
+        driver._wait_for_page = lambda *_args, **_kwargs: waits.pop(0)
+        driver._record = lambda step, *_args, **_kwargs: records.append(step)
+        return driver
+
+    def test_echoed_identifier_gets_one_retry_when_next_does_not_advance(self) -> None:
+        email = self.observation(
+            tokens(
+                "Sign in",
+                "Email or EA ID",
+                "player@example.test",
+                "Next",
+            )
+        )
+        password = self.observation(PASSWORD_PAGE)
+        submissions = ["anchor", "enter"]
+        waits = [email, password]
+        records: list[str] = []
+        driver = self.driver(email, waits, submissions, records)
+
+        result = driver._submit_login_identifier(
+            1,
+            email,
+            SecretCredentials("player@example.test", "secret"),
+        )
+
+        self.assertIs(result.page, EaPage.PASSWORD)
+        self.assertEqual(submissions, [])
+        self.assertIn("account-submit-retry", records)
+
+    def test_visible_login_error_is_not_retried(self) -> None:
+        email = self.observation(
+            tokens(
+                "Email or EA ID",
+                "player@example.test",
+                "Next",
+                "Your credentials are incorrect",
+            )
+        )
+        submissions = ["anchor"]
+        records: list[str] = []
+        driver = self.driver(email, [email], submissions, records)
+
+        with self.assertRaises(EaLoginRejected):
+            driver._submit_login_identifier(
+                1,
+                email,
+                SecretCredentials("player@example.test", "secret"),
+            )
+
+        self.assertEqual(submissions, [])
+        self.assertNotIn("account-submit-retry", records)
 
 
 class OtpMethodSelectionTest(unittest.TestCase):

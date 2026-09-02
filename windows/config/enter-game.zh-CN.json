@@ -35,7 +35,8 @@
       "holdWords": ["按住", "长按"],
       "holdScanCode": 57,
       "holdMs": 2000,
-      "_note": "已知低风险页面的主动作耗尽后，用当前帧全屏 OCR 重新定位页面真正写出的安全命令，以不同的输入方式再尝试一次。必须有文字坐标才点击；「按住/长按」改为 SPACE 长按；找不到时不发任何键，也不会轮按 SPACE/ENTER/ESC。"
+      "keyPrompts": {"ESC": 1, "SPACE": 57, "ENTER": 28},
+      "_note": "已知低风险页面的主动作耗尽后，用当前帧全屏 OCR 重新定位页面真正写出的安全命令，以不同的输入方式再尝试一次。必须有文字坐标才点击；「按住/长按」改为 SPACE 长按；同一个文字块明确以 ESC/SPACE/ENTER 提示开头时发送对应安全键，不点击键盘提示。找不到时不发任何键，也不会轮按 SPACE/ENTER/ESC。"
     },
     "stallRecovery": {
       "region": "fullFrame",
@@ -45,7 +46,8 @@
       "holdWords": ["按住", "长按"],
       "holdScanCode": 57,
       "holdMs": 2000,
-      "_note": "词按优先级排列，先匹配到的先点：一张断线弹窗上同时有「重试」和「返回」时，要的是重试。只点 OCR 真的读出来、并且引擎给了坐标的那一块；引擎没给坐标（逐区域降级）就不点，退回 ESC。holdWords 是 20260806-083706 加的：那次读到的是「按住以确认」，「确认」二字匹配得完美（0.9998）、坐标也精确，于是对着一个长按控件点了三十次——点击对它永远无效。匹配到的那段文字里但凡带「按住」「长按」，它描述的就是一个键而不是一个按钮，这时候要按住 holdScanCode（SPACE，和 returnLobbySequence 末尾那一步同一个键同一个时长），而不是点它。"
+      "keyPrompts": {"ESC": 1, "SPACE": 57, "ENTER": 28},
+      "_note": "词按优先级排列，先匹配到的先处理：一张断线弹窗上同时有「重试」和「返回」时，要的是重试。只处理 OCR 真的读出来、并且引擎给了坐标的那一块；引擎没给坐标（逐区域降级）就退回 ESC。holdWords 处理「SPACE 按住以确认」一类长按提示；keyPrompts 处理「ESC 关闭调查」「SPACE 继续」一类短按提示。只有匹配文字块明确写出白名单键时才发键，否则仍按真实按钮坐标点击。"
     }
   },
   "_keyBindings": "扫描码写死在这里，等于假定了游戏里的键位。这些假定必须和目标账号实际绑的键一致，否则动作照发、游戏没反应，而画面上和「输入没送到」长得一模一样——2026-07-30 就栽在这上面：配置写 V(47)，当时账号绑在 N 上，白查了一轮反作弊。当前假定：1=ESC 安全返回，28=ENTER 安全继续，15=TAB 返回大厅，57=SPACE 确认返回大厅，47=V 近战，16=Q 战术技能，29=LCTRL 单独发射，18=E 发射。改键位的话这里也要跟着改；windows/probe-input.cmd 可以逐个验。另外 Apex 里有相当一批提示是长按而不是点按，那种要靠能力自己的 holdMs 或动作序列内的 durationMs 声明，默认的 keyTapMs 太短。",
@@ -60,6 +62,17 @@
       "confirmMs": 2500,
       "maxAttempts": 2,
       "_note": "光圈解锁页明确写着「SPACE 继续」，所以按页面给出的 SPACE 短按，而不是沿用通用奖励页的 ENTER。没有「按住」或「长按」字样，不走 FULLSCREEN_HOLD_CONFIRM 的 2000ms 长按。"
+    },
+    {
+      "id": "dismiss-match-quality-survey",
+      "priority": 123,
+      "states": ["MATCH_QUALITY_SURVEY"],
+      "action": "escapeScanCode",
+      "kind": "key",
+      "actionClass": "idempotent",
+      "confirmMs": 2000,
+      "maxAttempts": 2,
+      "_note": "真实调查页明确写着「ESC 关闭调查」。不点击「不/是」，避免替账号提交比赛质量反馈。"
     },
     {
       "id": "dismiss-level-up",
@@ -237,6 +250,7 @@
       "priority": 69,
       "states": [
         "RETICLE_UNLOCKED",
+        "MATCH_QUALITY_SURVEY",
         "LEVEL_UP_VIDEO",
         "REWARD",
         "GENERIC_MODAL",
@@ -258,6 +272,7 @@
       "maxAttempts": 1,
       "fallbackFor": [
         "dismiss-reticle-unlock",
+        "dismiss-match-quality-survey",
         "dismiss-level-up",
         "dismiss-reward",
         "dismiss-announcement",

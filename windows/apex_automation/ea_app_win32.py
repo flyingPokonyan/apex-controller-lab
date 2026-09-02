@@ -322,6 +322,7 @@ class WindowsEaHybridDriver:
         x_range: tuple[float, float] = (0.0, 1.0),
         y_range: tuple[float, float] = (0.0, 1.0),
         exclude: Sequence[str] = (),
+        exact: bool = False,
     ) -> tuple[int, int] | None:
         """Centre of the best on-screen token that carries one of `terms`.
 
@@ -341,7 +342,11 @@ class WindowsEaHybridDriver:
             if any(term in text for term in exclude):
                 continue
             rank = next(
-                (index for index, term in enumerate(terms) if term in text),
+                (
+                    index
+                    for index, term in enumerate(terms)
+                    if text == term or (not exact and term in text)
+                ),
                 None,
             )
             if rank is None:
@@ -359,6 +364,34 @@ class WindowsEaHybridDriver:
         if not matches:
             return None
         _, _, x, y = min(matches)
+        return x, y
+
+    @staticmethod
+    def _installed_library_play_point(
+        observation: EaObservation,
+    ) -> tuple[int, int] | None:
+        """Locate the icon-only Play control on an installed Apex library card."""
+
+        installed_terms = ("installed", "已安装")
+        if not any(
+            any(term in token.normalized for term in installed_terms)
+            for token in observation.tokens
+        ):
+            return None
+        label = WindowsEaHybridDriver._anchor(
+            observation,
+            ("apexlegends",),
+            x_range=(0.10, 0.45),
+            y_range=(0.40, 0.75),
+            exact=True,
+        )
+        if label is None:
+            return None
+        left, top, right, bottom = observation.rect
+        width = max(1, right - left)
+        height = max(1, bottom - top)
+        x = min(right - 1, label[0] + round(width * 0.12))
+        y = max(top, label[1] - round(height * 0.04))
         return x, y
 
     def _click_target(
@@ -761,6 +794,24 @@ class WindowsEaHybridDriver:
             (EaPage.PASSWORD, EaPage.OTP, EaPage.SIGNED_IN, EaPage.CAPTCHA),
             timeout_s=timeout_s,
         )
+        if (
+            transitioned.page is EaPage.EMAIL
+            and not transitioned.has_login_error()
+            and self._identifier_echoed(transitioned, credentials.login_identifier)
+        ):
+            retry_submit = self._submit(hwnd, transitioned, ACCOUNT_SUBMIT_RATIO)
+            transitioned = self._wait_for_page(
+                hwnd,
+                (EaPage.PASSWORD, EaPage.OTP, EaPage.SIGNED_IN, EaPage.CAPTCHA),
+                timeout_s=10.0,
+            )
+            self._record(
+                "account-submit-retry",
+                transitioned,
+                submitTarget=retry_submit,
+                identifierEchoed=True,
+            )
+            submit = f"{submit}+retry:{retry_submit}"
         self._record(
             "account-submitted",
             transitioned,
@@ -1141,17 +1192,37 @@ class WindowsEaHybridDriver:
             self._record("apex-entry-missing", self._observe(hwnd))
             raise EaApexStartFailed("EA App 未找到左侧 Apex Legends 游戏入口")
         self.sleep(2.0)
-        for _ in range(8):
+        for _ in range(15):
+            if any(self._process_running(name) for name in APEX_EXECUTABLES):
+                return
             observation = self._observe(hwnd)
             point = self._anchor(
                 observation,
-                ("play", "launch", "开始游戏"),
+                ("play", "launch", "launchgame", "startgame", "开始游戏"),
                 x_range=(0.35, 0.75),
                 y_range=(0.30, 0.70),
+                exact=True,
             )
             if point is not None:
                 self._record("apex-play", observation)
                 self._click_point(hwnd, *point)
+                break
+            download = self._anchor(
+                observation,
+                ("download", "下载"),
+                x_range=(0.35, 0.75),
+                y_range=(0.30, 0.70),
+                exact=True,
+            )
+            if download is not None:
+                self._record("apex-download-required", observation)
+                raise EaApexStartFailed(
+                    "EA App 当前账号的 Apex 页面只提供 Download，不能启动已安装游戏"
+                )
+            library_play = self._installed_library_play_point(observation)
+            if library_play is not None:
+                self._record("apex-library-play", observation)
+                self._click_point(hwnd, *library_play)
                 break
             self.sleep(1.0)
         else:

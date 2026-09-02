@@ -474,6 +474,20 @@ class PilotTest(unittest.TestCase):
         self.assertEqual(record["state"], "RETICLE_UNLOCKED")
         self.assertEqual(self.sender.calls, [("tap", 57, 80)])
 
+    def test_match_quality_survey_is_closed_with_escape(self) -> None:
+        self.enable_overlays()
+        self.screen()
+        self.overlay_provider.readings = {
+            "titleCenter": ("比赛质量调查", 0.99),
+            "bottomCenter": ("ESC 关闭调查", 0.99),
+        }
+
+        record = self._settle_overlay()
+
+        self.assertEqual(record["state"], "MATCH_QUALITY_SURVEY")
+        self.assertEqual(record["decision"]["capability"], "dismiss-match-quality-survey")
+        self.assertEqual(self.sender.calls, [("tap", 1, 80)])
+
     def test_a_known_page_uses_its_visible_prompt_after_primary_exhausts(self) -> None:
         self.enable_overlays()
         self.screen()
@@ -719,6 +733,21 @@ class PilotTest(unittest.TestCase):
         self.assertEqual(rejected["capability"], "lobby-start-match")
         self.assertEqual(rejected["evidenceState"], "POST_MATCH_SUMMARY")
 
+    def test_synthetic_stall_state_does_not_confirm_a_pending_action(self) -> None:
+        self.enable_overlays()
+        self.screen()
+        self.overlay_provider.readings = {
+            "titleCenter": ("光圈已解锁", 0.99),
+            "bottomCenter": ("继续", 0.99),
+        }
+        self._settle_overlay()
+        self.assertIsNotNone(self.pilot.dispatcher.pending)
+
+        self.pilot._settle_pending("STALLED_UNKNOWN")
+
+        self.assertIsNotNone(self.pilot.dispatcher.pending)
+        self.assertNotIn("ACTION_CONFIRMED", self.recorder.names())
+
     def test_post_match_taps_tab_then_holds_space_before_waiting_for_lobby(self) -> None:
         self.screen(postMatchHints=("SPACE继续 TAB返回大厅", 0.97))
         record = self.pilot.step()
@@ -830,6 +859,40 @@ class PilotTest(unittest.TestCase):
         # 重试 is declared before 返回, so a disconnect box retries rather than
         # backing out — and the click lands where the word was actually read.
         self.assertIn(("click", 1280, 930), self.sender.calls)
+
+    def test_stall_recovery_sends_a_printed_key_instead_of_clicking_its_hint(self) -> None:
+        self.enable_overlays()
+        self.screen()
+        self.overlay_provider.readings = {
+            "fullFrame": [
+                ("ESC 关闭调查", 0.99, (1195, 845, 1365, 880)),
+            ]
+        }
+
+        record = self.stall()
+
+        self.assertEqual(record["state"], "STALLED_UNKNOWN")
+        self.assertEqual(self.sender.calls, [("tap", 1, 80)])
+        sent = next(p for e, p in self.recorder.events if e == "ACTION_SENT")
+        self.assertEqual(sent["keyPrompt"], "ESC")
+        self.assertNotIn("x", sent)
+
+    def test_stall_recovery_keeps_space_hold_prompts_as_long_presses(self) -> None:
+        self.enable_overlays()
+        self.screen()
+        self.overlay_provider.readings = {
+            "fullFrame": [
+                ("SPACE 按住以确认", 0.99, (1000, 900, 1400, 960)),
+            ]
+        }
+
+        record = self.stall()
+
+        self.assertEqual(record["state"], "STALLED_UNKNOWN")
+        self.assertEqual(self.sender.calls, [("tap", 57, 2000)])
+        sent = next(p for e, p in self.recorder.events if e == "ACTION_SENT")
+        self.assertEqual(sent["hold"], "HOLD_PROMPT")
+        self.assertNotIn("keyPrompt", sent)
 
     def test_the_blackout_after_pressing_ready_is_not_treated_as_a_stall(self) -> None:
         # Queueing, legend select and loading name nothing, and that stretch

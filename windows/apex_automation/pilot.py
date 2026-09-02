@@ -13,7 +13,7 @@ import numpy as np
 
 from .capabilities import Capability, CapabilityDispatcher, Decision
 from .config import RunnerConfig
-from .ocr_obstacles import normalize_ocr_text
+from .ocr_obstacles import SAFE_KEY_ACTIONS, normalize_ocr_text
 from .ocr_states import OcrStateDetector
 from .progression import (
     LobbyProgressionReader,
@@ -448,6 +448,24 @@ class CapabilityPilot:
                 raise ValueError(f"文字点击动作 {action_name} 的长按时长无效")
         elif hold_scan_code is not None:
             raise ValueError(f"文字点击动作 {action_name} 声明了长按扫描码却没有长按词")
+        key_prompts = spec.get("keyPrompts")
+        if key_prompts is not None:
+            if not isinstance(key_prompts, dict) or not key_prompts:
+                raise ValueError(f"文字点击动作 {action_name} 的按键提示表为空")
+            safe_scan_codes = {
+                int(self.actions[name])
+                for name in SAFE_KEY_ACTIONS
+                if isinstance(self.actions.get(name), int)
+            }
+            for prompt, scan_code in key_prompts.items():
+                if not isinstance(prompt, str) or not normalize_ocr_text(prompt):
+                    raise ValueError(f"文字点击动作 {action_name} 的按键提示必须是非空字符串")
+                if not isinstance(scan_code, int):
+                    raise ValueError(f"文字点击动作 {action_name} 的提示扫描码不是整数")
+                if scan_code not in safe_scan_codes:
+                    raise ValueError(
+                        f"文字点击动作 {action_name} 的提示扫描码不在安全键白名单"
+                    )
         confidence = float(spec.get("minConfidence", 0.62))
         if not 0 <= confidence <= 1:
             raise ValueError(f"文字点击动作 {action_name} 的置信度无效")
@@ -600,6 +618,32 @@ class CapabilityPilot:
             return None
         return int(scan_code), int(spec.get("holdMs", 2000))
 
+    def _key_prompt_for_text(
+        self,
+        spec: dict[str, Any],
+        text: str,
+    ) -> tuple[int, str] | None:
+        """Read a printed key hint before treating its command as a button."""
+
+        key_prompts = spec.get("keyPrompts")
+        if not key_prompts:
+            return None
+        folded = unicodedata.normalize("NFKC", text).casefold()
+        compact = normalize_ocr_text(text)
+        for raw_prompt, raw_scan_code in key_prompts.items():
+            prompt = normalize_ocr_text(str(raw_prompt))
+            ascii_word = bool(re.fullmatch(r"[a-z0-9]+", prompt))
+            bounded = ascii_word and re.search(
+                rf"(?<![a-z0-9]){re.escape(prompt)}(?![a-z0-9])",
+                folded,
+            )
+            # OCR occasionally inserts spaces between key-cap letters. The
+            # compact prefix handles `E S C 关闭` without making an English
+            # word such as `description` look like an ESC prompt.
+            if bounded or compact.startswith(prompt):
+                return int(raw_scan_code), str(raw_prompt)
+        return None
+
     def _execute(self, capability: Capability, frame: np.ndarray) -> dict[str, object]:
         spec = self.actions[capability.action]
         if capability.kind == "click":
@@ -634,6 +678,17 @@ class CapabilityPilot:
                         "scanCode": hold_scan_code,
                         "durationMs": hold_ms,
                         "hold": "HOLD_PROMPT",
+                    }
+                key_prompt = self._key_prompt_for_text(spec, text)
+                if key_prompt is not None:
+                    scan_code, prompt = key_prompt
+                    self.sender.tap_scan_code(scan_code, self.key_tap_ms)
+                    return {
+                        "matchedText": text,
+                        "confidence": round(confidence, 4),
+                        "scanCode": scan_code,
+                        "durationMs": self.key_tap_ms,
+                        "keyPrompt": prompt,
                     }
                 self.sender.click(x, y)
                 return {
@@ -736,9 +791,15 @@ class CapabilityPilot:
         usually not repainted yet, and treating that unchanged frame as a
         failed postcondition would reject every action that actually worked.
         Nothing changing is handled elsewhere, by the confirm window expiring.
+        `STALLED_UNKNOWN` is a watchdog fact, not a replacement screen.
         """
         pending = self.dispatcher.pending
-        if pending is None or state is None or state == pending.origin_state:
+        if (
+            pending is None
+            or state is None
+            or state == pending.origin_state
+            or state == STALLED_UNKNOWN
+        ):
             return
         confirmed, settled = self.dispatcher.confirm_pending(state)
         if settled is None:

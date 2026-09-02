@@ -98,6 +98,20 @@ class OcrRulesTest(unittest.TestCase):
         self.assertEqual(decision.rule_id, "reticle-unlock-space-continue")
         self.assertEqual(decision.state, "RETICLE_UNLOCKED")
 
+    def test_match_quality_survey_is_closed_without_answering_it(self) -> None:
+        values = {
+            self.regions["titleCenter"]: (OcrToken("比赛质量调查", 0.99),),
+            self.regions["bottomCenter"]: (OcrToken("ESC 关闭调查", 0.98),),
+        }
+        detector = OcrObstacleDetector.from_path(FakeProvider(values), self.rules_path)
+
+        decision = detector.analyze(self.frame).decision
+
+        self.assertIsNotNone(decision)
+        self.assertEqual(decision.rule_id, "match-quality-survey-close")
+        self.assertEqual(decision.state, "MATCH_QUALITY_SURVEY")
+        self.assertEqual(decision.action.name, "escapeScanCode")
+
     def test_bare_unlocked_text_is_not_assumed_to_use_enter(self) -> None:
         values = {
             self.regions["titleCenter"]: (OcrToken("武器已解锁", 0.99),),
