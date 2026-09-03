@@ -22,6 +22,7 @@ from .account_provider import (
 from .ea_app import (
     ApexExitEvidence,
     EaAppAutomationError,
+    EaApexDownloadRequired,
     EaApexStartFailed,
     EaCaptchaRequired,
     EaCaptureUnavailable,
@@ -99,6 +100,14 @@ SEND_CODE_RATIO = (0.50, 0.68)
 IDENTITY_BAND = (0.75, 0.00, 1.00, 0.12)
 INPUT_SETTLE_S = 0.8
 MAX_OTP_ATTEMPTS = 3
+EA_RESTART_TIMEOUT_S = 60.0
+HELP_TERMS = ("help", "帮助")
+RESTART_APP_TERMS = (
+    "restartapp",
+    "restartapplication",
+    "重启应用",
+    "重新启动应用",
+)
 
 # Pages that prove no session exists yet.
 PRE_LOGIN_PAGES = (
@@ -1156,6 +1165,76 @@ class WindowsEaHybridDriver:
             + (f"（观察到 {seen[-1]}）" if seen else "")
         )
 
+    def _request_restart_app(self, hwnd: int) -> None:
+        """Select the exact Help -> Restart app action from EA's main menu."""
+
+        observation = self._observe(hwnd)
+        left, top, right, bottom = observation.rect
+        width = max(1, right - left)
+        height = max(1, bottom - top)
+        hamburger = (
+            left + round(width * 0.011),
+            top + round(height * 0.018),
+        )
+        self._record("restart-menu-open", observation)
+        self._click_point(hwnd, *hamburger)
+        self.sleep(1.2)
+
+        menu = self._observe(hwnd)
+        help_item = self._anchor(
+            menu,
+            HELP_TERMS,
+            x_range=(0.0, 0.35),
+            exact=True,
+        )
+        if help_item is None:
+            self._record("restart-help-missing", menu)
+            raise EaApexStartFailed("EA App 主菜单未找到 Help")
+        self._click_point(hwnd, *help_item)
+        self.sleep(1.2)
+
+        help_menu = self._observe(hwnd)
+        restart_item = self._anchor(
+            help_menu,
+            RESTART_APP_TERMS,
+            x_range=(0.0, 0.45),
+            exact=True,
+        )
+        if restart_item is None:
+            self._record("restart-item-missing", help_menu)
+            raise EaApexStartFailed("EA App Help 菜单未找到 Restart app")
+        self._record("restart-requested", help_menu)
+        self._click_point(hwnd, *restart_item)
+
+    def restart_app(self) -> EaUiState:
+        """Restart EA through its own menu and wait for a readable session."""
+
+        old_hwnd = self._ea_window()
+        self._request_restart_app(old_hwnd)
+        deadline = time.monotonic() + EA_RESTART_TIMEOUT_S
+
+        # Normally Restart app destroys the window. Give that transition a
+        # bounded head start, but also tolerate an in-process client reload.
+        transition_deadline = min(deadline, time.monotonic() + 15.0)
+        while self._alive(old_hwnd) and time.monotonic() < transition_deadline:
+            self.sleep(0.5)
+
+        self._hwnd = None
+        last_error: EaAppAutomationError | None = None
+        while time.monotonic() < deadline:
+            try:
+                state = self.preflight()
+                observation = self._observe(self._ea_window())
+                self._record("restart-complete", observation, state=state.value)
+                return state
+            except EaAppAutomationError as error:
+                last_error = error
+                self.sleep(1.0)
+        raise EaApexStartFailed(
+            "EA App 执行 Restart app 后未在 60 秒内恢复"
+            + (f"：{last_error}" if last_error is not None else "")
+        )
+
     @staticmethod
     def _process_running(executable: str) -> bool:
         result = subprocess.run(
@@ -1216,7 +1295,7 @@ class WindowsEaHybridDriver:
             )
             if download is not None:
                 self._record("apex-download-required", observation)
-                raise EaApexStartFailed(
+                raise EaApexDownloadRequired(
                     "EA App 当前账号的 Apex 页面只提供 Download，不能启动已安装游戏"
                 )
             library_play = self._installed_library_play_point(observation)

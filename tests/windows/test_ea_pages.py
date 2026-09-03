@@ -15,6 +15,7 @@ sys.path.insert(0, str(REPOSITORY_ROOT / "windows"))
 
 from apex_automation.account_provider import OtpMethod, SecretCredentials
 from apex_automation.ea_app import (
+    EaApexDownloadRequired,
     EaApexStartFailed,
     EaLoginRejected,
     EaOtpUnavailable,
@@ -402,7 +403,7 @@ class EaLaunchRecoveryTest(unittest.TestCase):
         records: list[str] = []
         driver = self.driver([entry, download], clicks, records)
 
-        with self.assertRaisesRegex(EaApexStartFailed, "只提供 Download"):
+        with self.assertRaisesRegex(EaApexDownloadRequired, "只提供 Download"):
             driver.start_apex()
 
         self.assertEqual(clicks, [(120, 460)])
@@ -423,6 +424,23 @@ class EaLaunchRecoveryTest(unittest.TestCase):
 
         self.assertEqual(clicks, [(120, 460), (565, 565)])
         self.assertEqual(records, ["apex-entry", "apex-library-play"])
+
+    def test_restart_app_uses_exact_help_menu_actions(self) -> None:
+        game_hub = self.observation(("Apex Legends", 900, 300))
+        main_menu = self.observation(("Help", 180, 850))
+        help_menu = self.observation(("Restart app", 320, 760))
+        clicks: list[tuple[int, int]] = []
+        records: list[str] = []
+        driver = self.driver(
+            [game_hub, main_menu, help_menu],
+            clicks,
+            records,
+        )
+
+        driver._request_restart_app(1)
+
+        self.assertEqual(clicks, [(21, 19), (180, 850), (320, 760)])
+        self.assertEqual(records, ["restart-menu-open", "restart-requested"])
 
 
 class LoginSubmitRecoveryTest(unittest.TestCase):

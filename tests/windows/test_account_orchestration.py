@@ -31,11 +31,16 @@ from apex_automation.account_orchestrator import (
 from apex_automation.ea_app import (
     ApexExitEvidence,
     EaAppAutomationError,
+    EaApexDownloadRequired,
     EaIdentityFact,
     EaUiState,
     OtpChallenge,
 )
-from apex_automation.lease_keeper import LeaseKeeper, LeaseKeeperState
+from apex_automation.lease_keeper import (
+    LeaseKeeper,
+    LeaseKeeperSnapshot,
+    LeaseKeeperState,
+)
 from apex_automation.orchestration_state import (
     AtomicCheckpointStore,
     OrchestrationCheckpoint,
@@ -305,6 +310,10 @@ class FakeEaDriver:
         self.log.append("ea.verify_identity")
         return EaIdentityFact(self.ea_account_id, "fake-uia", True)
 
+    def restart_app(self) -> EaUiState:
+        self.log.append("ea.restart")
+        return EaUiState.SIGNED_IN
+
     def start_apex(self) -> None:
         self.log.append("apex.start")
 
@@ -315,6 +324,36 @@ class FakeEaDriver:
     def sign_out(self) -> bool:
         self.log.append("ea.sign_out")
         return True
+
+
+class ScriptedLeaseKeeper:
+    def __init__(self, lease, *, state=LeaseKeeperState.CURRENT) -> None:
+        self.lease = lease
+        self.state = state
+        self.error_code: str | None = None
+        self.wakes = 0
+
+    def snapshot(self) -> LeaseKeeperSnapshot:
+        return LeaseKeeperSnapshot(
+            state=self.state,
+            expires_at=self.lease.expires_at,
+            renew_after=self.lease.renew_after,
+            pending_operation_id=None,
+            error_code=self.error_code,
+        )
+
+    def is_current(self) -> bool:
+        return self.state is LeaseKeeperState.CURRENT
+
+    def start(self) -> None:
+        return None
+
+    def wake(self) -> None:
+        self.wakes += 1
+
+    def stop(self, *, timeout_s: float = 10.0) -> LeaseKeeperSnapshot:
+        self.state = LeaseKeeperState.STOPPED
+        return self.snapshot()
 
 
 class FakeManagedSession:
@@ -518,6 +557,270 @@ class AccountOrchestratorTest(unittest.TestCase):
             self.assertNotIn("login@example.test", persisted)
             self.assertNotIn("password-value", persisted)
             self.assertNotIn("123456", persisted)
+
+    def test_download_state_restarts_reverifies_and_retries_once(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            now = datetime.now(timezone.utc)
+            lease = replace(
+                FakeAccountProvider.lease("acct_1", now=now),
+                expected_ea_account_id="ea_1",
+            )
+            provider = FakeAccountProvider(
+                [lease],
+                credentials={
+                    "acct_1": SecretCredentials("login@example.test", "password")
+                },
+                otp_factory=lambda challenge_id, started_at: OtpCode(
+                    code="123456",
+                    challenge_id=challenge_id,
+                    received_at=started_at,
+                    expires_at=started_at + timedelta(minutes=1),
+                ),
+            )
+            log: list[str] = []
+
+            class DownloadOnceDriver(FakeEaDriver):
+                def __init__(self):
+                    super().__init__(log, "ea_1")
+                    self.starts = 0
+
+                def start_apex(self) -> None:
+                    self.starts += 1
+                    self.log.append("apex.start")
+                    if self.starts == 1:
+                        raise EaApexDownloadRequired("Download")
+
+            driver = DownloadOnceDriver()
+            session = FakeManagedSession(log, FakeDrain())
+            result = AccountOrchestrator(
+                provider=provider,
+                ea_driver=driver,
+                play_session=session,
+                checkpoint_store=AtomicCheckpointStore(
+                    Path(directory) / "account-cycle-status.json"
+                ),
+                device_id="device_1",
+                capture_source=object(),
+                operation_id_factory=iter(
+                    ["claim_1", "renew_1", "credentials_1", "otp_1", "close_1"]
+                ).__next__,
+                completion_poll_s=0.1,
+                sleep=lambda _: None,
+                notify=lambda _: None,
+            ).run_once()
+
+            self.assertEqual(result.outcome, AccountCycleOutcome.COMPLETED)
+            self.assertEqual(driver.starts, 2)
+            first_start = log.index("apex.start")
+            restart = log.index("ea.restart")
+            second_verify = log.index("ea.verify_identity", restart)
+            second_start = log.index("apex.start", first_start + 1)
+            self.assertLess(first_start, restart)
+            self.assertLess(restart, second_verify)
+            self.assertLess(second_verify, second_start)
+            self.assertLess(second_start, log.index("play.start"))
+
+    def test_download_state_is_only_retried_once(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            now = datetime.now(timezone.utc)
+            lease = replace(
+                FakeAccountProvider.lease("acct_1", now=now),
+                expected_ea_account_id="ea_1",
+            )
+            provider = FakeAccountProvider(
+                [lease],
+                credentials={
+                    "acct_1": SecretCredentials("login@example.test", "password")
+                },
+                otp_factory=lambda challenge_id, started_at: OtpCode(
+                    code="123456",
+                    challenge_id=challenge_id,
+                    received_at=started_at,
+                    expires_at=started_at + timedelta(minutes=1),
+                ),
+            )
+            log: list[str] = []
+
+            class AlwaysDownloadDriver(FakeEaDriver):
+                def start_apex(self) -> None:
+                    self.log.append("apex.start")
+                    raise EaApexDownloadRequired("Download")
+
+            result = AccountOrchestrator(
+                provider=provider,
+                ea_driver=AlwaysDownloadDriver(log, "ea_1"),
+                play_session=object(),
+                checkpoint_store=AtomicCheckpointStore(
+                    Path(directory) / "account-cycle-status.json"
+                ),
+                device_id="device_1",
+                capture_source=object(),
+                operation_id_factory=iter(
+                    ["claim_1", "renew_1", "credentials_1", "otp_1", "close_1"]
+                ).__next__,
+                sleep=lambda _: None,
+                notify=lambda _: None,
+            ).run_once()
+
+            self.assertEqual(result.outcome, AccountCycleOutcome.COMPLETED)
+            self.assertEqual(result.error_code, "APEX_START_FAILED")
+            self.assertEqual(log.count("apex.start"), 2)
+            self.assertEqual(log.count("ea.restart"), 1)
+
+    def test_transient_renew_failure_after_apex_start_recovers_in_place(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            now = datetime.now(timezone.utc)
+            lease = replace(
+                FakeAccountProvider.lease("acct_1", now=now),
+                expected_ea_account_id="ea_1",
+            )
+            provider = FakeAccountProvider(
+                [lease],
+                credentials={
+                    "acct_1": SecretCredentials("login@example.test", "password")
+                },
+                otp_factory=lambda challenge_id, started_at: OtpCode(
+                    code="123456",
+                    challenge_id=challenge_id,
+                    received_at=started_at,
+                    expires_at=started_at + timedelta(minutes=1),
+                ),
+            )
+            log: list[str] = []
+            notices: list[str] = []
+            sleeps: list[float] = []
+            keepers: list[ScriptedLeaseKeeper] = []
+
+            def keeper_factory(_provider, current_lease, **_kwargs):
+                keeper = ScriptedLeaseKeeper(current_lease)
+                keepers.append(keeper)
+                return keeper
+
+            class LeaseDropsAfterLaunch(FakeEaDriver):
+                def start_apex(self) -> None:
+                    super().start_apex()
+                    keepers[0].state = LeaseKeeperState.UNCERTAIN
+
+            def sleep(delay: float) -> None:
+                sleeps.append(delay)
+                keepers[0].state = LeaseKeeperState.CURRENT
+
+            result = AccountOrchestrator(
+                provider=provider,
+                ea_driver=LeaseDropsAfterLaunch(log, "ea_1"),
+                play_session=FakeManagedSession(log, FakeDrain()),
+                checkpoint_store=AtomicCheckpointStore(
+                    Path(directory) / "account-cycle-status.json"
+                ),
+                device_id="device_1",
+                capture_source=object(),
+                lease_keeper_factory=keeper_factory,
+                operation_id_factory=iter(
+                    ["claim_1", "credentials_1", "otp_1", "close_1"]
+                ).__next__,
+                sleep=sleep,
+                notify=notices.append,
+            ).run_once()
+
+            self.assertEqual(result.outcome, AccountCycleOutcome.COMPLETED)
+            self.assertEqual(log.count("ea.start"), 1)
+            self.assertEqual(log.count("ea.verify_identity"), 1)
+            self.assertEqual(log.count("apex.start"), 1)
+            self.assertLess(log.index("apex.start"), log.index("play.start"))
+            self.assertEqual(sleeps, [5.0])
+            self.assertEqual(keepers[0].wakes, 1)
+            self.assertTrue(any("续租已恢复" in notice for notice in notices))
+
+    def test_renew_failure_pauses_after_sixty_second_grace(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            lease = FakeAccountProvider.lease("acct_1")
+            keeper = ScriptedLeaseKeeper(
+                lease,
+                state=LeaseKeeperState.UNCERTAIN,
+            )
+            sleeps: list[float] = []
+            notices: list[str] = []
+            orchestrator = AccountOrchestrator(
+                provider=FakeAccountProvider(),
+                ea_driver=object(),
+                play_session=object(),
+                checkpoint_store=AtomicCheckpointStore(
+                    Path(directory) / "account-cycle-status.json"
+                ),
+                device_id="device_1",
+                capture_source=object(),
+                sleep=sleeps.append,
+                notify=notices.append,
+            )
+
+            result = orchestrator._lease_gate(keeper)
+
+            self.assertIsNotNone(result)
+            self.assertEqual(result.outcome, AccountCycleOutcome.PAUSED)
+            self.assertEqual(result.error_code, "LEASE_UNCERTAIN")
+            self.assertEqual(sum(sleeps), 60.0)
+            self.assertEqual(keeper.wakes, 12)
+            self.assertTrue(any("60 秒内仍未恢复" in notice for notice in notices))
+
+    def test_stale_lease_stops_immediately_without_using_the_grace(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            lease = FakeAccountProvider.lease("acct_1")
+            keeper = ScriptedLeaseKeeper(
+                lease,
+                state=LeaseKeeperState.STALE,
+            )
+            keeper.error_code = "LEASE_STALE"
+            orchestrator = AccountOrchestrator(
+                provider=FakeAccountProvider(),
+                ea_driver=object(),
+                play_session=object(),
+                checkpoint_store=AtomicCheckpointStore(
+                    Path(directory) / "account-cycle-status.json"
+                ),
+                device_id="device_1",
+                capture_source=object(),
+                sleep=lambda _delay: self.fail("stale lease must not wait"),
+                notify=lambda _message: None,
+            )
+
+            result = orchestrator._lease_gate(keeper)
+
+            self.assertIsNotNone(result)
+            self.assertEqual(result.outcome, AccountCycleOutcome.PAUSED)
+            self.assertEqual(result.error_code, "LEASE_STALE")
+            self.assertEqual(
+                orchestrator._checkpoint.run_state,
+                OrchestratorRunState.PAUSED_MANUAL,
+            )
+
+    def test_unrecovered_lease_stops_the_just_started_apex(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            lease = FakeAccountProvider.lease("acct_1")
+            keeper = ScriptedLeaseKeeper(
+                lease,
+                state=LeaseKeeperState.UNCERTAIN,
+            )
+            log: list[str] = []
+            notices: list[str] = []
+            orchestrator = AccountOrchestrator(
+                provider=FakeAccountProvider(),
+                ea_driver=FakeEaDriver(log, "ea_1"),
+                play_session=object(),
+                checkpoint_store=AtomicCheckpointStore(
+                    Path(directory) / "account-cycle-status.json"
+                ),
+                device_id="device_1",
+                capture_source=object(),
+                sleep=lambda _delay: None,
+                notify=notices.append,
+            )
+
+            result = orchestrator._lease_gate_after_apex_start(keeper)
+
+            self.assertIsNotNone(result)
+            self.assertEqual(result.error_code, "LEASE_UNCERTAIN")
+            self.assertEqual(log, ["apex.stop"])
+            self.assertTrue(any("已停止刚启动的 Apex" in item for item in notices))
 
     def test_claim_response_crash_recovers_current_lease_without_second_claim(
         self,
@@ -1002,6 +1305,7 @@ class AccountOrchestratorTest(unittest.TestCase):
             provider = FlakyCurrent()
             sleeps = 0
             orchestrator = None
+            notices: list[str] = []
 
             def sleep(_: float) -> None:
                 nonlocal sleeps
@@ -1019,11 +1323,17 @@ class AccountOrchestratorTest(unittest.TestCase):
                 device_id="device_1",
                 capture_source=object(),
                 sleep=sleep,
-                notify=lambda _: None,
+                notify=notices.append,
             )
 
             self.assertEqual(orchestrator.run_forever(idle_s=1), 0)
             self.assertEqual(provider.current_calls, 3)
+            self.assertTrue(
+                any(
+                    "PROVIDER_UNREACHABLE" in notice and "自动重试" in notice
+                    for notice in notices
+                )
+            )
 
     def test_terminal_reporting_error_pauses_instead_of_polling_forever(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -1068,6 +1378,41 @@ class AccountOrchestratorTest(unittest.TestCase):
 
             self.assertEqual(paused.outcome, AccountCycleOutcome.PAUSED)
             self.assertEqual(paused.error_code, "REPORTING_TERMINAL_ERROR")
+
+    def test_no_account_reports_the_retry_delay_before_sleeping(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            provider = FakeAccountProvider()
+            provider.claim_retry_after_s = 45.0
+            notices: list[str] = []
+            sleeps: list[float] = []
+            orchestrator = None
+
+            def sleep(delay: float) -> None:
+                sleeps.append(delay)
+                orchestrator.stop()
+
+            orchestrator = AccountOrchestrator(
+                provider=provider,
+                ea_driver=object(),
+                play_session=object(),
+                checkpoint_store=AtomicCheckpointStore(
+                    Path(directory) / "account-cycle-status.json"
+                ),
+                device_id="device_1",
+                capture_source=object(),
+                sleep=sleep,
+                notify=notices.append,
+            )
+
+            self.assertEqual(orchestrator.run_forever(idle_s=30), 0)
+            self.assertEqual(sleeps, [45.0])
+            self.assertEqual(
+                notices,
+                [
+                    "账号池暂无可领账号；Runner 仍在运行，"
+                    "45 秒后再次尝试领号"
+                ],
+            )
 
 
 if __name__ == "__main__":

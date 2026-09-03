@@ -40,6 +40,10 @@ class EaApexStartFailed(EaAppAutomationError):
     reason_code = "APEX_START_FAILED"
 
 
+class EaApexDownloadRequired(EaApexStartFailed):
+    """The signed-in game hub is stale and only exposes Download."""
+
+
 class EaOtpUnavailable(EaAppAutomationError):
     """EA asked for a code this runner has no way to produce."""
 
@@ -87,6 +91,8 @@ class EaAppDriver(Protocol):
 
     def verify_identity(self, expected_ea_account_id: str) -> EaIdentityFact: ...
 
+    def restart_app(self) -> EaUiState: ...
+
     def start_apex(self) -> None: ...
 
     def stop_apex(self) -> ApexExitEvidence: ...
@@ -121,6 +127,10 @@ class UnavailableEaAppDriver:
     def verify_identity(self, expected_ea_account_id: str) -> EaIdentityFact:
         self._unavailable()
         raise AssertionError("unreachable")
+
+    def restart_app(self) -> EaUiState:
+        self._unavailable()
+        return EaUiState.UNKNOWN
 
     def start_apex(self) -> None:
         self._unavailable()

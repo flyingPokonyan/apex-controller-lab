@@ -21,6 +21,7 @@ from .account_provider import (
 )
 from .ea_app import (
     EaAppAutomationError,
+    EaApexDownloadRequired,
     EaAppDriver,
     EaIdentityFact,
     OtpChallenge,
@@ -40,6 +41,10 @@ from .play_session import (
 )
 from .progression_policy import TargetLevelPolicy
 from .runner_identity import IdentityVerification
+
+
+LEASE_RECOVERY_GRACE_S = 60.0
+LEASE_RECOVERY_POLL_S = 5.0
 
 
 class AccountCycleOutcome(str, Enum):
@@ -380,6 +385,11 @@ class AccountOrchestrator:
             changes["last_error_code"] = snapshot.error_code or "LEASE_STALE"
             changes["run_state"] = OrchestratorRunState.PAUSED_MANUAL
             changes["resume_phase"] = self._checkpoint.workflow_phase
+        elif (
+            snapshot.state is LeaseKeeperState.CURRENT
+            and self._checkpoint.last_error_code == "LEASE_RENEW_FAILED"
+        ):
+            changes["last_error_code"] = None
         self._update_checkpoint(**changes)
 
     def _start_lease_keeper(self, lease: AccountLease) -> LeaseKeeper:
@@ -405,6 +415,73 @@ class AccountOrchestrator:
         keeper.start()
         self._lease_keeper = keeper
         return keeper
+
+    def _lease_gate(
+        self,
+        keeper: LeaseKeeper,
+    ) -> AccountCycleResult | None:
+        """Wait through transient renew failures without restarting EA/Apex."""
+
+        if keeper.is_current():
+            return None
+        snapshot = keeper.snapshot()
+        if snapshot.state is LeaseKeeperState.STALE:
+            return self._pause(
+                snapshot.error_code or "LEASE_STALE",
+                manual=True,
+            )
+        if self._stop.is_set() or snapshot.state is LeaseKeeperState.STOPPED:
+            return AccountCycleResult(AccountCycleOutcome.STOPPED)
+
+        self.notify(
+            "租约续租暂时无法确认；保持当前 EA/Apex 状态，"
+            f"最多等待 {LEASE_RECOVERY_GRACE_S:g} 秒自动恢复"
+        )
+        remaining = LEASE_RECOVERY_GRACE_S
+        while remaining > 0 and not self._stop.is_set():
+            keeper.wake()
+            delay = min(LEASE_RECOVERY_POLL_S, remaining)
+            self.sleep(delay)
+            remaining -= delay
+            if keeper.is_current():
+                self.notify("租约续租已恢复，继续当前账号")
+                self._update_checkpoint(last_error_code=None)
+                return None
+            snapshot = keeper.snapshot()
+            if snapshot.state is LeaseKeeperState.STALE:
+                return self._pause(
+                    snapshot.error_code or "LEASE_STALE",
+                    manual=True,
+                )
+            if snapshot.state is LeaseKeeperState.STOPPED:
+                return AccountCycleResult(AccountCycleOutcome.STOPPED)
+
+        if self._stop.is_set():
+            return AccountCycleResult(AccountCycleOutcome.STOPPED)
+        self.notify(
+            f"租约续租在 {LEASE_RECOVERY_GRACE_S:g} 秒内仍未恢复，安全暂停"
+        )
+        return self._pause("LEASE_UNCERTAIN", manual=False)
+
+    def _lease_gate_after_apex_start(
+        self,
+        keeper: LeaseKeeper,
+    ) -> AccountCycleResult | None:
+        """Never leave a newly started Apex process behind after lease loss."""
+
+        result = self._lease_gate(keeper)
+        if result is None:
+            return None
+        try:
+            exit_evidence = self.ea_driver.stop_apex()
+        except EaAppAutomationError as error:
+            self.notify(f"租约未恢复且停止 Apex 失败：{error}")
+            return self._pause("APEX_STOP_FAILED", manual=True)
+        if not exit_evidence.all_processes_exited:
+            self.notify("租约未恢复且 Apex 进程未完全退出")
+            return self._pause("APEX_STOP_FAILED", manual=True)
+        self.notify("租约未恢复，已停止刚启动的 Apex；保留 EA 状态等待重试")
+        return result
 
     def _otp_supplier(
         self,
@@ -845,13 +922,33 @@ class AccountOrchestrator:
             ):
                 return self._pause("ORPHAN_RUN_RECOVERY_REQUIRED", manual=True)
             identity_fact = self._ensure_account_identity(lease)
-            if not keeper.is_current():
-                return self._pause("LEASE_UNCERTAIN", manual=False)
+            lease_gate = self._lease_gate(keeper)
+            if lease_gate is not None:
+                return lease_gate
 
             self._update_checkpoint(workflow_phase=WorkflowPhase.APEX_STARTING)
-            self.ea_driver.start_apex()
-            if not keeper.is_current():
-                return self._pause("LEASE_UNCERTAIN", manual=False)
+            try:
+                self.ea_driver.start_apex()
+            except EaApexDownloadRequired:
+                self.notify(
+                    "EA App 已安装状态未刷新，自动执行 Restart app 后重试一次"
+                )
+                self.ea_driver.restart_app()
+                lease_gate = self._lease_gate(keeper)
+                if lease_gate is not None:
+                    return lease_gate
+                expected = lease.expected_ea_account_id
+                if not expected:
+                    raise EaAppAutomationError("租约缺少可验证的 EA 稳定账号 ID")
+                identity_fact = self.ea_driver.verify_identity(expected)
+                if not identity_fact.verified or identity_fact.ea_account_id != expected:
+                    raise EaAppAutomationError(
+                        "EA App 重启后登录身份无法与租约账号匹配"
+                    )
+                self.ea_driver.start_apex()
+            lease_gate = self._lease_gate_after_apex_start(keeper)
+            if lease_gate is not None:
+                return lease_gate
 
             self._update_checkpoint(workflow_phase=WorkflowPhase.APEX_PLAYING)
             result = self.play_session.run(
@@ -918,8 +1015,8 @@ class AccountOrchestrator:
         while not self._stop.is_set():
             result = self.run_once()
             if result.outcome is AccountCycleOutcome.PAUSED:
-                self.notify(f"账号编排已暂停：{result.error_code}")
                 if self._checkpoint.run_state is OrchestratorRunState.PAUSED_MANUAL:
+                    self.notify(f"账号编排已暂停：{result.error_code}")
                     if result.error_code not in self.SERVER_RELEASABLE_PAUSES:
                         return 1
                     self.sleep(max(1.0, idle_s))
@@ -928,6 +1025,10 @@ class AccountOrchestrator:
                 retry_after = getattr(self.provider, "claim_retry_after_s", None)
                 if isinstance(retry_after, (int, float)):
                     delay = max(delay, float(retry_after))
+                self.notify(
+                    f"账号编排遇到可重试问题：{result.error_code}；"
+                    f"Runner 仍在运行，{delay:g} 秒后自动重试"
+                )
                 self.sleep(delay)
                 if self._stop.is_set():
                     return 0
@@ -935,6 +1036,7 @@ class AccountOrchestrator:
                     run_state=OrchestratorRunState.ACTIVE,
                     resume_phase=None,
                 )
+                self.notify(f"账号编排开始自动重试：{result.error_code}")
                 continue
             if result.outcome is AccountCycleOutcome.STOPPED:
                 return 0
@@ -943,6 +1045,10 @@ class AccountOrchestrator:
                 retry_after = getattr(self.provider, "claim_retry_after_s", None)
                 if isinstance(retry_after, (int, float)):
                     delay = max(delay, float(retry_after))
+                self.notify(
+                    "账号池暂无可领账号；Runner 仍在运行，"
+                    f"{delay:g} 秒后再次尝试领号"
+                )
                 self.sleep(delay)
         return 0
 
