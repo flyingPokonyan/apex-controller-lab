@@ -453,6 +453,134 @@ class EaLaunchRecoveryTest(unittest.TestCase):
         )
         self.assertTrue(any("Installation complete" in item for item in notices))
 
+    def test_download_flow_accepts_direct_transition_to_play(self) -> None:
+        download_page = self.observation(("DOWNLOAD", 975, 535))
+        play_page = self.observation(
+            ("Apex Legends", 800, 280),
+            ("PLAY", 1150, 700),
+        )
+        clicks: list[tuple[int, int]] = []
+        records: list[str] = []
+        notices: list[str] = []
+        driver = self.driver(
+            [download_page, play_page],
+            clicks,
+            records,
+        )
+        driver.apex_install_dir = Path(r"D:\Apex")
+        driver._installed_apex_copy_exists = lambda: True
+        driver.notify = notices.append
+
+        driver.repair_apex_installation()
+
+        self.assertEqual(clicks, [(975, 535)])
+        self.assertEqual(
+            records,
+            ["apex-install-download", "apex-install-direct-play"],
+        )
+        self.assertTrue(any("直接识别" in item for item in notices))
+
+    def test_download_flow_accepts_play_after_confirming_location(self) -> None:
+        download_page = self.observation(("DOWNLOAD", 975, 535))
+        options = self.observation(
+            ("Download options", 900, 350),
+            ("INSTALL LOCATION", 850, 480),
+            (r"D:\Apex", 860, 535),
+            ("NEXT", 1200, 830),
+        )
+        play_page = self.observation(
+            ("Apex Legends", 800, 280),
+            ("PLAY", 1150, 700),
+        )
+        clicks: list[tuple[int, int]] = []
+        records: list[str] = []
+        driver = self.driver(
+            [download_page, options, play_page],
+            clicks,
+            records,
+        )
+        driver.apex_install_dir = Path(r"D:\Apex")
+        driver._installed_apex_copy_exists = lambda: True
+        driver.notify = lambda _: None
+
+        driver.repair_apex_installation()
+
+        self.assertEqual(clicks, [(975, 535), (1200, 830)])
+        self.assertEqual(
+            records,
+            [
+                "apex-install-download",
+                "apex-install-options",
+                "apex-install-direct-play",
+            ],
+        )
+
+    def test_download_flow_accepts_play_after_terms(self) -> None:
+        download_page = self.observation(("DOWNLOAD", 975, 535))
+        options = self.observation(
+            ("Download options", 900, 350),
+            ("INSTALL LOCATION", 850, 480),
+            (r"D:\Apex", 860, 535),
+            ("NEXT", 1200, 830),
+        )
+        terms = self.observation(
+            ("Terms of play", 900, 400),
+            ("DOWNLOAD", 1200, 825),
+        )
+        play_page = self.observation(
+            ("Apex Legends", 800, 280),
+            ("PLAY", 1150, 700),
+        )
+        clicks: list[tuple[int, int]] = []
+        records: list[str] = []
+        driver = self.driver(
+            [download_page, options, terms, play_page],
+            clicks,
+            records,
+        )
+        driver.apex_install_dir = Path(r"D:\Apex")
+        driver._installed_apex_copy_exists = lambda: True
+        driver.notify = lambda _: None
+
+        driver.repair_apex_installation()
+
+        self.assertEqual(clicks, [(975, 535), (1200, 830), (1200, 825)])
+        self.assertEqual(
+            records,
+            [
+                "apex-install-download",
+                "apex-install-options",
+                "apex-install-terms",
+                "apex-install-direct-play",
+            ],
+        )
+
+    def test_download_flow_accepts_immediate_installation_complete(self) -> None:
+        download_page = self.observation(("DOWNLOAD", 975, 535))
+        completed = self.observation(
+            ("Download manager", 850, 300),
+            ("Completed", 700, 515),
+            ("Apex Legends", 750, 620),
+        )
+        clicks: list[tuple[int, int]] = []
+        records: list[str] = []
+        driver = self.driver(
+            [download_page, completed],
+            clicks,
+            records,
+        )
+        driver.apex_install_dir = Path(r"D:\Apex")
+        driver._installed_apex_copy_exists = lambda: True
+        driver.notify = lambda _: None
+
+        driver.repair_apex_installation()
+
+        self.assertEqual(clicks, [(975, 535)])
+        self.assertEqual(
+            records,
+            ["apex-install-download", "apex-install-complete"],
+        )
+
     def test_download_flow_refuses_when_existing_copy_is_missing(self) -> None:
         clicks: list[tuple[int, int]] = []
         records: list[str] = []

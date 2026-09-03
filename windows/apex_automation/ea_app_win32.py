@@ -1243,16 +1243,54 @@ class WindowsEaHybridDriver:
                 and expected_location in compact
             )
 
-        options = self._wait_for_observation(
+        def apex_play_ready(observation: EaObservation) -> bool:
+            compact = "".join(observation.normalized)
+            return "apexlegends" in compact and self._anchor(
+                observation,
+                ("play", "launch", "launchgame", "startgame", "开始游戏"),
+                x_range=(0.35, 0.75),
+                y_range=(0.30, 0.70),
+                exact=True,
+            ) is not None
+
+        def installation_complete(observation: EaObservation) -> bool:
+            compact = "".join(observation.normalized)
+            return (
+                any(term in compact for term in DOWNLOAD_MANAGER_TERMS)
+                and "apexlegends" in compact
+                and (
+                    any(term in compact for term in INSTALL_COMPLETE_TERMS)
+                    or any(term in compact for term in COMPLETED_TERMS)
+                )
+            )
+
+        next_page = self._wait_for_observation(
             hwnd,
-            valid_options,
-            timeout_s=20.0,
-            missing_step="apex-install-options-missing",
+            lambda observation: (
+                valid_options(observation)
+                or apex_play_ready(observation)
+                or installation_complete(observation)
+            ),
+            timeout_s=45.0,
+            missing_step="apex-install-first-transition-timeout",
             error_message=(
-                "EA App Download options 未确认安装路径为 "
-                f"{self.apex_install_dir}，已拒绝继续"
+                "EA App 点击 Download 后既未进入 Download options，"
+                "也未显示 Play 或 Installation complete"
             ),
         )
+        if apex_play_ready(next_page):
+            self._record("apex-install-direct-play", next_page)
+            self.notify(
+                "EA App 点击 Download 后已直接识别 D:\\Apex 并显示 Play，"
+                "无需 Restart app"
+            )
+            return
+        if installation_complete(next_page):
+            self._record("apex-install-complete", next_page)
+            self.notify("EA App 已直接完成 D:\\Apex 登记，无需 Restart app")
+            return
+
+        options = next_page
         next_button = self._anchor(
             options,
             ("next", "下一步"),
@@ -1269,16 +1307,30 @@ class WindowsEaHybridDriver:
         self._record("apex-install-options", options)
         self._click_point(hwnd, *next_button)
 
-        terms = self._wait_for_observation(
+        next_page = self._wait_for_observation(
             hwnd,
-            lambda observation: self._contains_compact_terms(
-                observation,
-                TERMS_OF_PLAY_TERMS,
+            lambda observation: (
+                self._contains_compact_terms(observation, TERMS_OF_PLAY_TERMS)
+                or apex_play_ready(observation)
+                or installation_complete(observation)
             ),
-            timeout_s=20.0,
-            missing_step="apex-install-terms-missing",
-            error_message="EA App 未进入 Terms of play 页面",
+            timeout_s=45.0,
+            missing_step="apex-install-second-transition-timeout",
+            error_message=(
+                "EA App 点击 Next 后未进入 Terms of play，"
+                "也未显示 Play 或 Installation complete"
+            ),
         )
+        if apex_play_ready(next_page):
+            self._record("apex-install-direct-play", next_page)
+            self.notify("EA App 点击 Next 后已显示 Play，无需 Restart app")
+            return
+        if installation_complete(next_page):
+            self._record("apex-install-complete", next_page)
+            self.notify("EA App 已完成 D:\\Apex 登记，无需 Restart app")
+            return
+
+        terms = next_page
         confirm_download = self._anchor(
             terms,
             ("download", "下载"),
@@ -1293,20 +1345,12 @@ class WindowsEaHybridDriver:
         self._click_point(hwnd, *confirm_download)
         self.notify("EA App 已提交现有文件登记，等待 Installation complete")
 
-        def installation_complete(observation: EaObservation) -> bool:
-            compact = "".join(observation.normalized)
-            return (
-                any(term in compact for term in DOWNLOAD_MANAGER_TERMS)
-                and "apexlegends" in compact
-                and (
-                    any(term in compact for term in INSTALL_COMPLETE_TERMS)
-                    or any(term in compact for term in COMPLETED_TERMS)
-                )
-            )
-
         completed = self._wait_for_observation(
             hwnd,
-            installation_complete,
+            lambda observation: (
+                installation_complete(observation)
+                or apex_play_ready(observation)
+            ),
             timeout_s=APEX_INSTALL_REPAIR_TIMEOUT_S,
             missing_step="apex-install-complete-timeout",
             error_message=(
@@ -1314,8 +1358,12 @@ class WindowsEaHybridDriver:
                 "已停止自动恢复"
             ),
         )
+        if apex_play_ready(completed):
+            self._record("apex-install-direct-play", completed)
+            self.notify("EA App 登记现有文件后已显示 Play，无需 Restart app")
+            return
         self._record("apex-install-complete", completed)
-        self.notify("EA App 已显示 Installation complete，准备 Restart app")
+        self.notify("EA App 已显示 Installation complete，无需 Restart app")
 
     def _request_restart_app(self, hwnd: int) -> None:
         """Select the exact Help -> Restart app action from EA's main menu."""

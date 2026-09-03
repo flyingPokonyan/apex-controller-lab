@@ -22,6 +22,7 @@ from .account_provider import (
 from .ea_app import (
     EaAppAutomationError,
     EaApexDownloadRequired,
+    EaApexStartFailed,
     EaAppDriver,
     EaIdentityFact,
     OtpChallenge,
@@ -131,6 +132,7 @@ class AccountOrchestrator:
         self._checkpoint_lock = threading.Lock()
         self._provider_operation_lock = threading.RLock()
         self._checkpoint = self._load_checkpoint()
+        self._restart_recovery_pending = self._checkpoint.has_lease
         self._stop = threading.Event()
         self._lease_keeper: LeaseKeeper | None = None
         self._report_drain: ReportDrainHandle | None = None
@@ -332,9 +334,10 @@ class AccountOrchestrator:
                     f"REMOTE_{remote.state.value}_RECOVERY_REQUIRED"
                 )
             if remote.provider_status == "RUNNING":
-                raise RemoteLeaseRecoveryRequired(
-                    "REMOTE_RUNNING_RECOVERY_REQUIRED"
+                self.notify(
+                    "服务端仍有本机上次运行的活动租约，自动进入清理收口"
                 )
+            self._restart_recovery_pending = True
             return lease
 
         claim_request_id = (
@@ -794,7 +797,11 @@ class AccountOrchestrator:
     ) -> AccountCycleResult:
         result = self._checkpoint_result()
         if result is None:
-            return self._pause("REPORT_DRAIN_UNAVAILABLE", manual=True)
+            self.notify("旧运行报告无法恢复，自动清理并释放旧租约")
+            return self._cleanup_and_close_preplay_failure(
+                lease,
+                "RESTART_RECOVERY",
+            )
         self._report_drain = result.report_drain
         evidence = self._completion_evidence(result)
         phase = self._checkpoint.workflow_phase
@@ -889,7 +896,23 @@ class AccountOrchestrator:
     def run_once(self) -> AccountCycleResult:
         if self._stop.is_set():
             return AccountCycleResult(AccountCycleOutcome.STOPPED)
-        self._reconcile_server_release()
+        if self._reconcile_server_release():
+            self._restart_recovery_pending = False
+        if (
+            self._restart_recovery_pending
+            and self._checkpoint.has_lease
+            and self._checkpoint.run_state is not OrchestratorRunState.ACTIVE
+        ):
+            previous = self._checkpoint.last_error_code
+            self._update_checkpoint(
+                run_state=OrchestratorRunState.ACTIVE,
+                resume_phase=None,
+                last_error_code=None,
+            )
+            self.notify(
+                f"检测到上次未释放的租约，自动恢复清理"
+                f"（原因 {previous or '进程中断'}）"
+            )
         if self._checkpoint.run_state is not OrchestratorRunState.ACTIVE:
             return AccountCycleResult(
                 AccountCycleOutcome.PAUSED,
@@ -902,7 +925,30 @@ class AccountOrchestrator:
             if lease is None:
                 if self._checkpoint.has_lease:
                     return self._pause("COMPLETION_RECOVERY_REQUIRED", manual=True)
+                self._restart_recovery_pending = False
                 return AccountCycleResult(AccountCycleOutcome.NO_ACCOUNT)
+            if self._restart_recovery_pending:
+                if self._checkpoint.workflow_phase in {
+                    WorkflowPhase.APEX_STOPPING,
+                    WorkflowPhase.EA_SIGNING_OUT,
+                    WorkflowPhase.LEASE_COMPLETING,
+                }:
+                    status = self.provider.status(
+                        lease.lease_id,
+                        lease.lease_fence,
+                    )
+                    if not status.terminal:
+                        self._start_lease_keeper(lease)
+                    recovery = self._resume_terminal_workflow(lease)
+                else:
+                    self.notify("程序曾在任务中途退出，自动释放旧租约")
+                    recovery = self._cleanup_and_close_preplay_failure(
+                        lease,
+                        "RESTART_RECOVERY",
+                    )
+                if recovery.outcome is not AccountCycleOutcome.PAUSED:
+                    self._restart_recovery_pending = False
+                return recovery
             if self._checkpoint.workflow_phase in {
                 WorkflowPhase.APEX_STOPPING,
                 WorkflowPhase.EA_SIGNING_OUT,
@@ -937,23 +983,53 @@ class AccountOrchestrator:
                 lease_gate = self._lease_gate(keeper)
                 if lease_gate is not None:
                     return lease_gate
-                self.ea_driver.repair_apex_installation()
-                lease_gate = self._lease_gate(keeper)
-                if lease_gate is not None:
-                    return lease_gate
-                self.ea_driver.restart_app()
-                lease_gate = self._lease_gate(keeper)
-                if lease_gate is not None:
-                    return lease_gate
-                expected = lease.expected_ea_account_id
-                if not expected:
-                    raise EaAppAutomationError("租约缺少可验证的 EA 稳定账号 ID")
-                identity_fact = self.ea_driver.verify_identity(expected)
-                if not identity_fact.verified or identity_fact.ea_account_id != expected:
-                    raise EaAppAutomationError(
-                        "EA App 重启后登录身份无法与租约账号匹配"
+                first_failure: EaApexStartFailed | None = None
+                try:
+                    self.ea_driver.repair_apex_installation()
+                    lease_gate = self._lease_gate(keeper)
+                    if lease_gate is not None:
+                        return lease_gate
+                    self.ea_driver.start_apex()
+                except EaApexStartFailed as error:
+                    first_failure = error
+
+                if first_failure is None:
+                    self.notify("EA App 已完成现有文件登记并启动 Apex")
+                else:
+                    self.notify(
+                        "EA App 首次登记或启动未完成，自动执行一次 "
+                        f"Restart app 后复查：{first_failure}"
                     )
-                self.ea_driver.start_apex()
+                    lease_gate = self._lease_gate(keeper)
+                    if lease_gate is not None:
+                        return lease_gate
+                    self.ea_driver.restart_app()
+                    lease_gate = self._lease_gate(keeper)
+                    if lease_gate is not None:
+                        return lease_gate
+                    expected = lease.expected_ea_account_id
+                    if not expected:
+                        raise EaAppAutomationError("租约缺少可验证的 EA 稳定账号 ID")
+                    identity_fact = self.ea_driver.verify_identity(expected)
+                    if (
+                        not identity_fact.verified
+                        or identity_fact.ea_account_id != expected
+                    ):
+                        raise EaAppAutomationError(
+                            "EA App 重启后登录身份无法与租约账号匹配"
+                        )
+                    try:
+                        self.ea_driver.start_apex()
+                    except EaApexDownloadRequired:
+                        self.notify(
+                            "EA App Restart 后仍显示 Download，"
+                            "执行最后一次现有文件登记"
+                        )
+                        self.ea_driver.repair_apex_installation()
+                        lease_gate = self._lease_gate(keeper)
+                        if lease_gate is not None:
+                            return lease_gate
+                        self.ea_driver.start_apex()
             lease_gate = self._lease_gate_after_apex_start(keeper)
             if lease_gate is not None:
                 return lease_gate
@@ -1056,6 +1132,17 @@ class AccountOrchestrator:
                 self.notify(
                     "账号池暂无可领账号；Runner 仍在运行，"
                     f"{delay:g} 秒后再次尝试领号"
+                )
+                self.sleep(delay)
+                continue
+            if (
+                result.outcome is AccountCycleOutcome.COMPLETED
+                and result.error_code is not None
+            ):
+                delay = max(1.0, idle_s)
+                self.notify(
+                    f"上一账号因 {result.error_code} 收口；"
+                    f"Runner 等待 {delay:g} 秒后再领号"
                 )
                 self.sleep(delay)
         return 0
