@@ -931,8 +931,16 @@ class AccountOrchestrator:
                 self.ea_driver.start_apex()
             except EaApexDownloadRequired:
                 self.notify(
-                    "EA App 已安装状态未刷新，自动执行 Restart app 后重试一次"
+                    "EA App 已安装状态未登记，自动走一次 "
+                    "Download 现有文件登记流程"
                 )
+                lease_gate = self._lease_gate(keeper)
+                if lease_gate is not None:
+                    return lease_gate
+                self.ea_driver.repair_apex_installation()
+                lease_gate = self._lease_gate(keeper)
+                if lease_gate is not None:
+                    return lease_gate
                 self.ea_driver.restart_app()
                 lease_gate = self._lease_gate(keeper)
                 if lease_gate is not None:

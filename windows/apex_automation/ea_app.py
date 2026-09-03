@@ -91,6 +91,8 @@ class EaAppDriver(Protocol):
 
     def verify_identity(self, expected_ea_account_id: str) -> EaIdentityFact: ...
 
+    def repair_apex_installation(self) -> None: ...
+
     def restart_app(self) -> EaUiState: ...
 
     def start_apex(self) -> None: ...
@@ -127,6 +129,9 @@ class UnavailableEaAppDriver:
     def verify_identity(self, expected_ea_account_id: str) -> EaIdentityFact:
         self._unavailable()
         raise AssertionError("unreachable")
+
+    def repair_apex_installation(self) -> None:
+        self._unavailable()
 
     def restart_app(self) -> EaUiState:
         self._unavailable()

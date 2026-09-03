@@ -101,6 +101,8 @@ IDENTITY_BAND = (0.75, 0.00, 1.00, 0.12)
 INPUT_SETTLE_S = 0.8
 MAX_OTP_ATTEMPTS = 3
 EA_RESTART_TIMEOUT_S = 60.0
+APEX_INSTALL_REPAIR_TIMEOUT_S = 180.0
+APEX_INSTALL_DIR = Path(r"D:\Apex")
 HELP_TERMS = ("help", "帮助")
 RESTART_APP_TERMS = (
     "restartapp",
@@ -108,6 +110,12 @@ RESTART_APP_TERMS = (
     "重启应用",
     "重新启动应用",
 )
+DOWNLOAD_OPTIONS_TERMS = ("downloadoptions", "下载选项")
+INSTALL_LOCATION_TERMS = ("installlocation", "安装位置")
+TERMS_OF_PLAY_TERMS = ("termsofplay", "游戏条款")
+INSTALL_COMPLETE_TERMS = ("installationcomplete", "安装完成")
+DOWNLOAD_MANAGER_TERMS = ("downloadmanager", "下载管理器")
+COMPLETED_TERMS = ("completed", "已完成")
 
 # Pages that prove no session exists yet.
 PRE_LOGIN_PAGES = (
@@ -207,6 +215,7 @@ class WindowsEaHybridDriver:
         self.user32.IsWindowVisible.argtypes = [wintypes.HWND]
         self.user32.IsWindowVisible.restype = wintypes.BOOL
         self._hwnd: int | None = None
+        self.apex_install_dir = APEX_INSTALL_DIR
         try:
             self.user32.SetProcessDpiAwarenessContext(ctypes.c_void_p(-4))
         except (AttributeError, OSError):
@@ -1164,6 +1173,149 @@ class WindowsEaHybridDriver:
             "EA App 页面没有可验证的稳定 EA ID"
             + (f"（观察到 {seen[-1]}）" if seen else "")
         )
+
+    @staticmethod
+    def _contains_compact_terms(
+        observation: EaObservation,
+        terms: Sequence[str],
+    ) -> bool:
+        compact = "".join(observation.normalized)
+        return any(term in compact for term in terms)
+
+    def _wait_for_observation(
+        self,
+        hwnd: int,
+        predicate: Callable[[EaObservation], bool],
+        *,
+        timeout_s: float,
+        missing_step: str,
+        error_message: str,
+    ) -> EaObservation:
+        deadline = time.monotonic() + timeout_s
+        observation: EaObservation | None = None
+        while time.monotonic() < deadline:
+            hwnd = self._live(hwnd)
+            observation = self._observe(hwnd)
+            if predicate(observation):
+                return observation
+            self.sleep(1.0)
+        self._record(missing_step, observation)
+        raise EaApexStartFailed(error_message)
+
+    def _installed_apex_copy_exists(self) -> bool:
+        return self.apex_install_dir.is_dir() and any(
+            (self.apex_install_dir / executable).is_file()
+            for executable in APEX_EXECUTABLES
+        )
+
+    def repair_apex_installation(self) -> None:
+        """Re-register the existing D:\\Apex copy through EA's download flow."""
+
+        if not self._installed_apex_copy_exists():
+            raise EaApexStartFailed(
+                f"未在 {self.apex_install_dir} 找到已安装的 Apex 程序，"
+                "已拒绝启动下载流程"
+            )
+
+        hwnd = self._ea_window()
+        download_page = self._observe(hwnd)
+        download = self._anchor(
+            download_page,
+            ("download", "下载"),
+            x_range=(0.35, 0.75),
+            y_range=(0.30, 0.70),
+            exact=True,
+        )
+        if download is None:
+            self._record("apex-install-download-missing", download_page)
+            raise EaApexStartFailed("EA App Apex 页面未找到 Download 按钮")
+        self.notify("EA App 开始重新登记 D:\\Apex 已有游戏文件")
+        self._record("apex-install-download", download_page)
+        self._click_point(hwnd, *download)
+
+        expected_location = normalize_ocr_text(str(self.apex_install_dir))
+
+        def valid_options(observation: EaObservation) -> bool:
+            compact = "".join(observation.normalized)
+            return (
+                any(term in compact for term in DOWNLOAD_OPTIONS_TERMS)
+                and any(term in compact for term in INSTALL_LOCATION_TERMS)
+                and expected_location in compact
+            )
+
+        options = self._wait_for_observation(
+            hwnd,
+            valid_options,
+            timeout_s=20.0,
+            missing_step="apex-install-options-missing",
+            error_message=(
+                "EA App Download options 未确认安装路径为 "
+                f"{self.apex_install_dir}，已拒绝继续"
+            ),
+        )
+        next_button = self._anchor(
+            options,
+            ("next", "下一步"),
+            x_range=(0.45, 0.75),
+            y_range=(0.65, 0.95),
+            exact=True,
+        )
+        if next_button is None:
+            self._record("apex-install-next-missing", options)
+            raise EaApexStartFailed("EA App Download options 未找到 Next 按钮")
+        self.notify(
+            f"已确认安装路径 {self.apex_install_dir}；保留 EA 当前语言选择"
+        )
+        self._record("apex-install-options", options)
+        self._click_point(hwnd, *next_button)
+
+        terms = self._wait_for_observation(
+            hwnd,
+            lambda observation: self._contains_compact_terms(
+                observation,
+                TERMS_OF_PLAY_TERMS,
+            ),
+            timeout_s=20.0,
+            missing_step="apex-install-terms-missing",
+            error_message="EA App 未进入 Terms of play 页面",
+        )
+        confirm_download = self._anchor(
+            terms,
+            ("download", "下载"),
+            x_range=(0.45, 0.75),
+            y_range=(0.65, 0.95),
+            exact=True,
+        )
+        if confirm_download is None:
+            self._record("apex-install-confirm-missing", terms)
+            raise EaApexStartFailed("EA App Terms of play 页面未找到 Download 按钮")
+        self._record("apex-install-terms", terms)
+        self._click_point(hwnd, *confirm_download)
+        self.notify("EA App 已提交现有文件登记，等待 Installation complete")
+
+        def installation_complete(observation: EaObservation) -> bool:
+            compact = "".join(observation.normalized)
+            return (
+                any(term in compact for term in DOWNLOAD_MANAGER_TERMS)
+                and "apexlegends" in compact
+                and (
+                    any(term in compact for term in INSTALL_COMPLETE_TERMS)
+                    or any(term in compact for term in COMPLETED_TERMS)
+                )
+            )
+
+        completed = self._wait_for_observation(
+            hwnd,
+            installation_complete,
+            timeout_s=APEX_INSTALL_REPAIR_TIMEOUT_S,
+            missing_step="apex-install-complete-timeout",
+            error_message=(
+                "EA App 在 180 秒内未将 D:\\Apex 登记为已安装，"
+                "已停止自动恢复"
+            ),
+        )
+        self._record("apex-install-complete", completed)
+        self.notify("EA App 已显示 Installation complete，准备 Restart app")
 
     def _request_restart_app(self, hwnd: int) -> None:
         """Select the exact Help -> Restart app action from EA's main menu."""

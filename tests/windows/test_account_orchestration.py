@@ -310,6 +310,9 @@ class FakeEaDriver:
         self.log.append("ea.verify_identity")
         return EaIdentityFact(self.ea_account_id, "fake-uia", True)
 
+    def repair_apex_installation(self) -> None:
+        self.log.append("ea.repair_install")
+
     def restart_app(self) -> EaUiState:
         self.log.append("ea.restart")
         return EaUiState.SIGNED_IN
@@ -612,10 +615,12 @@ class AccountOrchestratorTest(unittest.TestCase):
             self.assertEqual(result.outcome, AccountCycleOutcome.COMPLETED)
             self.assertEqual(driver.starts, 2)
             first_start = log.index("apex.start")
+            repair = log.index("ea.repair_install")
             restart = log.index("ea.restart")
             second_verify = log.index("ea.verify_identity", restart)
             second_start = log.index("apex.start", first_start + 1)
-            self.assertLess(first_start, restart)
+            self.assertLess(first_start, repair)
+            self.assertLess(repair, restart)
             self.assertLess(restart, second_verify)
             self.assertLess(second_verify, second_start)
             self.assertLess(second_start, log.index("play.start"))
@@ -665,6 +670,7 @@ class AccountOrchestratorTest(unittest.TestCase):
             self.assertEqual(result.outcome, AccountCycleOutcome.COMPLETED)
             self.assertEqual(result.error_code, "APEX_START_FAILED")
             self.assertEqual(log.count("apex.start"), 2)
+            self.assertEqual(log.count("ea.repair_install"), 1)
             self.assertEqual(log.count("ea.restart"), 1)
 
     def test_transient_renew_failure_after_apex_start_recovers_in_place(self) -> None:

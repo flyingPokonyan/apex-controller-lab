@@ -386,6 +386,7 @@ class EaLaunchRecoveryTest(unittest.TestCase):
     ) -> WindowsEaHybridDriver:
         driver = object.__new__(WindowsEaHybridDriver)
         driver._ea_window = lambda: 1
+        driver._live = lambda hwnd: hwnd
         driver._observe = lambda _hwnd: observations.pop(0)
         driver._click_point = lambda _hwnd, x, y: clicks.append((x, y))
         driver._record = lambda step, *_args, **_kwargs: records.append(step)
@@ -408,6 +409,62 @@ class EaLaunchRecoveryTest(unittest.TestCase):
 
         self.assertEqual(clicks, [(120, 460)])
         self.assertEqual(records, ["apex-entry", "apex-download-required"])
+
+    def test_download_flow_registers_existing_copy_before_restart(self) -> None:
+        download_page = self.observation(("DOWNLOAD", 975, 535))
+        options = self.observation(
+            ("Download options", 900, 350),
+            ("INSTALL LOCATION", 850, 480),
+            (r"D:\Apex", 860, 535),
+            ("NEXT", 1200, 830),
+        )
+        terms = self.observation(
+            ("Terms of play", 900, 400),
+            ("DOWNLOAD", 1200, 825),
+        )
+        completed = self.observation(
+            ("Download manager", 850, 300),
+            ("Completed", 700, 515),
+            ("Apex Legends", 750, 620),
+        )
+        clicks: list[tuple[int, int]] = []
+        records: list[str] = []
+        notices: list[str] = []
+        driver = self.driver(
+            [download_page, options, terms, completed],
+            clicks,
+            records,
+        )
+        driver.apex_install_dir = Path(r"D:\Apex")
+        driver._installed_apex_copy_exists = lambda: True
+        driver.notify = notices.append
+
+        driver.repair_apex_installation()
+
+        self.assertEqual(clicks, [(975, 535), (1200, 830), (1200, 825)])
+        self.assertEqual(
+            records,
+            [
+                "apex-install-download",
+                "apex-install-options",
+                "apex-install-terms",
+                "apex-install-complete",
+            ],
+        )
+        self.assertTrue(any("Installation complete" in item for item in notices))
+
+    def test_download_flow_refuses_when_existing_copy_is_missing(self) -> None:
+        clicks: list[tuple[int, int]] = []
+        records: list[str] = []
+        driver = self.driver([], clicks, records)
+        driver.apex_install_dir = Path(r"D:\Apex")
+        driver._installed_apex_copy_exists = lambda: False
+
+        with self.assertRaisesRegex(EaApexStartFailed, "拒绝启动下载"):
+            driver.repair_apex_installation()
+
+        self.assertEqual(clicks, [])
+        self.assertEqual(records, [])
 
     def test_installed_library_card_uses_its_icon_only_play_control(self) -> None:
         library = self.observation(
