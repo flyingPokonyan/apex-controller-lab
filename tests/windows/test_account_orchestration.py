@@ -50,6 +50,7 @@ from apex_automation.orchestration_state import (
     WorkflowPhase,
 )
 from apex_automation.play_session import PlaySessionResult
+from apex_automation.progression_policy import TargetLevelPolicy
 
 
 class AccountProviderContractTest(unittest.TestCase):
@@ -377,10 +378,7 @@ class FakeManagedSession:
         self.log.append("play.start")
         self.asserted_identity = identity
         self.asserted_target = progression_policy.target_level
-        self.asserted_ring = (
-            progression_policy.observed_ring_progress,
-            progression_policy.observed_ring_target,
-        )
+        self.asserted_policy = progression_policy
         self.asserted_current = lease_is_current()
         on_run_started("run_1")
         return PlaySessionResult(
@@ -777,7 +775,7 @@ class AccountOrchestratorTest(unittest.TestCase):
             self.assertEqual(result.outcome, AccountCycleOutcome.COMPLETED)
             self.assertTrue(session.asserted_current)
             self.assertEqual(session.asserted_target, 20)
-            self.assertEqual(session.asserted_ring, (14, 30))
+            self.assertIs(type(session.asserted_policy), TargetLevelPolicy)
             self.assertEqual(session.asserted_identity.lease_fence, lease.lease_fence)
             self.assertEqual(driver.asserted_otp, "123456")
             self.assertLess(log.index("apex.stop"), log.index("ea.sign_out"))

@@ -1405,35 +1405,12 @@ class CapabilityPilot:
             or base_state in self.ranked_road_panel_states
         ):
             return None
-        requested_at = self._ranked_road_probe_requested_at
-        if (
-            requested_at is not None
-            and state is not None
-            and state != base_state
-        ):
-            # The lobby's lower-right activity tile is not a stable route. It
-            # can rotate to News, so the exact same coordinate that opened
-            # Ranked Road in one session opened NEWS_WELCOME in the next real
-            # run (20260904-153802). Do not let the optional ring probe own an
-            # unrelated overlay: abandon this probe and give the recognised
-            # page back to the normal capability dispatcher, which can close
-            # it safely. A missing ring reading is explicitly non-blocking.
-            self._ranked_road_probe_done = True
-            self._ranked_road_probe_requested_at = None
-            self.counters["rankedRoadProgressUnavailable"] += 1
-            self.recorder.log(
-                "RANKED_ROAD_PROGRESS_UNAVAILABLE",
-                attempts=self._ranked_road_probe_attempts,
-                state=state,
-                reason="排位之路入口打开了其他已识别页面，已放弃本次缩圈读取",
-            )
-            self.notify(f"  ↳ 未进入排位之路（实际 {state}），本次不采用缩圈数据")
-            return None
         if state != base_state or base_state not in SAFE_LOBBY_STATES:
             return "RANKED_ROAD_PROGRESS"
         if self.dispatcher.pending is not None:
             return None
 
+        requested_at = self._ranked_road_probe_requested_at
         if requested_at is not None and now - requested_at < self.ranked_road_retry_s:
             return "RANKED_ROAD_PROGRESS"
         if self._ranked_road_probe_attempts >= self.ranked_road_max_attempts:
@@ -2135,17 +2112,6 @@ class CapabilityPilot:
                 self.counters["wait:RANKED_ROAD_PROGRESS"] += 1
                 self._write_status(self.monotonic())
                 return record
-        elif (
-            state is not None
-            and state != base_state
-            and self.dispatcher.capabilities.for_state(state)
-        ):
-            # A recognised overlay must be cleared before the progression
-            # policy can insist on returning to a safe lobby. Otherwise a
-            # target-level account that opens News while probing Ranked Road
-            # is told to wait for the lobby, while the only capability able to
-            # get it back to the lobby is never allowed to run.
-            progression_decision = None
         else:
             progression_decision = self._apply_progression_policy(
                 state,

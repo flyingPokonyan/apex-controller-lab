@@ -31,8 +31,8 @@
     "maxAttempts": 3
   },
   "rankedRoadProgress": {
-    "_note": "托管账号每次进入大厅只检查一次：点击右下排位之路卡片；若先到欢迎挑战就向右切一页；从完整任务列表读取「撑过 30 次安全区缩小」的 x/30。识别到该项后必须达到 30/30；没有可靠识别到则不把缩圈作为结束门槛。",
-    "enabled": true,
+    "_note": "已停用：等级 20 已足够作为完成条件；大厅活动卡片会轮换，主动打开它读取缩圈会给主流程引入不必要的页面风险。保留配置形状仅兼容旧运行记录。",
+    "enabled": false,
     "target": 30,
     "openAction": "rankedRoadCardClick",
     "tasksRegion": "challengePanelTasks",
