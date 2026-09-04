@@ -313,6 +313,12 @@ class CapabilityPilot:
         self.ranked_road_open_action = str(
             ranked_road.get("openAction", "rankedRoadCardClick")
         )
+        self.ranked_road_tasks_region = str(
+            ranked_road.get("tasksRegion", "challengePanelTasks")
+        )
+        self.ranked_road_min_confidence = float(
+            ranked_road.get("minConfidence", 0.58)
+        )
         self.ranked_road_panel_states = frozenset(
             str(value)
             for value in ranked_road.get(
@@ -325,19 +331,30 @@ class CapabilityPilot:
         self.ranked_road_max_attempts = int(
             ranked_road.get("maxOpenAttemptsPerVisit", 2)
         )
+        self.ranked_road_max_read_attempts = int(
+            ranked_road.get("maxReadAttemptsPerVisit", 2)
+        )
         self.ranked_road_retry_s = int(ranked_road.get("openRetryMs", 5000)) / 1000
         if self.ranked_road_progress_enabled:
             if self.progression_reader is None or self.overlay_detector is None:
                 raise ValueError("排位之路检查需要大厅进度识别和覆盖层 OCR")
             if self.ranked_road_target < 1:
                 raise ValueError("排位之路目标缩圈次数必须大于 0")
-            if self.ranked_road_max_attempts < 1 or self.ranked_road_retry_s <= 0:
+            if (
+                self.ranked_road_max_attempts < 1
+                or self.ranked_road_max_read_attempts < 1
+                or self.ranked_road_retry_s <= 0
+            ):
                 raise ValueError("排位之路检查的尝试次数和重试间隔必须大于 0")
+            if not 0 <= self.ranked_road_min_confidence <= 1:
+                raise ValueError("排位之路任务 OCR 置信度必须在 0 到 1 之间")
             action = self.actions.get(self.ranked_road_open_action)
             if not isinstance(action, list) or len(action) != 2:
                 raise ValueError("排位之路入口动作必须是一个点击坐标")
             if self.ranked_road_progress_state not in self.ranked_road_panel_states:
                 raise ValueError("排位之路进度页必须属于挑战抽屉状态")
+            if self.ranked_road_tasks_region not in self.overlay_detector.regions:
+                raise ValueError("排位之路任务 OCR 区域不存在")
 
         # Full-frame and multi-region obstacle OCR is intentionally not part of
         # the 300ms fast loop. It runs once before a menu action, or after an
@@ -407,6 +424,7 @@ class CapabilityPilot:
         self._ring_progress: tuple[int, int] | None = None
         self._ranked_road_probe_done = not self.ranked_road_progress_enabled
         self._ranked_road_probe_attempts = 0
+        self._ranked_road_read_attempts = 0
         self._ranked_road_probe_requested_at: float | None = None
         self._click_text_misses = 0
         self._base_state: str | None = None
@@ -894,12 +912,7 @@ class CapabilityPilot:
                 and not self._ranked_road_probe_done
                 and observation.state == self.ranked_road_progress_state
             ):
-                ring = self._record_ring_progress_tokens(
-                    analysis.decision.evidence.get("challengePanelTasks", ())
-                )
-                if ring is not None:
-                    self._ranked_road_probe_done = True
-                    self._ranked_road_probe_requested_at = None
+                self._read_ranked_road_tasks(frame)
 
         if self._base_state_version == 0 or observation.state != self._base_state:
             self._base_state = observation.state
@@ -1062,13 +1075,55 @@ class CapabilityPilot:
                     for token in self._last_page_tokens[:80]
                 ],
             )
-        ring = self._record_ring_progress()
-        if match.state == self.ranked_road_progress_state and ring is not None:
+        self._record_ring_progress_tokens(self._last_page_tokens[:80])
+        if match.state == self.ranked_road_progress_state:
             self._ranked_road_probe_done = True
             self._ranked_road_probe_requested_at = None
 
-    def _record_ring_progress(self) -> tuple[int, int] | None:
-        return self._record_ring_progress_tokens(self._last_page_tokens[:80])
+    def _read_ranked_road_tasks(self, frame: np.ndarray) -> None:
+        if self._ranked_road_probe_done:
+            return
+        self._ranked_road_read_attempts += 1
+        assert self.overlay_detector is not None
+        provider = self.overlay_detector.provider
+        begin_frame = getattr(provider, "begin_frame", None)
+        if callable(begin_frame):
+            begin_frame(frame)
+        try:
+            tokens = provider.read(
+                frame,
+                self.overlay_detector.regions[self.ranked_road_tasks_region],
+            )
+        except Exception as error:
+            self.recorder.log(
+                "RANKED_ROAD_TASK_OCR_ERROR",
+                attempt=self._ranked_road_read_attempts,
+                error=str(error),
+            )
+            tokens = ()
+
+        eligible = tuple(
+            token
+            for token in tokens
+            if float(token.confidence) >= self.ranked_road_min_confidence
+        )
+        if eligible:
+            self._record_ring_progress_tokens(eligible[:80])
+            self._ranked_road_probe_done = True
+            self._ranked_road_probe_requested_at = None
+            return
+        if self._ranked_road_read_attempts < self.ranked_road_max_read_attempts:
+            return
+
+        self._ranked_road_probe_done = True
+        self._ranked_road_probe_requested_at = None
+        self.counters["rankedRoadProgressUnavailable"] += 1
+        self.recorder.log(
+            "RANKED_ROAD_PROGRESS_UNAVAILABLE",
+            attempts=self._ranked_road_read_attempts,
+            state=self.ranked_road_progress_state,
+            reason="排位之路任务列表 OCR 未返回可靠文字",
+        )
 
     def _record_ring_progress_tokens(
         self,
@@ -1164,6 +1219,7 @@ class CapabilityPilot:
                 self.progression_decision = None
                 self._ranked_road_probe_done = not self.ranked_road_progress_enabled
                 self._ranked_road_probe_attempts = 0
+                self._ranked_road_read_attempts = 0
                 self._ranked_road_probe_requested_at = None
             return
 
@@ -2045,6 +2101,17 @@ class CapabilityPilot:
             or base_state in self.ranked_road_panel_states
         ):
             progression_decision = None
+            if (
+                state == self.ranked_road_progress_state
+                and not self._ranked_road_probe_done
+            ):
+                record["decision"] = {
+                    "kind": "wait",
+                    "reason": "RANKED_ROAD_PROGRESS",
+                }
+                self.counters["wait:RANKED_ROAD_PROGRESS"] += 1
+                self._write_status(self.monotonic())
+                return record
         else:
             progression_decision = self._apply_progression_policy(
                 state,

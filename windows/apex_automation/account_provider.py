@@ -143,12 +143,23 @@ class AccountLease:
     expires_at: datetime
     renew_after: datetime
     expected_ea_account_id: str | None = None
+    ring_progress: int | None = None
+    ring_target: int | None = None
 
     def __post_init__(self) -> None:
         if self.lease_fence < 1:
             raise ValueError("leaseFence 必须大于 0")
         if self.target_level < 1:
             raise ValueError("targetLevel 必须大于 0")
+        if (self.ring_progress is None) != (self.ring_target is None):
+            raise ValueError("ringProgress/ringTarget 必须同时存在或同时缺失")
+        if self.ring_progress is not None and (
+            self.ring_progress < 0
+            or self.ring_target is None
+            or self.ring_target < 1
+            or self.ring_progress > self.ring_target
+        ):
+            raise ValueError("缩圈历史进度无效")
 
 
 @dataclass(frozen=True)
@@ -525,6 +536,20 @@ class HttpAccountProvider:
         return value
 
     @staticmethod
+    def _optional_int(
+        payload: Mapping[str, object], name: str, *, minimum: int
+    ) -> int | None:
+        value = payload.get(name)
+        if value is None:
+            return None
+        if type(value) is not int or value < minimum:
+            raise LeaseProviderError(
+                f"Provider 响应中的 {name} 无效",
+                code="INVALID_PROVIDER_RESPONSE",
+            )
+        return value
+
+    @staticmethod
     def _time(value: object, name: str, *, required: bool) -> datetime | None:
         if value is None and not required:
             return None
@@ -582,6 +607,17 @@ class HttpAccountProvider:
         expires_at = self._time(payload.get("expiresAt"), "expiresAt", required=True)
         renew_after = self._time(payload.get("renewAfter"), "renewAfter", required=True)
         assert expires_at is not None and renew_after is not None
+        ring_progress = self._optional_int(payload, "ringProgress", minimum=0)
+        ring_target = self._optional_int(payload, "ringTarget", minimum=1)
+        if (ring_progress is None) != (ring_target is None) or (
+            ring_progress is not None
+            and ring_target is not None
+            and ring_progress > ring_target
+        ):
+            raise LeaseProviderError(
+                "Provider 响应中的缩圈历史进度无效",
+                code="INVALID_PROVIDER_RESPONSE",
+            )
         lease = AccountLease(
             lease_id=self._string(payload, "leaseId"),
             lease_fence=self._positive_int(payload, "leaseFence"),
@@ -590,6 +626,8 @@ class HttpAccountProvider:
             expires_at=expires_at,
             renew_after=renew_after,
             expected_ea_account_id=self._validate_identity(payload),
+            ring_progress=ring_progress,
+            ring_target=ring_target,
         )
         known_account = self._lease_accounts.get(lease.lease_id)
         if known_account is not None and known_account != lease.account_id:

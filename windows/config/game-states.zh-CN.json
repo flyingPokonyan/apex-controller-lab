@@ -46,11 +46,6 @@
       "singleLine": true,
       "_note": "大厅右侧挑战抽屉的标题。坐标来自操作者 1280x720 实图并换算到 2560x1440 参考画布。"
     },
-    "challengePanelTasks": {
-      "roi": [1720, 630, 2490, 770],
-      "singleLine": true,
-      "_note": "挑战抽屉的安全区缩小任务行；坐标不包含上下两条任务。"
-    },
     "postMatchHints": {
       "roi": [
         1820,
@@ -275,15 +270,11 @@
     {
       "id": "challenge-ranked-road",
       "state": "CHALLENGE_RANKED_ROAD",
-      "_note": "排位之路抽屉覆盖在大厅右侧，底层大厅文字仍可见，所以必须排在所有大厅规则之前。标题和安全区任务同时命中后才允许读取进度或按 ESC 关闭。",
+      "_note": "排位之路抽屉覆盖在大厅右侧，底层大厅文字仍可见，所以必须排在所有大厅规则之前。任务集合按账号变化；页面识别不能依赖安全区缩小任务存在。",
       "requirements": [
         {
           "region": "challengePanelTitle",
           "all": ["排位之路"]
-        },
-        {
-          "region": "challengePanelTasks",
-          "all": ["安全区缩小"]
         }
       ]
     },

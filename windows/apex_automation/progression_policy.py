@@ -124,13 +124,31 @@ class TargetLevelPolicy:
 
 
 class TargetLevelAndRingPolicy(TargetLevelPolicy):
-    """Stop only after both the account level and ring objective are proven."""
+    """Require the ring target only after that optional objective was observed."""
 
-    def __init__(self, target_level: int, target_ring: int = 30) -> None:
+    def __init__(
+        self,
+        target_level: int,
+        target_ring: int = 30,
+        *,
+        observed_ring_progress: int | None = None,
+        observed_ring_target: int | None = None,
+    ) -> None:
         super().__init__(target_level)
         if target_ring < 1:
             raise ValueError("目标缩圈次数必须大于 0")
+        if (observed_ring_progress is None) != (observed_ring_target is None):
+            raise ValueError("历史缩圈进度必须同时包含当前值和目标值")
+        if observed_ring_progress is not None and (
+            observed_ring_progress < 0
+            or observed_ring_target is None
+            or observed_ring_target < 1
+            or observed_ring_progress > observed_ring_target
+        ):
+            raise ValueError("历史缩圈进度无效")
         self.target_ring = target_ring
+        self.observed_ring_progress = observed_ring_progress
+        self.observed_ring_target = observed_ring_target
 
     def decide(
         self,
@@ -147,10 +165,19 @@ class TargetLevelAndRingPolicy(TargetLevelPolicy):
             return ProgressionDecision.PAUSE_UNCERTAIN
         if reading.level < self.target_level:
             return ProgressionDecision.CONTINUE_PLAY
-        if (
-            context.ring_progress is None
-            or context.ring_target != self.target_ring
-            or context.ring_progress < self.target_ring
+        ring_progress = (
+            context.ring_progress
+            if context.ring_progress is not None
+            else self.observed_ring_progress
+        )
+        ring_target = (
+            context.ring_target
+            if context.ring_progress is not None
+            else self.observed_ring_target
+        )
+        if ring_progress is not None and (
+            ring_target != self.target_ring
+            or ring_progress < self.target_ring
         ):
             return ProgressionDecision.CONTINUE_PLAY
         if (

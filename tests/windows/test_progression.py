@@ -266,7 +266,7 @@ class TargetLevelAndRingPolicyTest(unittest.TestCase):
         values.update(changes)
         return ProgressionContext(**values)
 
-    def test_either_unfinished_objective_keeps_playing(self) -> None:
+    def test_only_an_observed_unfinished_ring_objective_keeps_playing(self) -> None:
         policy = TargetLevelAndRingPolicy(20, target_ring=30)
 
         self.assertEqual(
@@ -288,7 +288,7 @@ class TargetLevelAndRingPolicyTest(unittest.TestCase):
                 ProgressionOutcome.confirmed(reading(level="20"), attempts=2),
                 self.context(ring_progress=None, ring_target=None),
             ),
-            ProgressionDecision.CONTINUE_PLAY,
+            ProgressionDecision.TARGET_REACHED,
         )
 
     def test_both_objectives_stop_only_in_a_safe_lobby(self) -> None:
@@ -302,6 +302,52 @@ class TargetLevelAndRingPolicyTest(unittest.TestCase):
         self.assertEqual(
             policy.decide(reached, self.context(overlay_clear=False)),
             ProgressionDecision.DEFER_UNTIL_SAFE_LOBBY,
+        )
+
+    def test_unobserved_ring_objective_allows_the_level_target_to_finish(self) -> None:
+        policy = TargetLevelAndRingPolicy(20, target_ring=30)
+        reached = ProgressionOutcome.confirmed(reading(level="20"), attempts=2)
+
+        self.assertEqual(
+            policy.decide(
+                reached,
+                self.context(
+                    ring_progress=None,
+                    ring_target=None,
+                ),
+            ),
+            ProgressionDecision.TARGET_REACHED,
+        )
+
+    def test_last_observed_ring_progress_survives_a_later_missing_task(self) -> None:
+        reached = ProgressionOutcome.confirmed(reading(level="20"), attempts=2)
+
+        incomplete = TargetLevelAndRingPolicy(
+            20,
+            target_ring=30,
+            observed_ring_progress=14,
+            observed_ring_target=30,
+        )
+        complete = TargetLevelAndRingPolicy(
+            20,
+            target_ring=30,
+            observed_ring_progress=30,
+            observed_ring_target=30,
+        )
+
+        self.assertEqual(
+            incomplete.decide(
+                reached,
+                self.context(ring_progress=None, ring_target=None),
+            ),
+            ProgressionDecision.CONTINUE_PLAY,
+        )
+        self.assertEqual(
+            complete.decide(
+                reached,
+                self.context(ring_progress=None, ring_target=None),
+            ),
+            ProgressionDecision.TARGET_REACHED,
         )
 
 

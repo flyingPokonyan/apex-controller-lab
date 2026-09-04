@@ -127,6 +127,25 @@ class HttpAccountProviderTest(unittest.TestCase):
         )
         self.assertNotIn("provider-secret-token", repr(provider))
 
+    def test_claim_carries_forward_last_observed_ring_progress(self) -> None:
+        transport = FakeTransport(
+            response(lease_payload(ringProgress=14, ringTarget=30))
+        )
+        provider = self.provider(transport)
+
+        lease = provider.claim("claim_ring", "LEVEL_TO_TARGET")
+
+        self.assertEqual((lease.ring_progress, lease.ring_target), (14, 30))
+
+    def test_claim_accepts_an_account_without_a_ring_objective(self) -> None:
+        transport = FakeTransport(response(lease_payload()))
+        provider = self.provider(transport)
+
+        lease = provider.claim("claim_no_ring", "LEVEL_TO_TARGET")
+
+        self.assertIsNone(lease.ring_progress)
+        self.assertIsNone(lease.ring_target)
+
     def test_claim_204_honors_retry_after(self) -> None:
         provider = self.provider(
             FakeTransport(response(None, status=204, headers={"Retry-After": "45"}))

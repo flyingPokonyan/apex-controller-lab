@@ -377,6 +377,10 @@ class FakeManagedSession:
         self.log.append("play.start")
         self.asserted_identity = identity
         self.asserted_target = progression_policy.target_level
+        self.asserted_ring = (
+            progression_policy.observed_ring_progress,
+            progression_policy.observed_ring_target,
+        )
         self.asserted_current = lease_is_current()
         on_run_started("run_1")
         return PlaySessionResult(
@@ -716,6 +720,8 @@ class AccountOrchestratorTest(unittest.TestCase):
             lease = replace(
                 FakeAccountProvider.lease("acct_1", now=now),
                 expected_ea_account_id="ea_1",
+                ring_progress=14,
+                ring_target=30,
             )
             log: list[str] = []
 
@@ -771,6 +777,7 @@ class AccountOrchestratorTest(unittest.TestCase):
             self.assertEqual(result.outcome, AccountCycleOutcome.COMPLETED)
             self.assertTrue(session.asserted_current)
             self.assertEqual(session.asserted_target, 20)
+            self.assertEqual(session.asserted_ring, (14, 30))
             self.assertEqual(session.asserted_identity.lease_fence, lease.lease_fence)
             self.assertEqual(driver.asserted_otp, "123456")
             self.assertLess(log.index("apex.stop"), log.index("ea.sign_out"))

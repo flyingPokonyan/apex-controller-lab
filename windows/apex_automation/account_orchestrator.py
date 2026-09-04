@@ -1037,7 +1037,12 @@ class AccountOrchestrator:
             self._update_checkpoint(workflow_phase=WorkflowPhase.APEX_PLAYING)
             result = self.play_session.run(
                 self._session_identity(lease, identity_fact),
-                TargetLevelAndRingPolicy(lease.target_level, target_ring=30),
+                TargetLevelAndRingPolicy(
+                    lease.target_level,
+                    target_ring=30,
+                    observed_ring_progress=lease.ring_progress,
+                    observed_ring_target=lease.ring_target,
+                ),
                 self.capture_source,
                 lease_is_current=keeper.is_current,
                 on_run_started=self._record_run_started,

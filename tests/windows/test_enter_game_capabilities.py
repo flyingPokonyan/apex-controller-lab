@@ -198,7 +198,14 @@ class EnterGameCapabilityTest(unittest.TestCase):
         overlay_states = detector.states
         self.assertEqual(
             set(detector.regions),
-            {"fullFrame", "titleCenter", "bottomCenter", "bottomRight", "bottomLeftBack"},
+            {
+                "fullFrame",
+                "challengePanelTasks",
+                "titleCenter",
+                "bottomCenter",
+                "bottomRight",
+                "bottomLeftBack",
+            },
         )
         self.assertEqual(self.capabilities.for_state("AUTH_REQUIRED"), ())
         for state in overlay_states - {"AUTH_REQUIRED"}:

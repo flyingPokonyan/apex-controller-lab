@@ -699,7 +699,11 @@ class PilotTest(unittest.TestCase):
                 ("排位之路", 0.99, (1940, 140, 2350, 225)),
                 ("撑过 30 次安全区缩小", 0.98, (1760, 650, 2220, 710)),
                 ("30/30", 0.99, (2280, 650, 2420, 710)),
-            ]
+            ],
+            "challengePanelTasks": [
+                ("撑过 30 次安全区缩小", 0.98, (1760, 650, 2220, 710)),
+                ("30/30", 0.99, (2280, 650, 2420, 710)),
+            ],
         }
         self.now = 2.0
         ranked = self.pilot.step()
@@ -728,6 +732,73 @@ class PilotTest(unittest.TestCase):
         self.assertEqual(completed["decision"]["reason"], "TARGET_REACHED")
         self.assertEqual(self.pilot.session_outcome, "TARGET_REACHED")
         self.assertNotIn(("click", 1280, 1295), self.sender.calls)
+
+    def test_managed_lobby_can_finish_when_ranked_road_has_no_ring_task(self) -> None:
+        self.enable_managed_ranked_road(target_level=20)
+        self.screen(
+            lobbyPrimaryButton=("准备", 1.0),
+            lobbyModeName=("进化版机器人大逃杀", 1.0),
+            lobbyLevel=("20", 0.99),
+            lobbyXp=("1.44K / 3.90K", 0.98),
+        )
+        self.pilot.step()
+        self.now = 0.3
+        self.pilot.step()
+
+        self.screen(
+            challengePanelTitle=("排位之路", 1.0),
+            challengePanelTasks=(
+                "挑战训练 挑战19/21 达到账号等级20 17/20 "
+                "造成1500点伤害1500/1500 丢弃治疗物品3/3 "
+                "冲锋枪击倒10/10 侦查信标3/3",
+                0.99,
+            ),
+        )
+        self.overlay_provider.readings = {
+            "challengePanelTasks": (
+                "挑战训练 挑战19/21 达到账号等级20 17/20 "
+                "造成1500点伤害1500/1500 丢弃治疗物品3/3 "
+                "冲锋枪击倒10/10 侦查信标3/3",
+                0.99,
+            )
+        }
+        self.now = 1.0
+        ranked = self.pilot.step()
+
+        self.assertEqual(ranked["state"], "CHALLENGE_RANKED_ROAD")
+        self.assertEqual(
+            ranked["decision"]["capability"], "challenge-ranked-road-close"
+        )
+        self.assertNotIn("RING_PROGRESS", self.recorder.names())
+        self.assertIn(("tap", 1, 80), self.sender.calls)
+
+        self.screen(
+            lobbyPrimaryButton=("准备", 1.0),
+            lobbyModeName=("进化版机器人大逃杀", 1.0),
+            lobbyLevel=("20", 0.99),
+            lobbyXp=("1.44K / 3.90K", 0.98),
+        )
+        self.now = 2.0
+        completed = self.pilot.step()
+
+        self.assertEqual(completed["decision"]["reason"], "TARGET_REACHED")
+        self.assertEqual(self.pilot.session_outcome, "TARGET_REACHED")
+
+    def test_unreadable_ranked_road_tasks_are_bounded_and_not_reported(self) -> None:
+        self.enable_managed_ranked_road(target_level=20)
+        self.screen(challengePanelTitle=("排位之路", 1.0))
+        self.overlay_provider.readings = {}
+
+        first = self.pilot.step()
+        self.now = 0.3
+        second = self.pilot.step()
+
+        self.assertEqual(first["decision"]["reason"], "RANKED_ROAD_PROGRESS")
+        self.assertEqual(
+            second["decision"]["capability"], "challenge-ranked-road-close"
+        )
+        self.assertNotIn("RING_PROGRESS", self.recorder.names())
+        self.assertIn("RANKED_ROAD_PROGRESS_UNAVAILABLE", self.recorder.names())
 
     def test_the_generic_back_rule_never_backs_out_of_the_mode_panel(self) -> None:
         # The mode panel carries the same 「ESC 返回」 hint and is a screen the
