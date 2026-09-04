@@ -1047,6 +1047,11 @@ class AccountOrchestrator:
                 lease_is_current=keeper.is_current,
                 on_run_started=self._record_run_started,
             )
+            if result.status == "STOPPED":
+                self.notify(
+                    "正在清理当前账号：关闭 Apex、退出 EA 并释放租约；"
+                    "请勿再次按 Ctrl+C 或关闭 CMD，看到清理完成后再退出。"
+                )
             evidence = self._completion_evidence(result)
             self._save_result_evidence(result, evidence)
             if result.status == "TARGET_REACHED" and evidence is None:

@@ -784,6 +784,37 @@ class PilotTest(unittest.TestCase):
         self.assertEqual(completed["decision"]["reason"], "TARGET_REACHED")
         self.assertEqual(self.pilot.session_outcome, "TARGET_REACHED")
 
+    def test_ranked_road_probe_never_owns_a_news_page(self) -> None:
+        self.enable_managed_ranked_road(target_level=20)
+        self.screen(
+            lobbyPrimaryButton=("准备", 1.0),
+            lobbyModeName=("进化版机器人大逃杀", 1.0),
+            lobbyLevel=("20", 0.99),
+            lobbyXp=("1.44K / 3.90K", 0.98),
+        )
+        self.pilot.step()
+        self.now = 0.3
+        self.pilot.step()
+        self.assertEqual(self.sender.calls, [("click", 2256, 1282)])
+
+        self.overlay_provider.readings = {"fullFrame": ("新闻 ESC返回", 0.99)}
+        self.now = 1.0
+        self.pilot.step()
+        self.now = 2.5
+        news = self.pilot.step()
+
+        self.assertEqual(news["state"], "NEWS_WELCOME")
+        self.assertEqual(news["decision"]["capability"], "dismiss-news-welcome")
+        self.assertEqual(self.sender.calls[-1], ("tap", 1, 80))
+        unavailable = [
+            payload
+            for event, payload in self.recorder.events
+            if event == "RANKED_ROAD_PROGRESS_UNAVAILABLE"
+        ]
+        self.assertEqual(len(unavailable), 1)
+        self.assertEqual(unavailable[0]["state"], "NEWS_WELCOME")
+        self.assertNotIn("RING_PROGRESS", self.recorder.names())
+
     def test_unreadable_ranked_road_tasks_are_bounded_and_not_reported(self) -> None:
         self.enable_managed_ranked_road(target_level=20)
         self.screen(challengePanelTitle=("排位之路", 1.0))

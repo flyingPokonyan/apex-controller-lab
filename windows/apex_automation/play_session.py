@@ -381,7 +381,14 @@ class PlaySessionRunner:
             error_message = str(error) or "用户停止"
             error_code = "OPERATOR_STOPPED"
             finish_detail["reason"] = error_message
-            self.notify(f"\n已停止：{error_message}")
+            if identity.managed:
+                self.notify(
+                    f"\n已停止自动操作：{error_message}。"
+                    "正在写入结果，随后还要关闭 Apex、退出 EA 并释放租约；"
+                    "请勿再次按 Ctrl+C 或关闭 CMD。"
+                )
+            else:
+                self.notify(f"\n已停止：{error_message}")
         except Exception as error:
             finish_status = "FAILED"
             error_message = str(error)

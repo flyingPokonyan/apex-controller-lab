@@ -361,6 +361,11 @@ class AnchorTargetingTest(unittest.TestCase):
 
         self.assertEqual(point, (407, 576))
 
+    def test_update_copy_outside_an_apex_page_is_not_actionable(self) -> None:
+        observation = self.observation(("UPDATE", 500, 600, 0.99))
+
+        self.assertIsNone(WindowsEaHybridDriver._apex_update_point(observation))
+
 
 class EaLaunchRecoveryTest(unittest.TestCase):
     WINDOW = (0, 0, 1920, 1080)
@@ -609,6 +614,60 @@ class EaLaunchRecoveryTest(unittest.TestCase):
 
         self.assertEqual(clicks, [(120, 460), (565, 565)])
         self.assertEqual(records, ["apex-entry", "apex-library-play"])
+
+    def test_cloud_data_error_continues_with_local_data(self) -> None:
+        entry = self.observation(("Apex Legends", 120, 460))
+        play = self.observation(("Apex Legends", 800, 280), ("PLAY", 1150, 700))
+        cloud_error = self.observation(
+            ("We couldn't load your cloud data", 1050, 430),
+            ("Error code: EC:10600", 950, 650),
+            ("CONTINUE WITH LOCAL DATA", 1120, 710),
+            ("CANCEL", 1370, 710),
+        )
+        clicks: list[tuple[int, int]] = []
+        records: list[str] = []
+        notices: list[str] = []
+        driver = self.driver([entry, play, cloud_error], clicks, records)
+        driver.notify = notices.append
+        driver._process_running = lambda _name: len(clicks) >= 3
+
+        driver.start_apex()
+
+        self.assertEqual(clicks, [(120, 460), (1150, 700), (1120, 710)])
+        self.assertEqual(
+            records,
+            ["apex-entry", "apex-play", "apex-cloud-data-local"],
+        )
+        self.assertTrue(any("本地数据" in notice for notice in notices))
+
+    def test_apex_update_is_clicked_once_then_waits_for_play(self) -> None:
+        entry = self.observation(("Apex Legends", 120, 460))
+        update = self.observation(
+            ("Apex Legends", 800, 280),
+            ("UPDATE", 1150, 700),
+        )
+        updating = self.observation(
+            ("Apex Legends", 800, 280),
+            ("Updating", 1100, 700),
+            ("42%", 1200, 700),
+        )
+        play = self.observation(("Apex Legends", 800, 280), ("PLAY", 1150, 700))
+        clicks: list[tuple[int, int]] = []
+        records: list[str] = []
+        notices: list[str] = []
+        driver = self.driver([entry, update, updating, play], clicks, records)
+        driver.notify = notices.append
+        driver._process_running = lambda _name: len(clicks) >= 3
+
+        driver.start_apex()
+
+        self.assertEqual(clicks, [(120, 460), (1150, 700), (1150, 700)])
+        self.assertEqual(
+            records,
+            ["apex-entry", "apex-update", "apex-play-after-update"],
+        )
+        self.assertTrue(any("需要更新" in notice for notice in notices))
+        self.assertTrue(any("更新已完成" in notice for notice in notices))
 
     def test_restart_app_uses_exact_help_menu_actions(self) -> None:
         game_hub = self.observation(("Apex Legends", 900, 300))

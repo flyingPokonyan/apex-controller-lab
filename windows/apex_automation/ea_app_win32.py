@@ -102,6 +102,8 @@ INPUT_SETTLE_S = 0.8
 MAX_OTP_ATTEMPTS = 3
 EA_RESTART_TIMEOUT_S = 60.0
 APEX_INSTALL_REPAIR_TIMEOUT_S = 180.0
+APEX_LAUNCH_TIMEOUT_S = 90.0
+APEX_UPDATE_TIMEOUT_S = 2 * 60 * 60.0
 APEX_INSTALL_DIR = Path(r"D:\Apex")
 HELP_TERMS = ("help", "帮助")
 RESTART_APP_TERMS = (
@@ -116,6 +118,26 @@ TERMS_OF_PLAY_TERMS = ("termsofplay", "游戏条款")
 INSTALL_COMPLETE_TERMS = ("installationcomplete", "安装完成")
 DOWNLOAD_MANAGER_TERMS = ("downloadmanager", "下载管理器")
 COMPLETED_TERMS = ("completed", "已完成")
+APEX_PLAY_TERMS = ("play", "launch", "launchgame", "startgame", "开始游戏")
+APEX_UPDATE_ACTION_TERMS = ("update", "updategame", "更新", "更新游戏")
+APEX_UPDATE_REQUIRED_TERMS = (
+    "anupdateisrequiredtolaunchthisgame",
+    "updaterequired",
+    "需要更新才能启动此游戏",
+    "启动此游戏需要更新",
+)
+CLOUD_DATA_ERROR_TERMS = (
+    "wecouldntloadyourclouddata",
+    "unabletoloadyourclouddata",
+    "无法加载您的云数据",
+    "无法加载云数据",
+    "ec10600",
+)
+CONTINUE_LOCAL_DATA_TERMS = (
+    "continuewithlocaldata",
+    "使用本地数据继续",
+    "继续使用本地数据",
+)
 
 # Pages that prove no session exists yet.
 PRE_LOGIN_PAGES = (
@@ -411,6 +433,52 @@ class WindowsEaHybridDriver:
         x = min(right - 1, label[0] + round(width * 0.12))
         y = max(top, label[1] - round(height * 0.04))
         return x, y
+
+    @staticmethod
+    def _contains_any(
+        observation: EaObservation,
+        terms: Sequence[str],
+    ) -> bool:
+        joined = "".join(observation.normalized)
+        return any(term in joined for term in terms)
+
+    @classmethod
+    def _continue_local_data_point(
+        cls,
+        observation: EaObservation,
+    ) -> tuple[int, int] | None:
+        """Return the safe recovery action only on the cloud-data error."""
+
+        if not cls._contains_any(observation, CLOUD_DATA_ERROR_TERMS):
+            return None
+        return cls._anchor(
+            observation,
+            CONTINUE_LOCAL_DATA_TERMS,
+            x_range=(0.35, 0.80),
+            y_range=(0.45, 0.90),
+        )
+
+    @classmethod
+    def _apex_update_point(
+        cls,
+        observation: EaObservation,
+    ) -> tuple[int, int] | None:
+        """Find Apex's Update action without clicking unrelated update copy."""
+
+        apex_page = cls._contains_any(observation, ("apexlegends",))
+        update_required = cls._contains_any(
+            observation,
+            APEX_UPDATE_REQUIRED_TERMS,
+        )
+        if not apex_page and not update_required:
+            return None
+        return cls._anchor(
+            observation,
+            APEX_UPDATE_ACTION_TERMS,
+            x_range=(0.30, 0.85),
+            y_range=(0.25, 0.85),
+            exact=True,
+        )
 
     def _click_target(
         self,
@@ -1471,21 +1539,102 @@ class WindowsEaHybridDriver:
             self._record("apex-entry-missing", self._observe(hwnd))
             raise EaApexStartFailed("EA App 未找到左侧 Apex Legends 游戏入口")
         self.sleep(2.0)
-        for _ in range(15):
+        action_deadline = time.monotonic() + 15.0
+        launch_deadline: float | None = None
+        update_deadline: float | None = None
+        update_clicked_at = 0.0
+        update_clicks = 0
+        cloud_recovery_clicks = 0
+        update_wait_notice_at = 0.0
+
+        while True:
             if any(self._process_running(name) for name in APEX_EXECUTABLES):
                 return
-            observation = self._observe(hwnd)
+            now = time.monotonic()
+            if update_deadline is not None and now >= update_deadline:
+                raise EaApexStartFailed("EA App 中 Apex 更新等待超过 2 小时")
+            if launch_deadline is not None and now >= launch_deadline:
+                raise EaApexStartFailed("点击 EA Play 后未发现 Apex 进程")
+            if (
+                update_deadline is None
+                and launch_deadline is None
+                and now >= action_deadline
+            ):
+                observation = self._observe(hwnd)
+                self._record("apex-play-missing", observation)
+                raise EaApexStartFailed("EA App Apex 页面未找到 Play 或 Update 按钮")
+
+            try:
+                observation = self._observe(hwnd)
+            except EaAppAutomationError:
+                # EA may briefly hide or rebuild its CEF window after Play or
+                # during an update. The process check above remains the source
+                # of truth; keep the wait bounded by the active deadline.
+                if launch_deadline is None and update_deadline is None:
+                    raise
+                self.sleep(2.0)
+                continue
+
+            local_data = self._continue_local_data_point(observation)
+            if local_data is not None:
+                if cloud_recovery_clicks >= 2:
+                    self._record("apex-cloud-data-stuck", observation)
+                    raise EaApexStartFailed(
+                        "EA App 云存档错误在两次本地数据恢复后仍未关闭"
+                    )
+                cloud_recovery_clicks += 1
+                self._record(
+                    "apex-cloud-data-local",
+                    observation,
+                    attempt=cloud_recovery_clicks,
+                )
+                self.notify("EA 云存档不可用，选择本地数据继续启动 Apex")
+                self._click_point(hwnd, *local_data)
+                launch_deadline = time.monotonic() + APEX_LAUNCH_TIMEOUT_S
+                self.sleep(2.0)
+                continue
+
+            update = self._apex_update_point(observation)
+            if update is not None:
+                should_click = update_deadline is None or (
+                    update_clicks < 2 and now - update_clicked_at >= 15.0
+                )
+                if should_click:
+                    update_clicks += 1
+                    update_clicked_at = now
+                    self._record(
+                        "apex-update",
+                        observation,
+                        attempt=update_clicks,
+                    )
+                    self.notify("EA App 检测到 Apex 需要更新，已点击 Update 并等待完成")
+                    self._click_point(hwnd, *update)
+                    update_deadline = time.monotonic() + APEX_UPDATE_TIMEOUT_S
+                    launch_deadline = None
+                self.sleep(2.0)
+                continue
+
             point = self._anchor(
                 observation,
-                ("play", "launch", "launchgame", "startgame", "开始游戏"),
+                APEX_PLAY_TERMS,
                 x_range=(0.35, 0.75),
                 y_range=(0.30, 0.70),
                 exact=True,
             )
-            if point is not None:
-                self._record("apex-play", observation)
+            if point is not None and launch_deadline is None:
+                updated = update_deadline is not None
+                step = (
+                    "apex-play-after-update" if updated else "apex-play"
+                )
+                self._record(step, observation)
+                if updated:
+                    self.notify("Apex 更新已完成，正在启动游戏")
                 self._click_point(hwnd, *point)
-                break
+                update_deadline = None
+                launch_deadline = time.monotonic() + APEX_LAUNCH_TIMEOUT_S
+                self.sleep(2.0)
+                continue
+
             download = self._anchor(
                 observation,
                 ("download", "下载"),
@@ -1493,26 +1642,28 @@ class WindowsEaHybridDriver:
                 y_range=(0.30, 0.70),
                 exact=True,
             )
-            if download is not None:
+            if (
+                download is not None
+                and update_deadline is None
+                and launch_deadline is None
+            ):
                 self._record("apex-download-required", observation)
                 raise EaApexDownloadRequired(
                     "EA App 当前账号的 Apex 页面只提供 Download，不能启动已安装游戏"
                 )
+
             library_play = self._installed_library_play_point(observation)
-            if library_play is not None:
+            if library_play is not None and launch_deadline is None:
                 self._record("apex-library-play", observation)
                 self._click_point(hwnd, *library_play)
-                break
-            self.sleep(1.0)
-        else:
-            self._record("apex-play-missing", self._observe(hwnd))
-            raise EaApexStartFailed("EA App Apex 页面未找到 Play 按钮")
-        deadline = time.monotonic() + 90.0
-        while time.monotonic() < deadline:
-            if any(self._process_running(name) for name in APEX_EXECUTABLES):
-                return
+                launch_deadline = time.monotonic() + APEX_LAUNCH_TIMEOUT_S
+                self.sleep(2.0)
+                continue
+
+            if update_deadline is not None and now >= update_wait_notice_at:
+                self.notify("Apex 仍在更新，Runner 会继续等待")
+                update_wait_notice_at = now + 300.0
             self.sleep(2.0)
-        raise EaApexStartFailed("点击 EA Play 后未发现 Apex 进程")
 
     def stop_apex(self) -> ApexExitEvidence:
         requested = False
