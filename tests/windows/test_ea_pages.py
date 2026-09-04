@@ -234,6 +234,48 @@ class IdentityMatchTest(unittest.TestCase):
         self.assertIsNotNone(identity)
         self.assertEqual(protected, ["itntlxv5qk84"])
 
+    def test_identity_reader_falls_back_to_the_lower_home_badge(self) -> None:
+        regions = []
+
+        class Ocr:
+            def read(self, frame, region):
+                regions.append(region.roi)
+                if region.roi[1] >= 100:
+                    return (OcrToken("n44nvjhe80xt", 0.999),)
+                return ()
+
+        driver = object.__new__(WindowsEaHybridDriver)
+        driver.evidence = None
+        driver.ocr = Ocr()
+        driver._live = lambda hwnd: hwnd
+        driver._frame = lambda: np.zeros((1080, 1920), dtype=np.uint8)
+        driver._clip_rect = lambda hwnd, frame: (0, 0, 1920, 1080)
+
+        identity = driver._identity(1)
+
+        self.assertIsNotNone(identity)
+        self.assertEqual(identity.ea_account_id, "n44nvjhe80xt")
+        self.assertEqual(len(regions), 2)
+
+    def test_sign_out_still_tries_the_menu_when_badge_ocr_is_missing(self) -> None:
+        observation = EaObservation(
+            rect=(0, 0, 1920, 1080),
+            frame=np.zeros((1, 1), dtype=np.uint8),
+            tokens=(),
+            page=EaPage.SIGNED_IN,
+        )
+        opened = []
+        driver = object.__new__(WindowsEaHybridDriver)
+        driver._ea_window = lambda: 1
+        driver._observe = lambda _hwnd: observation
+        driver._identity = lambda _hwnd: None
+        driver._record = lambda *_args, **_kwargs: None
+        driver._open_account_menu = lambda _hwnd, identity: opened.append(identity)
+        driver.sleep = lambda _seconds: None
+
+        self.assertFalse(driver.sign_out())
+        self.assertEqual(opened, [None])
+
 
 class AnchorTargetingTest(unittest.TestCase):
     """`_anchor` is a static rule over OCR boxes, so it runs off Windows."""

@@ -95,9 +95,13 @@ PASSWORD_SUBMIT_RATIO = (0.50, 0.58)
 OTP_FIELD_RATIO = (0.50, 0.49)
 OTP_SUBMIT_RATIO = (0.50, 0.64)
 SEND_CODE_RATIO = (0.50, 0.68)
-# The badge sits at about 7.5% of the window height; the friends list
-# starts just below 14%. Keep the crop above it.
-IDENTITY_BAND = (0.75, 0.00, 1.00, 0.12)
+# EA currently renders the badge in either of two vertical positions. Keep
+# the old tight band first so an expanded friends list cannot win over the
+# account name, then try the lower band used by the newer home layout.
+IDENTITY_BANDS = (
+    (0.75, 0.00, 1.00, 0.12),
+    (0.75, 0.10, 1.00, 0.20),
+)
 INPUT_SETTLE_S = 0.8
 MAX_OTP_ATTEMPTS = 3
 EA_RESTART_TIMEOUT_S = 60.0
@@ -673,37 +677,40 @@ class WindowsEaHybridDriver:
         left, top, right, bottom = self._clip_rect(hwnd, frame)
         window_width = right - left
         window_height = bottom - top
-        x1, y1, x2, y2 = IDENTITY_BAND
-        region = Region(
-            "eaIdentity",
-            (
-                left + round(window_width * x1),
-                top + round(window_height * y1),
-                min(right, left + round(window_width * x2)),
-                top + round(window_height * y2),
-            ),
-        )
-        candidates: list[tuple[float, str]] = []
-        for token in self.ocr.read(frame, region):
-            for candidate in identity_candidates([normalize_ocr_text(token.text)]):
-                # Window chrome shares this corner. Reading "Friends 0/2" as
-                # the signed-in account sends the orchestrator off to sign out
-                # of a session that is already the right one.
-                if is_ui_chrome(candidate):
-                    continue
-                candidates.append((token.confidence, candidate))
-        if not candidates:
-            return None
-        confidence, account_id = max(candidates)
-        if self.evidence is not None:
-            # The badge is operational evidence, but the stable EA ID should
-            # not remain readable in every later diagnostic screenshot.
-            self.evidence.protect(account_id)
-        return EaIdentityFact(
-            ea_account_id=account_id,
-            source=f"ea-window-ocr:{confidence:.3f}",
-            verified=confidence >= 0.75,
-        )
+        for band_index, (x1, y1, x2, y2) in enumerate(IDENTITY_BANDS):
+            region = Region(
+                f"eaIdentity{band_index}",
+                (
+                    left + round(window_width * x1),
+                    top + round(window_height * y1),
+                    min(right, left + round(window_width * x2)),
+                    top + round(window_height * y2),
+                ),
+            )
+            candidates: list[tuple[float, str]] = []
+            for token in self.ocr.read(frame, region):
+                for candidate in identity_candidates(
+                    [normalize_ocr_text(token.text)]
+                ):
+                    # Window chrome shares this corner. Reading "Friends 0/2"
+                    # as the account sends the orchestrator off to sign out of
+                    # a session that is already the right one.
+                    if is_ui_chrome(candidate):
+                        continue
+                    candidates.append((token.confidence, candidate))
+            if not candidates:
+                continue
+            confidence, account_id = max(candidates)
+            if self.evidence is not None:
+                # The badge is operational evidence, but the stable EA ID
+                # should not remain readable in every diagnostic screenshot.
+                self.evidence.protect(account_id)
+            return EaIdentityFact(
+                ea_account_id=account_id,
+                source=f"ea-window-ocr:{confidence:.3f}",
+                verified=confidence >= 0.75,
+            )
+        return None
 
     def _matching_identity(
         self,
@@ -1686,7 +1693,7 @@ class WindowsEaHybridDriver:
     def _account_menu_triggers(
         self,
         observation: EaObservation,
-        identity: EaIdentityFact,
+        identity: EaIdentityFact | None,
     ) -> list[tuple[str, tuple[int, int]]]:
         """Every control that opens the account menu, best first.
 
@@ -1699,10 +1706,14 @@ class WindowsEaHybridDriver:
         left, top, right, bottom = observation.rect
         width = max(1, right - left)
         height = max(1, bottom - top)
-        badge = self._anchor(
-            observation,
-            (identity.ea_account_id,),
-            y_range=(0.0, 0.20),
+        badge = (
+            None
+            if identity is None
+            else self._anchor(
+                observation,
+                (identity.ea_account_id,),
+                y_range=(0.0, 0.22),
+            )
         )
         triggers: list[tuple[str, tuple[int, int]]] = []
         if badge is not None:
@@ -1719,12 +1730,18 @@ class WindowsEaHybridDriver:
         triggers.append(
             ("ratio", (left + round(width * 0.89), top + round(height * 0.075)))
         )
+        triggers.append(
+            (
+                "lower-ratio",
+                (left + round(width * 0.89), top + round(height * 0.155)),
+            )
+        )
         return triggers
 
     def _open_account_menu(
         self,
         hwnd: int,
-        identity: EaIdentityFact,
+        identity: EaIdentityFact | None,
     ) -> tuple[EaObservation, tuple[int, int]] | None:
         for name, point in self._account_menu_triggers(self._observe(hwnd), identity):
             self._click_point(hwnd, *point)
@@ -1744,6 +1761,7 @@ class WindowsEaHybridDriver:
     def sign_out(self) -> bool:
         hwnd = self._ea_window()
         identity = None
+        signed_in_page_seen = False
         for _ in range(8):
             observation = self._observe(hwnd)
             # Anything still inside the login flow — the account page, the
@@ -1754,11 +1772,14 @@ class WindowsEaHybridDriver:
             if observation.page in PRE_LOGIN_PAGES:
                 self._record("signout-not-signed-in", observation)
                 return True
+            signed_in_page_seen = (
+                signed_in_page_seen or observation.page is EaPage.SIGNED_IN
+            )
             identity = self._identity(hwnd)
             if identity is not None:
                 break
             self.sleep(1.0)
-        if identity is None:
+        if identity is None and not signed_in_page_seen:
             return False
         opened = self._open_account_menu(hwnd, identity)
         if opened is None:
