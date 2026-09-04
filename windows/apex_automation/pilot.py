@@ -181,6 +181,7 @@ class CapabilityPilot:
         lease_is_current: Callable[[], bool] = lambda: True,
         status_interval_ms: int = 1000,
         live_evidence_interval_ms: int = 60_000,
+        transition_evidence_interval_ms: int = 10_000,
     ) -> None:
         self.config = config
         self.source = source
@@ -200,6 +201,9 @@ class CapabilityPilot:
         if live_evidence_interval_ms <= 0:
             raise ValueError("状态截图间隔必须大于 0")
         self.live_evidence_interval_s = live_evidence_interval_ms / 1000
+        if transition_evidence_interval_ms < 0:
+            raise ValueError("转场截图限频间隔不能小于 0")
+        self.transition_evidence_interval_s = transition_evidence_interval_ms / 1000
         # Every screen with no rule looks the same from the log: NO_STATE, over
         # and over. Whether that is a two-second loading wipe or the run being
         # stuck forever is only visible in a frame, and the useful ones are
@@ -397,8 +401,11 @@ class CapabilityPilot:
         self.frames = 0
         self.counters: dict[str, int] = defaultdict(int)
         self._foreground = True
+        self._foreground_lost_since: float | None = None
         self._released = False
         self._next_live_evidence_at = self.started + self.live_evidence_interval_s
+        self._next_transition_evidence_at = self.started
+        self._last_transition_evidence_stage: str | None = None
         self._incident_evidence_at: dict[str, float] = {}
         self._unknown_since: float | None = None
         self._unknown_captured = False
@@ -1880,8 +1887,17 @@ class CapabilityPilot:
     ) -> None:
         if getattr(self.recorder, "evidence_enabled", True) is False:
             return
-        if category == "incident":
-            now = self.monotonic()
+        now = self.monotonic()
+        if category == "transition":
+            if stage == self._last_transition_evidence_stage:
+                return
+            if now < self._next_transition_evidence_at:
+                return
+            self._last_transition_evidence_stage = stage
+            self._next_transition_evidence_at = (
+                now + self.transition_evidence_interval_s
+            )
+        elif category == "incident":
             last = self._incident_evidence_at.get(stage)
             if last is not None and now - last < 300:
                 return
@@ -1889,10 +1905,12 @@ class CapabilityPilot:
         if not callable(capture):
             return
         try:
-            capture(stage.lower(), frame, category=category)
+            scheduled = capture(stage.lower(), frame, category=category)
+            if scheduled is None:
+                return
             self.evidence_count += 1
             if category == "incident":
-                self._incident_evidence_at[stage] = self.monotonic()
+                self._incident_evidence_at[stage] = now
         except Exception as error:
             # Evidence must never stop gameplay or the normal report stream.
             self.recorder.log(
@@ -1907,7 +1925,13 @@ class CapabilityPilot:
 
     def _snapshot(self, stage: str, frame: np.ndarray) -> None:
         lowered = stage.lower()
-        if self.screenshot_count < self.max_screenshots:
+        # A remotely reported run uses only the compact background JPEG path.
+        # Keep the old full PNGs for offline/manual diagnosis, where there is
+        # no remote snapshot to inspect.
+        if (
+            not getattr(self.recorder, "evidence_enabled", False)
+            and self.screenshot_count < self.max_screenshots
+        ):
             self.screenshot_count += 1
             self.recorder.screenshot(lowered, frame)
         if lowered == "target-reached":
@@ -1965,10 +1989,27 @@ class CapabilityPilot:
         )
         self.notify(f"  ↳ 已执行：{capability.id}（{capability.action}）")
 
-    def _pause_for_foreground(self) -> None:
+    def _foreground_executable(self) -> str | None:
+        executable: str | None = None
+        executable_reader = getattr(self.guard, "foreground_executable", None)
+        try:
+            if callable(executable_reader):
+                executable = str(executable_reader() or "") or None
+        except Exception as error:
+            self.recorder.log("FOREGROUND_DIAGNOSTIC_ERROR", error=str(error))
+        return executable
+
+    def _pause_for_foreground(
+        self,
+        now: float | None = None,
+        *,
+        executable: str | None = None,
+    ) -> None:
+        now = self.monotonic() if now is None else now
         if not self._foreground:
             return
         self._foreground = False
+        self._foreground_lost_since = now
         # A pause invalidates the pending action: the operator may have done
         # anything to the game while the window was not ours.
         self._release_all("FOREGROUND_LOST")
@@ -1981,7 +2022,10 @@ class CapabilityPilot:
         self._stall_rounds = 0
         self._known_stall_key = None
         self._known_stall_since = None
-        self.recorder.log("FOREGROUND_PAUSED")
+        self.recorder.log(
+            "FOREGROUND_PAUSED",
+            foregroundExecutable=executable,
+        )
         self.notify("暂停：Apex 不在前台。")
 
     def _stop_for_resolution_mismatch(
@@ -2027,13 +2071,25 @@ class CapabilityPilot:
 
         foreground = self.guard.target_is_foreground()
         if not foreground:
-            self._pause_for_foreground()
+            executable = self._foreground_executable()
+            self._pause_for_foreground(
+                now,
+                executable=executable,
+            )
             record["skipped"] = "NOT_FOREGROUND"
             self._write_status(now, force=True)
             return record
         if not self._foreground:
             self._foreground = True
-            self.recorder.log("FOREGROUND_RESUMED")
+            self.recorder.log(
+                "FOREGROUND_RESUMED",
+                pausedForMs=(
+                    None
+                    if self._foreground_lost_since is None
+                    else round((now - self._foreground_lost_since) * 1000)
+                ),
+            )
+            self._foreground_lost_since = None
             self.notify("继续：Apex 回到前台。")
 
         try:
@@ -2147,7 +2203,10 @@ class CapabilityPilot:
                 # frame and the send. That is the same recoverable pause as
                 # any other alt-tab, not a reason to end a session that may
                 # have been running unattended for twenty minutes.
-                self._pause_for_foreground()
+                executable = self._foreground_executable()
+                self._pause_for_foreground(
+                    executable=executable,
+                )
                 record["skipped"] = "NOT_FOREGROUND"
         elif decision.kind == "pause":
             # The dispatcher decides when a pause lifts (a cycle ages out of

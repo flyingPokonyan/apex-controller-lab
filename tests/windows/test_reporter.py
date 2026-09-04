@@ -387,7 +387,7 @@ class ReporterTest(unittest.TestCase):
             state = json.loads((run_dir / "report-state.json").read_text())
             self.assertEqual(state["evidenceSourceThrough"], 2)
 
-    def test_evidence_failure_does_not_back_off_normal_reports(self) -> None:
+    def test_evidence_failure_is_dropped_and_does_not_back_off_normal_reports(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             run_dir = write_run(
@@ -410,7 +410,8 @@ class ReporterTest(unittest.TestCase):
             )
             evidence_dir = run_dir / "evidence"
             evidence_dir.mkdir()
-            (evidence_dir / "0001-live.jpg").write_bytes(
+            image_path = evidence_dir / "0001-live.jpg"
+            image_path.write_bytes(
                 b"\xff\xd8\xffsmall-jpeg\xff\xd9"
             )
             transport = EvidenceAwareTransport(evidence_status=503)
@@ -447,7 +448,8 @@ class ReporterTest(unittest.TestCase):
             second = reporter.process_once()
 
             self.assertIsNone(first.error)
-            self.assertGreater(first.pending, 0)
+            self.assertEqual(first.pending, 0)
+            self.assertFalse(image_path.exists())
             self.assertGreater(second.sent, 0)
             self.assertEqual(transport.urls[-1], "https://runner.example/reports")
             self.assertEqual(reporter._next_send_at, 0.0)

@@ -212,7 +212,9 @@ class RunRecorderTest(unittest.TestCase):
                 side_effect=save_jpeg,
             ):
                 path = recorder.evidence("live", object(), category="live")
+                self.assertTrue(recorder.flush_evidence(timeout_s=1.0))
 
+            self.assertIsNotNone(path)
             event = read_events(recorder)[-1]
             self.assertEqual(event["type"], "EVIDENCE_SAVED")
             self.assertEqual(event["payload"]["category"], "live")
@@ -220,6 +222,35 @@ class RunRecorderTest(unittest.TestCase):
             self.assertEqual(event["payload"]["height"], 540)
             self.assertEqual(event["payload"]["sizeBytes"], path.stat().st_size)
             self.assertEqual(len(event["payload"]["sha256"]), 64)
+            recorder.finish("DONE")
+
+    def test_compact_evidence_queue_is_bounded(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            recorder = RunRecorder(Path(directory), "play-profile")
+            started = threading.Event()
+            release = threading.Event()
+
+            def save_jpeg(path, frame):
+                started.set()
+                release.wait(1.0)
+                path.write_bytes(b"\xff\xd8\xffsmall-jpeg\xff\xd9")
+                return 960, 540
+
+            with patch(
+                "apex_automation.recorder._save_evidence_frame",
+                side_effect=save_jpeg,
+            ):
+                first = recorder.evidence("one", object(), category="transition")
+                self.assertTrue(started.wait(1.0))
+                second = recorder.evidence("two", object(), category="transition")
+                dropped = recorder.evidence("three", object(), category="transition")
+                release.set()
+                self.assertTrue(recorder.flush_evidence(timeout_s=1.0))
+
+            self.assertIsNotNone(first)
+            self.assertIsNotNone(second)
+            self.assertIsNone(dropped)
+            recorder.finish("DONE")
 
     def test_concurrent_finish_writes_one_result_and_one_event(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

@@ -84,6 +84,9 @@ class FakeGuard:
     def target_is_foreground(self) -> bool:
         return self.foreground
 
+    def foreground_executable(self) -> str:
+        return "r5apex.exe" if self.foreground else "cmd.exe"
+
 
 class FakeRecorder:
     def __init__(self, directory: Path) -> None:
@@ -981,6 +984,41 @@ class PilotTest(unittest.TestCase):
         # Anything could have happened to the game while it was not ours, so
         # the outstanding LCTRL must not be confirmed by whatever shows up.
         self.assertIsNone(self.pilot.dispatcher.pending)
+
+        self.guard.foreground = True
+        self.now = 1.3
+        self.pilot.step()
+        resumed = next(p for e, p in self.recorder.events if e == "FOREGROUND_RESUMED")
+        self.assertEqual(resumed["pausedForMs"], 1000)
+
+    def test_transition_evidence_deduplicates_state_recognition_flapping(self) -> None:
+        captures: list[tuple[str, str]] = []
+
+        def evidence(stage, _frame, *, category):
+            captures.append((stage, category))
+            return Path(stage)
+
+        self.recorder.evidence_enabled = True
+        self.recorder.evidence = evidence
+        self.screen(
+            lobbyPrimaryButton=("准备", 0.99),
+            lobbyModeName=("进化版机器人大逃杀", 0.99),
+        )
+        self.now = 0.0
+        self.pilot.step()
+        self.screen()
+        self.now = 1.0
+        self.pilot.step()
+        self.screen(
+            lobbyPrimaryButton=("准备", 0.99),
+            lobbyModeName=("进化版机器人大逃杀", 0.99),
+        )
+        self.now = 2.0
+        self.pilot.step()
+
+        transitions = [item for item in captures if item[1] == "transition"]
+        self.assertEqual(transitions, [("lobby_ready_target", "transition")])
+        self.assertNotIn("SCREENSHOT_SAVED", self.recorder.names())
 
     def test_following_the_jumpmaster_remains_inert_while_the_prompt_persists(self) -> None:
         self.screen(dropshipPrompt=("LCTRL单独发射", 0.91))

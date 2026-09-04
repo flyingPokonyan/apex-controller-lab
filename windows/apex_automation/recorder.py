@@ -5,6 +5,7 @@ import hashlib
 import json
 import os
 from pathlib import Path
+import queue
 import secrets
 import threading
 import time
@@ -19,6 +20,7 @@ if TYPE_CHECKING:
 EVENT_SCHEMA_VERSION = 1
 MANIFEST_SCHEMA_VERSION = 1
 _SINGLETON_EVENTS = frozenset({"RUN_STARTED", "RUN_FINISHED"})
+_MAX_PENDING_EVIDENCE = 2
 
 
 def _now() -> str:
@@ -75,6 +77,11 @@ class RunRecorder:
         self._seq = 0
         self._screenshot_index = 0
         self._evidence_index = 0
+        self._evidence_queue: queue.Queue[tuple[Path, str, str, Any]] = queue.Queue()
+        self._evidence_pending = 0
+        self._evidence_condition = threading.Condition(self._lock)
+        self._evidence_worker: threading.Thread | None = None
+        self._evidence_stop = threading.Event()
         self._singleton_events: set[str] = set()
         self._screenshot_event_paths: set[str] = set()
         self._finished = False
@@ -231,34 +238,106 @@ class RunRecorder:
         )
         return path
 
-    def evidence(self, stage: str, frame: np.ndarray, *, category: str) -> Path:
-        """Save a compact upload copy; the original diagnostic PNG stays local."""
+    def _ensure_evidence_worker(self) -> None:
+        with self._lock:
+            if self._evidence_worker is not None:
+                return
+            self._evidence_worker = threading.Thread(
+                target=self._run_evidence_worker,
+                name=f"apex-evidence-recorder-{self.run_id}",
+                daemon=True,
+            )
+            self._evidence_worker.start()
+
+    def _run_evidence_worker(self) -> None:
+        while not self._evidence_stop.is_set() or self._evidence_pending:
+            try:
+                path, stage, category, frame = self._evidence_queue.get(timeout=0.25)
+            except queue.Empty:
+                continue
+            try:
+                if self._evidence_stop.is_set():
+                    continue
+                width, height = _save_evidence_frame(path, frame)
+                if self._evidence_stop.is_set():
+                    try:
+                        path.unlink()
+                    except FileNotFoundError:
+                        pass
+                    continue
+                data = path.read_bytes()
+                self.log(
+                    "EVIDENCE_SAVED",
+                    stage=stage,
+                    category=category,
+                    path=path.relative_to(self.run_dir).as_posix(),
+                    width=width,
+                    height=height,
+                    sizeBytes=len(data),
+                    sha256=hashlib.sha256(data).hexdigest(),
+                )
+            except Exception as error:
+                self.log(
+                    "EVIDENCE_SAVE_ERROR",
+                    stage=stage,
+                    category=category,
+                    error=str(error),
+                )
+                try:
+                    path.unlink()
+                except FileNotFoundError:
+                    pass
+            finally:
+                self._evidence_queue.task_done()
+                with self._evidence_condition:
+                    self._evidence_pending -= 1
+                    self._evidence_condition.notify_all()
+
+    def evidence(
+        self, stage: str, frame: np.ndarray, *, category: str
+    ) -> Path | None:
+        """Queue a compact upload copy without making the Pilot encode JPEG."""
 
         if category not in {"live", "transition", "incident", "final"}:
             raise ValueError(f"不支持的状态留证类别：{category}")
         with self._lock:
+            if self._finished:
+                return None
+            if self._evidence_pending >= _MAX_PENDING_EVIDENCE:
+                return None
             self._evidence_index += 1
             path = self.evidence_dir / (
                 f"{self._evidence_index:04d}-{stage.lower()}.jpg"
             )
-        width, height = _save_evidence_frame(path, frame)
-        data = path.read_bytes()
-        self.log(
-            "EVIDENCE_SAVED",
-            stage=stage,
-            category=category,
-            path=path.relative_to(self.run_dir).as_posix(),
-            width=width,
-            height=height,
-            sizeBytes=len(data),
-            sha256=hashlib.sha256(data).hexdigest(),
-        )
+            self._evidence_pending += 1
+        try:
+            owned_frame = frame.copy() if hasattr(frame, "copy") else frame
+            self._ensure_evidence_worker()
+            self._evidence_queue.put_nowait((path, stage, category, owned_frame))
+        except Exception:
+            with self._evidence_condition:
+                self._evidence_pending -= 1
+                self._evidence_condition.notify_all()
+            raise
         return path
+
+    def flush_evidence(self, *, timeout_s: float = 5.0) -> bool:
+        deadline = time.monotonic() + max(0.0, timeout_s)
+        with self._evidence_condition:
+            while self._evidence_pending:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    return False
+                self._evidence_condition.wait(remaining)
+        return True
 
     def finish(self, status: str, **payload: Any) -> None:
         with self._lock:
             if self._finished:
                 return
+            # Evidence is optional: finishing a run cancels queued image work
+            # instead of waiting for compression or upload-related files.
+            self._evidence_stop.set()
             result = {
                 **payload,
                 "schemaVersion": 1,
