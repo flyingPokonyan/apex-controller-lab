@@ -243,12 +243,14 @@ class RunRecorderTest(unittest.TestCase):
                 first = recorder.evidence("one", object(), category="transition")
                 self.assertTrue(started.wait(1.0))
                 second = recorder.evidence("two", object(), category="transition")
-                dropped = recorder.evidence("three", object(), category="transition")
+                third = recorder.evidence("three", object(), category="transition")
+                dropped = recorder.evidence("four", object(), category="transition")
                 release.set()
                 self.assertTrue(recorder.flush_evidence(timeout_s=1.0))
 
             self.assertIsNotNone(first)
             self.assertIsNotNone(second)
+            self.assertIsNotNone(third)
             self.assertIsNone(dropped)
             recorder.finish("DONE")
 

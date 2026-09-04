@@ -980,7 +980,7 @@ class RemoteReporter:
                 self._evidence_url,
                 self.settings.report_token,
                 payload,
-                min(self.request_timeout_s, 1.0),
+                self.request_timeout_s,
             )
         except (OSError, URLError, TimeoutError) as error:
             message = self._safe_error(f"状态截图网络错误：{error}")
