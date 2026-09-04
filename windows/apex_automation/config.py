@@ -50,6 +50,7 @@ class RunnerConfig:
     stall: dict[str, Any] = field(default_factory=dict)
     legend_select: dict[str, Any] = field(default_factory=dict)
     page_probe: dict[str, Any] = field(default_factory=dict)
+    ranked_road_progress: dict[str, Any] = field(default_factory=dict)
 
 
 def _repository_path(value: str) -> Path:
@@ -105,5 +106,6 @@ def load_config(path: Path | str = DEFAULT_CONFIG_PATH) -> RunnerConfig:
         stall=dict(payload.get("stall", {})),
         legend_select=dict(payload.get("legendSelect", {})),
         page_probe=dict(payload.get("pageProbe", {})),
+        ranked_road_progress=dict(payload.get("rankedRoadProgress", {})),
         capability_set=payload.get("capabilitySet"),
     )

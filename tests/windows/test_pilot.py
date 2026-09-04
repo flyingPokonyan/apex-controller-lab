@@ -18,7 +18,7 @@ from apex_automation.ocr_obstacles import OcrToken
 from apex_automation.ocr_states import OcrStateDetector
 from apex_automation.pilot import CapabilityPilot
 from apex_automation.progression import LobbyProgressionReader
-from apex_automation.progression_policy import TargetLevelPolicy
+from apex_automation.progression_policy import TargetLevelAndRingPolicy, TargetLevelPolicy
 from apex_automation.safety import ForegroundLost
 
 
@@ -157,6 +157,27 @@ class PilotTest(unittest.TestCase):
         self.pilot.progression_reader = LobbyProgressionReader(self.provider)
         self.pilot.progression_stabilizer.reset()
         self.pilot.progression_max_attempts = max_attempts
+
+    def enable_managed_ranked_road(self, *, target_level: int = 20) -> None:
+        config = load_config(PLAY_CONFIG)
+        self.pilot = CapabilityPilot(
+            config,
+            FakeSource(),
+            self.sender,
+            self.guard,
+            self.recorder,
+            state_detector=OcrStateDetector.from_path(self.provider, STATES),
+            overlay_detector=OcrStateDetector.from_path(
+                self.overlay_provider, OVERLAYS
+            ),
+            dispatcher=CapabilityDispatcher(CapabilitySet.from_payload(self.payload)),
+            actions=dict(self.payload["actions"]),
+            sleep=self.sleeps.append,
+            monotonic=lambda: self.now,
+            progression_reader=LobbyProgressionReader(self.provider),
+            progression_policy=TargetLevelAndRingPolicy(target_level, target_ring=30),
+            ranked_road_progress_enabled=True,
+        )
 
     def test_the_shipped_capability_set_is_executable_as_written(self) -> None:
         # Construction validates every action name and kind, so reaching this
@@ -641,6 +662,72 @@ class PilotTest(unittest.TestCase):
         self.assertEqual(progress["confidence"], 0.94)
         # Reading it changes nothing about closing it.
         self.assertEqual(self.sender.calls, [("tap", 1, 80)])
+
+    def test_managed_lobby_reads_ranked_road_before_starting_or_stopping(self) -> None:
+        self.enable_managed_ranked_road(target_level=20)
+        self.screen(
+            lobbyPrimaryButton=("准备", 1.0),
+            lobbyModeName=("进化版机器人大逃杀", 1.0),
+            lobbyLevel=("20", 0.99),
+            lobbyXp=("1.44K / 3.90K", 0.98),
+        )
+
+        first = self.pilot.step()
+        self.now = 0.3
+        opened = self.pilot.step()
+
+        self.assertEqual(first["decision"]["reason"], "LOBBY_PROGRESS")
+        self.assertEqual(opened["decision"]["reason"], "RANKED_ROAD_PROGRESS")
+        self.assertEqual(self.sender.calls, [("click", 2256, 1282)])
+
+        self.screen(challengePanelTitle=("欢迎挑战", 1.0))
+        self.overlay_provider.readings = {
+            "fullFrame": ("欢迎挑战 查看欢迎挑战", 0.99)
+        }
+        self.now = 1.0
+        welcome = self.pilot.step()
+        self.assertEqual(welcome["state"], "CHALLENGE_WELCOME")
+        self.assertEqual(welcome["decision"]["capability"], "challenge-welcome-next")
+        self.assertIn(("click", 2500, 216), self.sender.calls)
+
+        self.screen(
+            challengePanelTitle=("排位之路", 1.0),
+            challengePanelTasks=("撑过 30 次安全区缩小 30/30", 0.99),
+        )
+        self.overlay_provider.readings = {
+            "fullFrame": [
+                ("排位之路", 0.99, (1940, 140, 2350, 225)),
+                ("撑过 30 次安全区缩小", 0.98, (1760, 650, 2220, 710)),
+                ("30/30", 0.99, (2280, 650, 2420, 710)),
+            ]
+        }
+        self.now = 2.0
+        ranked = self.pilot.step()
+        self.assertEqual(ranked["state"], "CHALLENGE_RANKED_ROAD")
+        self.assertEqual(
+            ranked["decision"]["capability"], "challenge-ranked-road-close"
+        )
+        progress = [
+            payload
+            for event, payload in self.recorder.events
+            if event == "RING_PROGRESS"
+        ][-1]
+        self.assertEqual((progress["completed"], progress["required"]), (30, 30))
+        self.assertIn(("tap", 1, 80), self.sender.calls)
+
+        self.screen(
+            lobbyPrimaryButton=("准备", 1.0),
+            lobbyModeName=("进化版机器人大逃杀", 1.0),
+            lobbyLevel=("20", 0.99),
+            lobbyXp=("1.44K / 3.90K", 0.98),
+        )
+        self.overlay_provider.readings = {}
+        self.now = 3.0
+        completed = self.pilot.step()
+
+        self.assertEqual(completed["decision"]["reason"], "TARGET_REACHED")
+        self.assertEqual(self.pilot.session_outcome, "TARGET_REACHED")
+        self.assertNotIn(("click", 1280, 1295), self.sender.calls)
 
     def test_the_generic_back_rule_never_backs_out_of_the_mode_panel(self) -> None:
         # The mode panel carries the same 「ESC 返回」 hint and is a screen the

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import datetime
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -32,6 +33,12 @@ def _save_frame(path: Path, frame: np.ndarray) -> None:
     save_frame(path, frame)
 
 
+def _save_evidence_frame(path: Path, frame: np.ndarray) -> tuple[int, int]:
+    from .vision import save_evidence_frame
+
+    return save_evidence_frame(path, frame)
+
+
 class RunRecorder:
     def __init__(
         self,
@@ -47,6 +54,8 @@ class RunRecorder:
         self.run_id, self.run_dir = self._create_run_dir(root)
         self.screenshot_dir = self.run_dir / "screenshots"
         self.screenshot_dir.mkdir()
+        self.evidence_dir = self.run_dir / "evidence"
+        self.evidence_dir.mkdir()
         self.events_path = self.run_dir / "events.jsonl"
         # Compatibility for callers that only use this attribute as the event
         # stream path. No separate actions.jsonl is created or written.
@@ -58,9 +67,14 @@ class RunRecorder:
         self.started = time.monotonic()
         self.started_at = _now()
         self.profile = profile
+        reporting = (manifest or {}).get("reporting")
+        self.evidence_enabled = bool(
+            isinstance(reporting, dict) and reporting.get("enabled")
+        )
         self._lock = threading.RLock()
         self._seq = 0
         self._screenshot_index = 0
+        self._evidence_index = 0
         self._singleton_events: set[str] = set()
         self._screenshot_event_paths: set[str] = set()
         self._finished = False
@@ -214,6 +228,30 @@ class RunRecorder:
             "SCREENSHOT_SAVED",
             stage=stage,
             path=path.relative_to(self.run_dir).as_posix(),
+        )
+        return path
+
+    def evidence(self, stage: str, frame: np.ndarray, *, category: str) -> Path:
+        """Save a compact upload copy; the original diagnostic PNG stays local."""
+
+        if category not in {"live", "transition", "incident", "final"}:
+            raise ValueError(f"不支持的状态留证类别：{category}")
+        with self._lock:
+            self._evidence_index += 1
+            path = self.evidence_dir / (
+                f"{self._evidence_index:04d}-{stage.lower()}.jpg"
+            )
+        width, height = _save_evidence_frame(path, frame)
+        data = path.read_bytes()
+        self.log(
+            "EVIDENCE_SAVED",
+            stage=stage,
+            category=category,
+            path=path.relative_to(self.run_dir).as_posix(),
+            width=width,
+            height=height,
+            sizeBytes=len(data),
+            sha256=hashlib.sha256(data).hexdigest(),
         )
         return path
 

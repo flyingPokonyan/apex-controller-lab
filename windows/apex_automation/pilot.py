@@ -42,8 +42,12 @@ SUPPORTED_KINDS = frozenset({"click", "key", "sequence", "clickText"})
 # frame for minutes", which is a fact about the runner rather than about a
 # page. Capabilities may attach to it exactly as they do to a real screen.
 STALLED_UNKNOWN = "STALLED_UNKNOWN"
-RING_PROGRESS_PATTERN = re.compile(
-    r"(?:经历)?缩圈[^0-9]{0,8}([0-9]{1,3})/([0-9]{1,3})"
+RING_PROGRESS_PATTERNS = (
+    re.compile(r"(?:经历)?缩圈[^0-9]{0,8}([0-9]{1,3})/([0-9]{1,3})"),
+    re.compile(
+        r"(?:撑过)?(?:[0-9]{1,3}次)?安全区缩小[^0-9]{0,12}"
+        r"([0-9]{1,3})/([0-9]{1,3})"
+    ),
 )
 
 
@@ -173,8 +177,10 @@ class CapabilityPilot:
         progression_max_attempts: int = 3,
         progression_policy: ProgressionPolicy | None = None,
         progression_retry_ms: int = 5000,
+        ranked_road_progress_enabled: bool = False,
         lease_is_current: Callable[[], bool] = lambda: True,
         status_interval_ms: int = 1000,
+        live_evidence_interval_ms: int = 60_000,
     ) -> None:
         self.config = config
         self.source = source
@@ -191,6 +197,9 @@ class CapabilityPilot:
         self.poll_ms = int(config.timing.get("pollMs", 300) if poll_ms is None else poll_ms)
         self.key_tap_ms = int(config.timing.get("keyTapMs", 80) if key_tap_ms is None else key_tap_ms)
         self.max_screenshots = max_screenshots
+        if live_evidence_interval_ms <= 0:
+            raise ValueError("状态截图间隔必须大于 0")
+        self.live_evidence_interval_s = live_evidence_interval_ms / 1000
         # Every screen with no rule looks the same from the log: NO_STATE, over
         # and over. Whether that is a two-second loading wipe or the run being
         # stuck forever is only visible in a frame, and the useful ones are
@@ -296,6 +305,40 @@ class CapabilityPilot:
         # *did* name, this one describes a frame nothing could name.
         self.click_text_miss_max = int(page_probe.get("maxUnmatchedPerSession", 8))
 
+        ranked_road = config.ranked_road_progress
+        self.ranked_road_progress_enabled = bool(
+            ranked_road_progress_enabled and ranked_road.get("enabled", False)
+        )
+        self.ranked_road_target = int(ranked_road.get("target", 30))
+        self.ranked_road_open_action = str(
+            ranked_road.get("openAction", "rankedRoadCardClick")
+        )
+        self.ranked_road_panel_states = frozenset(
+            str(value)
+            for value in ranked_road.get(
+                "panelStates", ["CHALLENGE_WELCOME", "CHALLENGE_RANKED_ROAD"]
+            )
+        )
+        self.ranked_road_progress_state = str(
+            ranked_road.get("progressState", "CHALLENGE_RANKED_ROAD")
+        )
+        self.ranked_road_max_attempts = int(
+            ranked_road.get("maxOpenAttemptsPerVisit", 2)
+        )
+        self.ranked_road_retry_s = int(ranked_road.get("openRetryMs", 5000)) / 1000
+        if self.ranked_road_progress_enabled:
+            if self.progression_reader is None or self.overlay_detector is None:
+                raise ValueError("排位之路检查需要大厅进度识别和覆盖层 OCR")
+            if self.ranked_road_target < 1:
+                raise ValueError("排位之路目标缩圈次数必须大于 0")
+            if self.ranked_road_max_attempts < 1 or self.ranked_road_retry_s <= 0:
+                raise ValueError("排位之路检查的尝试次数和重试间隔必须大于 0")
+            action = self.actions.get(self.ranked_road_open_action)
+            if not isinstance(action, list) or len(action) != 2:
+                raise ValueError("排位之路入口动作必须是一个点击坐标")
+            if self.ranked_road_progress_state not in self.ranked_road_panel_states:
+                raise ValueError("排位之路进度页必须属于挑战抽屉状态")
+
         # Full-frame and multi-region obstacle OCR is intentionally not part of
         # the 300ms fast loop. It runs once before a menu action, or after an
         # unknown screen has persisted. A positive result must repeat before it
@@ -333,10 +376,13 @@ class CapabilityPilot:
         self.state_version = 0
         self.actions_sent = 0
         self.screenshot_count = 0
+        self.evidence_count = 0
         self.frames = 0
         self.counters: dict[str, int] = defaultdict(int)
         self._foreground = True
         self._released = False
+        self._next_live_evidence_at = self.started + self.live_evidence_interval_s
+        self._incident_evidence_at: dict[str, float] = {}
         self._unknown_since: float | None = None
         self._unknown_captured = False
         self._unknown_signature: np.ndarray | None = None
@@ -359,6 +405,9 @@ class CapabilityPilot:
         self._page_probes = 0
         self._page_probed_state: str | None = None
         self._ring_progress: tuple[int, int] | None = None
+        self._ranked_road_probe_done = not self.ranked_road_progress_enabled
+        self._ranked_road_probe_attempts = 0
+        self._ranked_road_probe_requested_at: float | None = None
         self._click_text_misses = 0
         self._base_state: str | None = None
         self._base_state_version = 0
@@ -840,6 +889,17 @@ class CapabilityPilot:
                 analysis.decision.rule_id,
                 analysis.decision.confidence,
             )
+            if (
+                self.ranked_road_progress_enabled
+                and not self._ranked_road_probe_done
+                and observation.state == self.ranked_road_progress_state
+            ):
+                ring = self._record_ring_progress_tokens(
+                    analysis.decision.evidence.get("challengePanelTasks", ())
+                )
+                if ring is not None:
+                    self._ranked_road_probe_done = True
+                    self._ranked_road_probe_requested_at = None
 
         if self._base_state_version == 0 or observation.state != self._base_state:
             self._base_state = observation.state
@@ -974,16 +1034,12 @@ class CapabilityPilot:
     def _probe_page_text(self, match: StateObservation) -> None:
         """Write down what a page said before dismissing it.
 
-        `fullscreen-esc-back` closes a whole family of pages by the hint in
-        their corner, without ever knowing which page it closed. One of them
-        is 排位之路, which carries the task counters — including 经历缩圈
-        30 次, the number that decides whether ring survival needs any work at
-        all. The OCR for that frame has already been paid for; only the result
-        was being thrown away.
+        The ranked-road drawer carries the account level and the real task
+        wording `撑过 30 次安全区缩小`. Its full-frame OCR has already been
+        paid for by the overlay guard, so keep the text and parse the counter
+        before the drawer is closed.
         """
         if match.state not in self.page_probe_states:
-            return
-        if self._page_probes >= self.page_probe_max:
             return
         if not self._last_page_tokens:
             return
@@ -991,24 +1047,33 @@ class CapabilityPilot:
             # One record per visit, not one per rescan of the same page.
             return
         self._page_probed_state = match.state
-        self._page_probes += 1
-        self.recorder.log(
-            "PAGE_TEXT",
-            state=match.state,
-            ruleId=match.rule_id,
-            tokens=[
-                {
-                    "text": token.text,
-                    "confidence": round(token.confidence, 3),
-                    "roi": list(token.roi) if token.roi else None,
-                }
-                for token in self._last_page_tokens[:80]
-            ],
-        )
-        self._record_ring_progress()
+        if self._page_probes < self.page_probe_max:
+            self._page_probes += 1
+            self.recorder.log(
+                "PAGE_TEXT",
+                state=match.state,
+                ruleId=match.rule_id,
+                tokens=[
+                    {
+                        "text": token.text,
+                        "confidence": round(token.confidence, 3),
+                        "roi": list(token.roi) if token.roi else None,
+                    }
+                    for token in self._last_page_tokens[:80]
+                ],
+            )
+        ring = self._record_ring_progress()
+        if match.state == self.ranked_road_progress_state and ring is not None:
+            self._ranked_road_probe_done = True
+            self._ranked_road_probe_requested_at = None
 
-    def _record_ring_progress(self) -> None:
-        tokens = self._last_page_tokens[:80]
+    def _record_ring_progress(self) -> tuple[int, int] | None:
+        return self._record_ring_progress_tokens(self._last_page_tokens[:80])
+
+    def _record_ring_progress_tokens(
+        self,
+        tokens: tuple[Any, ...],
+    ) -> tuple[int, int] | None:
         for width in range(1, min(5, len(tokens)) + 1):
             for start in range(0, len(tokens) - width + 1):
                 group = tokens[start : start + width]
@@ -1016,15 +1081,19 @@ class CapabilityPilot:
                 compact = "".join(
                     unicodedata.normalize("NFKC", raw_text).split()
                 )
-                match = RING_PROGRESS_PATTERN.search(compact)
+                match = None
+                for pattern in RING_PROGRESS_PATTERNS:
+                    match = pattern.search(compact)
+                    if match is not None:
+                        break
                 if match is None:
                     continue
                 completed, required = (int(value) for value in match.groups())
                 if required < 1 or required > 100 or completed > required:
                     continue
                 current = self._ring_progress
-                if current is not None and required == current[1] and completed <= current[0]:
-                    return
+                if current is not None and required == current[1] and completed < current[0]:
+                    continue
                 self._ring_progress = (completed, required)
                 self.recorder.log(
                     "RING_PROGRESS",
@@ -1035,7 +1104,8 @@ class CapabilityPilot:
                         min(float(token.confidence) for token in group), 3
                     ),
                 )
-                return
+                return self._ring_progress
+        return None
 
     def _record_observation(
         self,
@@ -1092,6 +1162,9 @@ class CapabilityPilot:
                 self._progression_retry_at = None
                 self._progression_pause_reported = False
                 self.progression_decision = None
+                self._ranked_road_probe_done = not self.ranked_road_progress_enabled
+                self._ranked_road_probe_attempts = 0
+                self._ranked_road_probe_requested_at = None
             return
 
         if base_state in ROUND_CONTEXT_STATES:
@@ -1245,7 +1318,86 @@ class CapabilityPilot:
             pending_action=self.dispatcher.pending is not None,
             foreground=self._foreground,
             lease_current=bool(self.lease_is_current()),
+            ring_progress=(
+                None if self._ring_progress is None else self._ring_progress[0]
+            ),
+            ring_target=(
+                None if self._ring_progress is None else self._ring_progress[1]
+            ),
         )
+
+    def _maybe_probe_ranked_road(
+        self,
+        state: str | None,
+        base_state: str | None,
+        now: float,
+    ) -> str | None:
+        """Open the ranked-road drawer once per lobby visit, with a hard cap."""
+
+        if (
+            not self.ranked_road_progress_enabled
+            or self._ranked_road_probe_done
+            or not self._lobby_visit_active
+            or not self._progression_done
+            or self._progression_outcome is None
+            or self._progression_outcome.status is not ProgressionStatus.CONFIRMED
+            or not self.lease_is_current()
+        ):
+            return None
+        if (
+            state in self.ranked_road_panel_states
+            or base_state in self.ranked_road_panel_states
+        ):
+            return None
+        if state != base_state or base_state not in SAFE_LOBBY_STATES:
+            return "RANKED_ROAD_PROGRESS"
+        if self.dispatcher.pending is not None:
+            return None
+
+        requested_at = self._ranked_road_probe_requested_at
+        if requested_at is not None and now - requested_at < self.ranked_road_retry_s:
+            return "RANKED_ROAD_PROGRESS"
+        if self._ranked_road_probe_attempts >= self.ranked_road_max_attempts:
+            self._ranked_road_probe_done = True
+            self._ranked_road_probe_requested_at = None
+            self.counters["rankedRoadProgressUnavailable"] += 1
+            self.recorder.log(
+                "RANKED_ROAD_PROGRESS_UNAVAILABLE",
+                attempts=self._ranked_road_probe_attempts,
+                state=state,
+                reason="排位之路已打开但未识别到安全区缩小进度",
+            )
+            return None
+
+        x, y = (int(value) for value in self.actions[self.ranked_road_open_action])
+        self.guard.ensure_target_foreground()
+        self.guard.ensure_not_aborted()
+        self.sender.click(x, y)
+        self.actions_sent += 1
+        self._released = False
+        self._ranked_road_probe_attempts += 1
+        self._ranked_road_probe_requested_at = now
+        self._active_overlay = None
+        self._overlay_candidate = None
+        self._overlay_candidate_count = 0
+        self._overlay_checked_base_version = None
+        self._overlay_next_scan_at = now
+        self.recorder.log(
+            "ACTION_SENT",
+            capability="lobby-open-ranked-road-progress",
+            action=self.ranked_road_open_action,
+            kind="click",
+            actionClass="idempotent",
+            trigger="onState",
+            state=state,
+            attempt=self._ranked_road_probe_attempts,
+            reason="RANKED_ROAD_PROGRESS",
+            observationVersion=self.state_version,
+            x=x,
+            y=y,
+        )
+        self.notify("  ↳ 查看排位之路进度")
+        return "RANKED_ROAD_PROGRESS"
 
     def _apply_progression_policy(
         self,
@@ -1299,11 +1451,19 @@ class CapabilityPilot:
             level=reading.level,
             xpCurrentApprox=reading.xp_current_approx,
             xpRequiredApprox=reading.xp_required_approx,
+            ringProgress=None if self._ring_progress is None else self._ring_progress[0],
+            ringTarget=None if self._ring_progress is None else self._ring_progress[1],
             state=state,
         )
         self._snapshot("target-reached", frame)
         self.session_outcome = "TARGET_REACHED"
-        self.notify(f"目标等级已达到：{reading.level}")
+        if self._ring_progress is None:
+            self.notify(f"目标等级已达到：{reading.level}")
+        else:
+            self.notify(
+                f"等级与缩圈目标已达到：{reading.level} 级，"
+                f"缩圈 {self._ring_progress[0]}/{self._ring_progress[1]}"
+            )
         self._write_status(now, force=True)
         return decision
 
@@ -1322,8 +1482,15 @@ class CapabilityPilot:
                 "observationVersion": self.state_version,
                 "frames": self.frames,
                 "actionsSent": self.actions_sent,
+                "evidenceFrames": self.evidence_count,
                 "roundNumber": self.rounds_started,
                 "roundsReturnedToLobby": self.rounds_returned_to_lobby,
+                "ringProgress": (
+                    None if self._ring_progress is None else self._ring_progress[0]
+                ),
+                "ringTarget": (
+                    None if self._ring_progress is None else self._ring_progress[1]
+                ),
             }
         )
         self._next_status_at = now + self.status_interval_s
@@ -1652,11 +1819,52 @@ class CapabilityPilot:
         self.session_outcome = "STALLED_KNOWN"
         self.notify("已知页面持续无法处理：结束本次会话并安全收口。")
 
-    def _snapshot(self, stage: str, frame: np.ndarray) -> None:
-        if self.screenshot_count >= self.max_screenshots:
+    def _record_evidence(
+        self, stage: str, frame: np.ndarray, *, category: str
+    ) -> None:
+        if getattr(self.recorder, "evidence_enabled", True) is False:
             return
-        self.screenshot_count += 1
-        self.recorder.screenshot(stage.lower(), frame)
+        if category == "incident":
+            now = self.monotonic()
+            last = self._incident_evidence_at.get(stage)
+            if last is not None and now - last < 300:
+                return
+        capture = getattr(self.recorder, "evidence", None)
+        if not callable(capture):
+            return
+        try:
+            capture(stage.lower(), frame, category=category)
+            self.evidence_count += 1
+            if category == "incident":
+                self._incident_evidence_at[stage] = self.monotonic()
+        except Exception as error:
+            # Evidence must never stop gameplay or the normal report stream.
+            self.recorder.log(
+                "EVIDENCE_SAVE_ERROR", stage=stage, category=category, error=str(error)
+            )
+
+    def _maybe_live_evidence(self, frame: np.ndarray, now: float) -> None:
+        if now < self._next_live_evidence_at:
+            return
+        self._next_live_evidence_at = now + self.live_evidence_interval_s
+        self._record_evidence("live", frame, category="live")
+
+    def _snapshot(self, stage: str, frame: np.ndarray) -> None:
+        lowered = stage.lower()
+        if self.screenshot_count < self.max_screenshots:
+            self.screenshot_count += 1
+            self.recorder.screenshot(lowered, frame)
+        if lowered == "target-reached":
+            category = "final"
+        elif lowered in {
+            "known-stall-unrecovered",
+            "resolution-mismatch",
+            "paused-progression-uncertain",
+        } or lowered.startswith("paused-"):
+            category = "incident"
+        else:
+            category = "transition"
+        self._record_evidence(lowered, frame, category=category)
 
     def _act(self, decision: Decision, state: str, frame: np.ndarray) -> None:
         capability = decision.capability
@@ -1809,6 +2017,7 @@ class CapabilityPilot:
         # Overlay OCR can take seconds. Retry windows and periodic actions must
         # use the time after that work, not the stale timestamp from frame grab.
         now = self.monotonic()
+        self._maybe_live_evidence(frame, now)
         record["state"] = state
         record["baseState"] = base_state
         self._update_visit_tracking(base_state)
@@ -1821,12 +2030,28 @@ class CapabilityPilot:
             self.counters["wait:LOBBY_PROGRESS"] += 1
             self._write_status(self.monotonic())
             return record
-        progression_decision = self._apply_progression_policy(
+        ranked_road_wait = self._maybe_probe_ranked_road(
             state,
             base_state,
-            frame,
             self.monotonic(),
         )
+        if ranked_road_wait is not None:
+            record["decision"] = {"kind": "wait", "reason": ranked_road_wait}
+            self.counters[f"wait:{ranked_road_wait}"] += 1
+            self._write_status(self.monotonic())
+            return record
+        if (
+            state in self.ranked_road_panel_states
+            or base_state in self.ranked_road_panel_states
+        ):
+            progression_decision = None
+        else:
+            progression_decision = self._apply_progression_policy(
+                state,
+                base_state,
+                frame,
+                self.monotonic(),
+            )
         if (
             progression_decision is not None
             and progression_decision is not ProgressionDecision.CONTINUE_PLAY
@@ -1894,7 +2119,10 @@ class CapabilityPilot:
             "actionsSent": self.actions_sent,
             "roundsStarted": self.rounds_started,
             "roundsReturnedToLobby": self.rounds_returned_to_lobby,
+            "ringProgress": None if self._ring_progress is None else self._ring_progress[0],
+            "ringTarget": None if self._ring_progress is None else self._ring_progress[1],
             "screenshots": self.screenshot_count,
+            "evidenceFrames": self.evidence_count,
             "counters": dict(sorted(self.counters.items())),
         }
         path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")

@@ -36,6 +36,37 @@ def save_frame(path: Path | str, frame: np.ndarray) -> None:
         raise OSError(f"无法保存图片：{target}")
 
 
+def save_evidence_frame(
+    path: Path | str,
+    frame: np.ndarray,
+    *,
+    max_width: int = 960,
+    jpeg_quality: int = 70,
+) -> tuple[int, int]:
+    """Write a small diagnostic JPEG without changing the analysis frame."""
+
+    target = Path(path)
+    target.parent.mkdir(parents=True, exist_ok=True)
+    height, width = frame.shape[:2]
+    if width > max_width:
+        scale = max_width / width
+        output = cv2.resize(
+            frame,
+            (max_width, max(1, round(height * scale))),
+            interpolation=cv2.INTER_AREA,
+        )
+    else:
+        output = frame
+    output_height, output_width = output.shape[:2]
+    if not cv2.imwrite(
+        str(target),
+        output,
+        [cv2.IMWRITE_JPEG_QUALITY, max(40, min(90, int(jpeg_quality)))],
+    ):
+        raise OSError(f"无法保存状态留证：{target}")
+    return output_width, output_height
+
+
 def _gray(frame: np.ndarray) -> np.ndarray:
     if frame.ndim == 2:
         return frame

@@ -11,6 +11,8 @@
     "targetCardClick": [1750, 696],
     "targetConfirmClick": [1700, 806],
     "fillToggleClick": [86, 222],
+    "rankedRoadCardClick": [2256, 1282],
+    "challengeNextClick": [2500, 216],
     "guideAccountContinue": [610, 150],
     "guideFriendsContinue": [480, 252],
     "guideSettingsContinue": [1730, 155],
@@ -52,6 +54,36 @@
   },
   "_keyBindings": "扫描码写死在这里，等于假定了游戏里的键位。这些假定必须和目标账号实际绑的键一致，否则动作照发、游戏没反应，而画面上和「输入没送到」长得一模一样——2026-07-30 就栽在这上面：配置写 V(47)，当时账号绑在 N 上，白查了一轮反作弊。当前假定：1=ESC 安全返回，28=ENTER 安全继续，15=TAB 返回大厅，57=SPACE 确认返回大厅，47=V 近战，16=Q 战术技能，29=LCTRL 单独发射，18=E 发射。改键位的话这里也要跟着改；windows/probe-input.cmd 可以逐个验。另外 Apex 里有相当一批提示是长按而不是点按，那种要靠能力自己的 holdMs 或动作序列内的 durationMs 声明，默认的 keyTapMs 太短。",
   "capabilities": [
+    {
+      "id": "challenge-welcome-next",
+      "priority": 124,
+      "states": ["CHALLENGE_WELCOME"],
+      "action": "challengeNextClick",
+      "kind": "click",
+      "actionClass": "idempotent",
+      "confirmMs": 2000,
+      "maxAttempts": 2,
+      "allowedNextStates": ["CHALLENGE_RANKED_ROAD"],
+      "_note": "右下挑战卡片在欢迎页时，按真实页面右上箭头只向右切一页；操作者实图确认下一页就是排位之路。"
+    },
+    {
+      "id": "challenge-ranked-road-close",
+      "priority": 124,
+      "states": ["CHALLENGE_RANKED_ROAD"],
+      "action": "escapeScanCode",
+      "kind": "key",
+      "actionClass": "idempotent",
+      "confirmMs": 2000,
+      "maxAttempts": 2,
+      "allowedNextStates": [
+        "LOBBY_SELECT_REQUIRED",
+        "LOBBY_READY_TARGET_FILL_ON",
+        "LOBBY_READY_TRAINING",
+        "LOBBY_READY_TARGET",
+        "LOBBY_READY_OTHER"
+      ],
+      "_note": "进度在关闭前由窄区域 OCR 读取，全屏 PAGE_TEXT 只作识别失败时的兜底；ESC 只收起右侧抽屉，不改变任务进度。"
+    },
     {
       "id": "dismiss-reticle-unlock",
       "priority": 125,

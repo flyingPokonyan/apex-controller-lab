@@ -23,6 +23,7 @@ from apex_automation.progression_policy import (
     ProgressionContext,
     ProgressionDecision,
     ProgressionOutcome,
+    TargetLevelAndRingPolicy,
     TargetLevelPolicy,
 )
 
@@ -246,6 +247,61 @@ class TargetLevelPolicyTest(unittest.TestCase):
         self.assertEqual(
             policy.decide(below, self.context(lease_current=False)),
             ProgressionDecision.PAUSE_UNCERTAIN,
+        )
+
+
+class TargetLevelAndRingPolicyTest(unittest.TestCase):
+    def context(self, **changes) -> ProgressionContext:
+        values = {
+            "observed_state": "LOBBY_READY_TARGET",
+            "safe_lobby": True,
+            "queueing": False,
+            "overlay_clear": True,
+            "pending_action": False,
+            "foreground": True,
+            "lease_current": True,
+            "ring_progress": 30,
+            "ring_target": 30,
+        }
+        values.update(changes)
+        return ProgressionContext(**values)
+
+    def test_either_unfinished_objective_keeps_playing(self) -> None:
+        policy = TargetLevelAndRingPolicy(20, target_ring=30)
+
+        self.assertEqual(
+            policy.decide(
+                ProgressionOutcome.confirmed(reading(level="19"), attempts=2),
+                self.context(ring_progress=30),
+            ),
+            ProgressionDecision.CONTINUE_PLAY,
+        )
+        self.assertEqual(
+            policy.decide(
+                ProgressionOutcome.confirmed(reading(level="20"), attempts=2),
+                self.context(ring_progress=29),
+            ),
+            ProgressionDecision.CONTINUE_PLAY,
+        )
+        self.assertEqual(
+            policy.decide(
+                ProgressionOutcome.confirmed(reading(level="20"), attempts=2),
+                self.context(ring_progress=None, ring_target=None),
+            ),
+            ProgressionDecision.CONTINUE_PLAY,
+        )
+
+    def test_both_objectives_stop_only_in_a_safe_lobby(self) -> None:
+        policy = TargetLevelAndRingPolicy(20, target_ring=30)
+        reached = ProgressionOutcome.confirmed(reading(level="20"), attempts=2)
+
+        self.assertEqual(
+            policy.decide(reached, self.context()),
+            ProgressionDecision.TARGET_REACHED,
+        )
+        self.assertEqual(
+            policy.decide(reached, self.context(overlay_clear=False)),
+            ProgressionDecision.DEFER_UNTIL_SAFE_LOBBY,
         )
 
 

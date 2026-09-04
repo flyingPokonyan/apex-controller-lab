@@ -199,6 +199,28 @@ class RunRecorderTest(unittest.TestCase):
                 ],
             )
 
+    def test_compact_evidence_records_upload_metadata(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            recorder = RunRecorder(Path(directory), "play-profile")
+
+            def save_jpeg(path, frame):
+                path.write_bytes(b"\xff\xd8\xffsmall-jpeg\xff\xd9")
+                return 960, 540
+
+            with patch(
+                "apex_automation.recorder._save_evidence_frame",
+                side_effect=save_jpeg,
+            ):
+                path = recorder.evidence("live", object(), category="live")
+
+            event = read_events(recorder)[-1]
+            self.assertEqual(event["type"], "EVIDENCE_SAVED")
+            self.assertEqual(event["payload"]["category"], "live")
+            self.assertEqual(event["payload"]["width"], 960)
+            self.assertEqual(event["payload"]["height"], 540)
+            self.assertEqual(event["payload"]["sizeBytes"], path.stat().st_size)
+            self.assertEqual(len(event["payload"]["sha256"]), 64)
+
     def test_concurrent_finish_writes_one_result_and_one_event(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             recorder = RunRecorder(Path(directory), "play-profile")

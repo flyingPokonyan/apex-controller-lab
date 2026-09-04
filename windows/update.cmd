@@ -2,11 +2,14 @@
 setlocal
 
 set "RepoDir=%~dp0.."
+set "GitExe=git"
+if exist "%LOCALAPPDATA%\ApexController\tools\git\cmd\git.exe" set "GitExe=%LOCALAPPDATA%\ApexController\tools\git\cmd\git.exe"
+if not defined PIP_INDEX_URL set "PIP_INDEX_URL=https://mirrors.aliyun.com/pypi/simple/"
 
-git -C "%RepoDir%" pull --ff-only
+"%GitExe%" -C "%RepoDir%" pull --ff-only
 if errorlevel 1 (
   echo.
-  echo Update failed. Check the network, GitHub SSH, and local changes.
+  echo Update failed. Check the network, repository access, and local changes.
   pause
   exit /b 1
 )

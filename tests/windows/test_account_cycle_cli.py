@@ -3,6 +3,7 @@ from __future__ import annotations
 import importlib.util
 from pathlib import Path
 import sys
+from types import SimpleNamespace
 import unittest
 from unittest.mock import Mock, patch
 
@@ -24,6 +25,12 @@ if CV2_AVAILABLE:
 
 @unittest.skipUnless(CV2_AVAILABLE, "account-cycle CLI requires the Windows OpenCV runtime")
 class AccountCycleCliTest(unittest.TestCase):
+    @staticmethod
+    def config():
+        return SimpleNamespace(
+            environment={"captureBackend": "dxgi", "outputIndex": 0}
+        )
+
     def test_check_reads_current_lease_without_claiming(self) -> None:
         settings = RunnerSettings(
             enabled=True,
@@ -65,7 +72,7 @@ class AccountCycleCliTest(unittest.TestCase):
 
         with (
             patch.object(cli.sys, "platform", "win32"),
-            patch.object(cli, "load_config", return_value=object()),
+            patch.object(cli, "load_config", return_value=self.config()),
             patch.object(
                 cli, "load_runner_settings", return_value=settings
             ) as settings_loader,
@@ -119,7 +126,7 @@ class AccountCycleCliTest(unittest.TestCase):
 
         with (
             patch.object(cli.sys, "platform", "win32"),
-            patch.object(cli, "load_config", return_value=object()),
+            patch.object(cli, "load_config", return_value=self.config()),
             patch.object(cli, "load_runner_settings", return_value=settings),
             patch.object(cli, "HttpAccountProvider", return_value=Mock()),
             patch.object(

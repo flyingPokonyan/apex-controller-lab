@@ -12,6 +12,20 @@
   },
   "rules": [
     {
+      "id": "challenge-ranked-road",
+      "state": "CHALLENGE_RANKED_ROAD",
+      "requirements": [
+        {"region": "fullFrame", "all": ["排位之路", "安全区缩小"]}
+      ]
+    },
+    {
+      "id": "challenge-welcome",
+      "state": "CHALLENGE_WELCOME",
+      "requirements": [
+        {"region": "fullFrame", "all": ["欢迎挑战", "查看欢迎挑战"]}
+      ]
+    },
+    {
       "id": "auth-two-factor-manual",
       "state": "AUTH_REQUIRED",
       "requirements": [

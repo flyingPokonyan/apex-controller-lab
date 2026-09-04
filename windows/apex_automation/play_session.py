@@ -248,6 +248,7 @@ class PlaySessionRunner:
             "language": str(self.config.environment["language"]),
             "capabilitySet": str(self.config.capability_set),
             "targetLevel": identity.target_level,
+            "targetRing": int(self.config.ranked_road_progress.get("target", 30)),
         }
         recorder = RunRecorder(
             self.runs_root,
@@ -342,6 +343,7 @@ class PlaySessionRunner:
                     progression_config.get("maxAttempts", 3)
                 ),
                 progression_policy=progression_policy,
+                ranked_road_progress_enabled=identity.managed,
                 lease_is_current=lease_is_current,
                 notify=self.notify,
             )

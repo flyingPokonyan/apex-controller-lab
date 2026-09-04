@@ -66,6 +66,8 @@ class ProgressionContext:
     pending_action: bool
     foreground: bool
     lease_current: bool = True
+    ring_progress: int | None = None
+    ring_target: int | None = None
 
 
 class ProgressionPolicy(Protocol):
@@ -109,6 +111,47 @@ class TargetLevelPolicy:
         if reading is None or not reading.is_complete or reading.level is None:
             return ProgressionDecision.PAUSE_UNCERTAIN
         if reading.level < self.target_level:
+            return ProgressionDecision.CONTINUE_PLAY
+        if (
+            not context.safe_lobby
+            or context.queueing
+            or not context.overlay_clear
+            or context.pending_action
+            or not context.foreground
+        ):
+            return ProgressionDecision.DEFER_UNTIL_SAFE_LOBBY
+        return ProgressionDecision.TARGET_REACHED
+
+
+class TargetLevelAndRingPolicy(TargetLevelPolicy):
+    """Stop only after both the account level and ring objective are proven."""
+
+    def __init__(self, target_level: int, target_ring: int = 30) -> None:
+        super().__init__(target_level)
+        if target_ring < 1:
+            raise ValueError("目标缩圈次数必须大于 0")
+        self.target_ring = target_ring
+
+    def decide(
+        self,
+        outcome: ProgressionOutcome,
+        context: ProgressionContext,
+    ) -> ProgressionDecision:
+        if not context.lease_current:
+            return ProgressionDecision.PAUSE_UNCERTAIN
+        if outcome.status is ProgressionStatus.FAILED:
+            return ProgressionDecision.PAUSE_UNCERTAIN
+
+        reading = outcome.reading
+        if reading is None or not reading.is_complete or reading.level is None:
+            return ProgressionDecision.PAUSE_UNCERTAIN
+        if reading.level < self.target_level:
+            return ProgressionDecision.CONTINUE_PLAY
+        if (
+            context.ring_progress is None
+            or context.ring_target != self.target_ring
+            or context.ring_progress < self.target_ring
+        ):
             return ProgressionDecision.CONTINUE_PLAY
         if (
             not context.safe_lobby

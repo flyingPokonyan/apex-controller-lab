@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import base64
 from dataclasses import dataclass
 from datetime import datetime, timezone
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -28,6 +30,7 @@ REPORTABLE_INCIDENTS = {
     "STALL_DETECTED": "STALL_DETECTED",
     "STALL_UNRECOVERED": "STALL_UNRECOVERED",
     "STALL_RECOVERED": "STALL_RECOVERED",
+    "RANKED_ROAD_PROGRESS_UNAVAILABLE": "RANKED_ROAD_PROGRESS_UNAVAILABLE",
 }
 ERROR_INCIDENTS = frozenset(
     {"CAPTURE_ERROR", "RESOLUTION_MISMATCH", "REPORTER_ERROR", "STALL_UNRECOVERED"}
@@ -290,6 +293,10 @@ class ReportSession:
     @property
     def source_through(self) -> int:
         return max(0, int(self.state.get("sourceThrough", 0)))
+
+    @property
+    def evidence_source_through(self) -> int:
+        return max(0, int(self.state.get("evidenceSourceThrough", 0)))
 
     @property
     def terminal_error(self) -> str | None:
@@ -567,6 +574,89 @@ class ReportSession:
             1 for item in self.outbox if int(item.get("seq", 0)) > self.accepted_through
         )
 
+    def pending_evidence(self) -> list[dict[str, Any]]:
+        cursor = self.evidence_source_through
+        return [
+            record
+            for record in _read_jsonl(self.events_path)
+            if int(record.get("seq", 0) or 0) > cursor
+            and _local_event_name(record) == "EVIDENCE_SAVED"
+        ]
+
+    def evidence_pending_count(self) -> int:
+        return len(self.pending_evidence())
+
+    def evidence_request_payload(
+        self, record: dict[str, Any]
+    ) -> tuple[dict[str, object], Path]:
+        source_sequence = int(record.get("seq", 0) or 0)
+        payload = _local_payload(record)
+        relative_path = Path(str(payload.get("path") or ""))
+        if not str(relative_path) or relative_path.is_absolute():
+            raise ValueError("状态截图路径无效")
+        resolved_run = self.run_dir.resolve(strict=False)
+        path = (self.run_dir / relative_path).resolve(strict=False)
+        if path != resolved_run and resolved_run not in path.parents:
+            raise ValueError("状态截图路径超出运行目录")
+        image = path.read_bytes()
+        if not image:
+            raise ValueError("状态截图为空")
+        if len(image) > 512 * 1024:
+            raise ValueError("状态截图超过 512 KiB")
+        if not image.startswith(b"\xff\xd8\xff") or not image.endswith(b"\xff\xd9"):
+            raise ValueError("状态截图不是完整 JPEG")
+        width = payload.get("width")
+        height = payload.get("height")
+        if type(width) is not int or type(height) is not int:
+            raise ValueError("状态截图尺寸缺失")
+        category = str(payload.get("category") or "")
+        if category not in {"live", "transition", "incident", "final"}:
+            raise ValueError("状态截图类别无效")
+        return (
+            {
+                "schemaVersion": 1,
+                "accountId": self.account_id,
+                "deviceId": self.device_id,
+                "runId": self.run_id,
+                "sourceSequence": source_sequence,
+                "capturedAt": str(record.get("occurredAt") or _now_rfc3339()),
+                "category": category,
+                "stage": str(payload.get("stage") or "unknown")[:96],
+                "width": width,
+                "height": height,
+                "sha256": hashlib.sha256(image).hexdigest(),
+                "imageBase64": base64.b64encode(image).decode("ascii"),
+            },
+            path,
+        )
+
+    def acknowledge_evidence(
+        self,
+        source_sequence: int,
+        *,
+        path: Path | None = None,
+        skipped_error: str | None = None,
+    ) -> None:
+        if source_sequence < self.evidence_source_through:
+            raise ValueError("状态截图确认游标倒退")
+        changes: dict[str, object] = {
+            "evidenceSourceThrough": source_sequence,
+            "lastEvidenceSuccessAt": _now_rfc3339(),
+            "lastEvidenceError": skipped_error,
+        }
+        self._persist_state(**changes)
+        if path is not None:
+            try:
+                path.unlink()
+            except FileNotFoundError:
+                pass
+
+    def mark_evidence_error(self, message: str) -> None:
+        self._persist_state(
+            lastEvidenceError=message,
+            lastEvidenceErrorAt=_now_rfc3339(),
+        )
+
     def report_seq(self, event_type: str) -> int | None:
         with self._lock:
             values = [
@@ -664,6 +754,8 @@ class RemoteReporter:
         self._backoff_steps = (2.0, 5.0, 10.0, 30.0, 60.0)
         self._backoff_index = 0
         self._next_send_at = 0.0
+        self._evidence_backoff_index = 0
+        self._evidence_next_send_at = 0.0
         self._sessions: dict[Path, ReportSession] = {}
         self._ignored_dirs: set[Path] = set()
         self._terminal_notified: set[Path] = set()
@@ -766,6 +858,95 @@ class RemoteReporter:
             raise ValueError("服务端响应 serverTime 缺少时区")
         return accepted
 
+    @property
+    def _evidence_url(self) -> str:
+        assert self.settings.report_url is not None
+        report_url = self.settings.report_url.rstrip("/")
+        if report_url.endswith("/reports"):
+            return f"{report_url[:-len('/reports')]}/evidence"
+        return f"{report_url}/evidence"
+
+    def _validate_evidence_response(
+        self, session: ReportSession, payload: dict[str, Any], source_sequence: int
+    ) -> None:
+        if payload.get("schemaVersion") != 1:
+            raise ValueError("服务端截图响应 schemaVersion 不是 1")
+        for field, expected in (
+            ("accountId", session.account_id),
+            ("deviceId", session.device_id),
+            ("runId", session.run_id),
+            ("sourceSequence", source_sequence),
+        ):
+            if payload.get(field) != expected:
+                raise ValueError(f"服务端截图响应 {field} 与请求不一致")
+        if not isinstance(payload.get("evidenceId"), str) or not isinstance(
+            payload.get("url"), str
+        ):
+            raise ValueError("服务端截图响应缺少 evidenceId/url")
+
+    def _send_evidence_session(self, session: ReportSession) -> SendOutcome:
+        pending = session.pending_evidence()
+        if not pending:
+            return SendOutcome()
+        record = pending[0]
+        source_sequence = int(record.get("seq", 0) or 0)
+        path: Path | None = None
+        try:
+            payload, path = session.evidence_request_payload(record)
+        except FileNotFoundError:
+            session.acknowledge_evidence(
+                source_sequence, skipped_error="本地状态截图已不存在"
+            )
+            return SendOutcome(pending=session.evidence_pending_count())
+        except (OSError, TypeError, ValueError) as error:
+            message = self._safe_error(f"状态截图不可上传：{error}")
+            session.acknowledge_evidence(source_sequence, skipped_error=message)
+            self.notify(f"已跳过 {session.run_id} 的无效状态截图：{message}")
+            return SendOutcome(pending=session.evidence_pending_count())
+
+        assert self.settings.report_token is not None
+        try:
+            status, response, headers = self.transport.send(
+                self._evidence_url,
+                self.settings.report_token,
+                payload,
+                self.request_timeout_s,
+            )
+        except (OSError, URLError, TimeoutError) as error:
+            message = self._safe_error(f"状态截图网络错误：{error}")
+            session.mark_evidence_error(message)
+            return SendOutcome(pending=session.evidence_pending_count(), error=message)
+
+        if status == 200:
+            try:
+                self._validate_evidence_response(session, response, source_sequence)
+            except (TypeError, ValueError) as error:
+                message = self._safe_error(f"无效截图响应：{error}")
+                session.mark_evidence_error(message)
+                return SendOutcome(pending=session.evidence_pending_count(), error=message)
+            session.acknowledge_evidence(source_sequence, path=path)
+            return SendOutcome(sent=1, pending=session.evidence_pending_count())
+
+        error_payload = response.get("error")
+        detail = error_payload if isinstance(error_payload, dict) else {}
+        message = self._safe_error(detail.get("message") or f"截图 HTTP {status}")
+        if 400 <= status < 500 and status not in {408, 409, 429}:
+            session.acknowledge_evidence(source_sequence, skipped_error=message)
+            self.notify(f"已跳过 {session.run_id} 的状态截图：{message}")
+            return SendOutcome(pending=session.evidence_pending_count())
+        session.mark_evidence_error(message)
+        retry_after: float | None = None
+        if status == 429:
+            try:
+                retry_after = max(0.0, float(headers.get("retry-after", "0")))
+            except ValueError:
+                retry_after = None
+        return SendOutcome(
+            pending=session.evidence_pending_count(),
+            retry_after_s=retry_after,
+            error=message,
+        )
+
     def _send_session(self, session: ReportSession) -> SendOutcome:
         if session.terminal_error:
             return SendOutcome(
@@ -835,7 +1016,7 @@ class RemoteReporter:
                 session.ingest()
         self._maybe_heartbeat(time.monotonic())
 
-        pending = self.pending_count()
+        pending = self.total_pending_count()
         if not allow_send or not pending:
             return SendOutcome(pending=pending)
         now = time.monotonic()
@@ -863,6 +1044,29 @@ class RemoteReporter:
                 last_error = outcome.error
                 retry_after = outcome.retry_after_s
                 break
+            if time.monotonic() >= self._evidence_next_send_at:
+                evidence_outcome = self._send_evidence_session(session)
+                total_sent += evidence_outcome.sent
+                if evidence_outcome.error:
+                    evidence_delay = (
+                        evidence_outcome.retry_after_s
+                        if evidence_outcome.retry_after_s is not None
+                        else self._backoff_steps[
+                            min(
+                                self._evidence_backoff_index,
+                                len(self._backoff_steps) - 1,
+                            )
+                        ]
+                    )
+                    self._evidence_backoff_index = min(
+                        self._evidence_backoff_index + 1,
+                        len(self._backoff_steps) - 1,
+                    )
+                    self._evidence_next_send_at = time.monotonic() + evidence_delay
+                    self.notify(f"状态截图暂未上传：{evidence_outcome.error}")
+                elif evidence_outcome.sent:
+                    self._evidence_backoff_index = 0
+                    self._evidence_next_send_at = 0.0
 
         if last_error:
             delay = (
@@ -881,7 +1085,7 @@ class RemoteReporter:
             self._next_send_at = 0.0
         return SendOutcome(
             sent=total_sent,
-            pending=self.pending_count(),
+            pending=self.total_pending_count(),
             retry_after_s=retry_after,
             terminal=terminal,
             error=last_error,
@@ -889,6 +1093,14 @@ class RemoteReporter:
 
     def pending_count(self) -> int:
         return sum(session.pending_count() for session in self._sessions.values())
+
+    def evidence_pending_count(self) -> int:
+        return sum(
+            session.evidence_pending_count() for session in self._sessions.values()
+        )
+
+    def total_pending_count(self) -> int:
+        return self.pending_count() + self.evidence_pending_count()
 
     def _run(self) -> None:
         while not self._stop.is_set():
@@ -927,7 +1139,7 @@ class RemoteReporter:
         thread = self._thread
         if thread is None:
             self.process_once(allow_send=False)
-            return self.pending_count()
+            return self.total_pending_count()
         self._flush_deadline = time.monotonic() + max(0.0, flush_timeout_s)
         self._stop.set()
         self._wake.set()
@@ -935,4 +1147,4 @@ class RemoteReporter:
         if thread.is_alive():
             raise RuntimeError("远程上报线程未在超时内退出")
         self._thread = None
-        return self.pending_count()
+        return self.total_pending_count()

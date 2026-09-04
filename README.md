@@ -2,9 +2,30 @@
 
 一个同时包含浏览器流程实验、Windows Apex 自动运行器和远程账号托管上报的项目。
 
+## Windows 快速部署
+
+新机器只需要下载根目录的 `install.ps1`。如果已经从控制台下载了
+`account-cycle.private.json`，把两个文件放在同一目录，运行：
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File .\install.ps1
+```
+
+脚本会自动从国内镜像下载 PortableGit 和 Python、拉取项目、创建虚拟环境、安装依赖，
+并把同目录的 Runner 配置放到正确位置。不需要预先安装 Git 或 Python。仓库镜像可直接传入：
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File .\install.ps1 -RepoUrl "<仓库镜像地址>"
+```
+
+安装到默认目录后，双击
+`%LOCALAPPDATA%\ApexController\apex-controller-lab\windows\account-cycle.cmd` 即可运行。
+以后双击 `windows\update.cmd` 更新；它会自动使用安装脚本下载的 PortableGit。
+
 ## GitHub 与 Windows 更新
 
-私有仓库通过 SSH 克隆：
+一键安装默认通过 HTTPS 克隆私有仓库，Git 会在第一次访问时打开 GitHub 登录。已经配置
+SSH 的机器也可以继续使用：
 
 ```bash
 git clone git@github.com:flyingPokonyan/apex-controller-lab.git
@@ -22,14 +43,14 @@ Windows 第一次克隆后，进入 `windows` 目录运行 `setup.ps1`。以后�
 
 ### 1. 每个人、每台机器都创建自己的 Runner
 
-使用者需要有这个 GitHub 私有仓库的 SSH 访问权限，以及一个可登录
+使用者需要有这个 GitHub 私有仓库的访问权限，以及一个可登录
 [ApexForge 控制台](https://apex.pokonyan.com/apex) 的账号。登录后进入
 **Apex → Runner**：
 
 1. 点击“创建设备”；
 2. 输入能区分机器的名称，例如 `上海-测试机-01`；
 3. 浏览器会自动下载 `account-cycle.private.json`；
-4. 把它放到仓库的 `windows\account-cycle.private.json`。
+4. 把它和 `install.ps1` 放在一起，安装脚本会自动放到项目中。
 
 一台 Windows 机器对应一个 Runner，不要让多台机器共用同一份配置。不同使用者也不要
 互相传配置文件；Runner、账号池和运行记录都归属于创建它的 ApexForge 用户。
@@ -52,25 +73,19 @@ Windows 第一次克隆后，进入 `windows` 目录运行 `setup.ps1`。以后�
 不要提交到 Git、发到聊天、截图或放进普通日志。文件丢失后，推荐在控制台新建 Runner，
 确认新机器可用后再撤销旧 Runner。
 
-### 2. 克隆并安装 Windows 环境
+### 2. 一键安装 Windows 环境
 
-只有三个前置会导致硬失败，其余都可以边跑边调：
+只有两个前置会导致硬失败，其余都可以边跑边调：
 
-- **Python 3.10 或更高**（代码使用 `zip(strict=)`）。`setup.ps1` 直接调用 `py -3 -m venv`，
-  版本不对会在这一步失败。
 - **EA App 已安装并处于打开状态、窗口可见**。Runner 只查找已存在的 `eadesktop.exe`
   窗口，不会替你启动 EA。当前是否已登录无所谓：托管流程发现账号与租约不符时会自己登出重登。
 - **1920×1080、100% 缩放、中文、全屏、主显示器**。Apex 画面会在识别入口归一化到现有的 2560×1440 参考画布；不要开启 NVIDIA DSR。
 
-在 PowerShell 中执行：
+把 `install.ps1` 和刚下载的 `account-cycle.private.json` 放在一起，在 PowerShell 中执行：
 
 ```powershell
-git clone git@github.com:flyingPokonyan/apex-controller-lab.git
-cd apex-controller-lab\windows
-powershell -NoProfile -ExecutionPolicy Bypass -File .\setup.ps1
+powershell -NoProfile -ExecutionPolicy Bypass -File .\install.ps1
 ```
-
-然后把上一步下载的 `account-cycle.private.json` 放进当前 `windows` 目录。
 
 ### 3. 第一次运行
 
@@ -87,7 +102,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\setup.ps1
 | --- | --- | --- |
 | `account-cycle-once.cmd` | 领取一个账号并完整运行一轮，然后退出 | 平时就用它 |
 | `account-cycle.cmd` | 一个账号收口后继续领取下一个账号 | 单账号跑通后，需要连续挂机时 |
-| `account-cycle-resume.cmd` | 清除本地暂停后再运行一轮 | 上一轮结果是 `PAUSED`，且暂停原因已确认解决 |
+| `account-cycle-resume.cmd` | 清除其他人工暂停后再运行一轮 | 普通崩溃和旧租约会自动收口，不需要运行它 |
 
 出问题时再用这些定位，它们都不会进入循环：
 

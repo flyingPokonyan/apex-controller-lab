@@ -58,6 +58,17 @@ LIVE_READINGS: dict[str, dict[str, tuple[str, float]]] = {
     "CONTINUE": {
         "titleContinue": ("继续", 1.000),
     },
+    "CHALLENGE_WELCOME": {
+        "challengePanelTitle": ("欢迎挑战", 0.999),
+        "lobbyPrimaryButton": ("准备", 1.000),
+        "lobbyModeName": ("未上榜", 0.999),
+    },
+    "CHALLENGE_RANKED_ROAD": {
+        "challengePanelTitle": ("排位之路", 0.999),
+        "challengePanelTasks": ("撑过 30 次安全区缩小 14/30", 0.998),
+        "lobbyPrimaryButton": ("准备", 1.000),
+        "lobbyModeName": ("未上榜", 0.999),
+    },
     "DROPSHIP_FOLLOWING": {
         "dropshipPrompt": ("LCTRL单独发射", 0.913),
     },

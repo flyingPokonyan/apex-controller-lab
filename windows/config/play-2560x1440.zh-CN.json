@@ -30,6 +30,16 @@
     "stableSamples": 2,
     "maxAttempts": 3
   },
+  "rankedRoadProgress": {
+    "_note": "托管账号每次进入大厅只检查一次：点击右下排位之路卡片；若先到欢迎挑战就向右切一页；读取「撑过 30 次安全区缩小」的 x/30。有限重试后仍读不到会留事件并继续游玩，不会卡在活动页。",
+    "enabled": true,
+    "target": 30,
+    "openAction": "rankedRoadCardClick",
+    "panelStates": ["CHALLENGE_WELCOME", "CHALLENGE_RANKED_ROAD"],
+    "progressState": "CHALLENGE_RANKED_ROAD",
+    "maxOpenAttemptsPerVisit": 2,
+    "openRetryMs": 5000
+  },
   "stall": {
     "_note": "画面连续认不出多久算「卡住了」，以及卡住之后怎么办。真正的停滞长什么样有实测：20260803 04:20:32 起 75 分钟一帧没变，而且是在回到大厅之后——graceMs 两分钟管的就是这种地方。按下「准备」之后画面本来就该黑一段（排队、选传奇、读条），同一天实测 72、104、116 秒，两分钟没有余量，而这段时间里乱按 ESC 可能把队列取消掉，所以它单独给 queueGraceMs 七分钟。recoverWindowMs 是每一轮允许处置的时长，retryMs 是两轮之间的等待——处置不成就退回普通未知画面，谁也不许再点。giveUpMs 之后结束会话：半小时没变的画面不会自己变好，而心跳继续报 RUNNING 只会让人以为还在跑。",
     "enabled": true,
@@ -52,9 +62,9 @@
     "probeMaxPerRound": 5
   },
   "pageProbe": {
-    "_note": "被 fullscreen-esc-back 一律 ESC 掉的那族全屏页，关掉之前先把整页文字连坐标记一条 PAGE_TEXT。这族页面里有排位之路——20260730-215512 的证据帧 035 就是它——上面写着「经历缩圈 x/30」这类任务计数。Runner 会额外提取 RING_PROGRESS，并只上报增长后的计数。每次重新进入页面可读取一次；64 次预算覆盖长时间托管，又避免异常页面无限 OCR。",
+    "_note": "已知全屏页在关闭前把整页文字连坐标记一条 PAGE_TEXT；排位之路正常走窄区域 OCR，这里的同名状态只作为失败兜底。按真实文案「撑过 30 次安全区缩小」提取 RING_PROGRESS，每次成功复核都会上报。",
     "enabled": true,
-    "states": ["FULLSCREEN_ESC_BACK", "FULLSCREEN_HOLD_CONFIRM"],
+    "states": ["FULLSCREEN_ESC_BACK", "FULLSCREEN_HOLD_CONFIRM", "CHALLENGE_RANKED_ROAD"],
     "maxPerSession": 64
   },
   "overlayOcr": {

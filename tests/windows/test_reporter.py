@@ -94,6 +94,50 @@ class FixedResponseTransport:
         return self.status, response, self.headers
 
 
+class EvidenceAwareTransport:
+    def __init__(self, *, evidence_status: int = 200) -> None:
+        self.urls: list[str] = []
+        self.requests: list[dict[str, Any]] = []
+        self.evidence_status = evidence_status
+
+    def send(self, url, token, payload, timeout_s):
+        self.urls.append(url)
+        self.requests.append(payload)
+        if "events" in payload:
+            return (
+                200,
+                {
+                    "schemaVersion": 1,
+                    "accountId": payload["accountId"],
+                    "deviceId": payload["deviceId"],
+                    "runId": payload["runId"],
+                    "acceptedThrough": payload["events"][-1]["seq"],
+                    "serverTime": "2026-07-31T12:00:01.000+08:00",
+                },
+                {},
+            )
+        if self.evidence_status != 200:
+            return (
+                self.evidence_status,
+                {"error": {"message": "evidence unavailable"}},
+                {},
+            )
+        return (
+            200,
+            {
+                "schemaVersion": 1,
+                "accountId": payload["accountId"],
+                "deviceId": payload["deviceId"],
+                "runId": payload["runId"],
+                "sourceSequence": payload["sourceSequence"],
+                "evidenceId": "evi_1",
+                "url": "https://images.example/evi_1.jpg",
+                "serverTime": "2026-07-31T12:00:01.000+08:00",
+            },
+            {},
+        )
+
+
 class RejectOldAccountTransport(FakeTransport):
     def send(self, url, token, payload, timeout_s):
         if payload["accountId"] == "acct_old":
@@ -291,6 +335,122 @@ class ReporterTest(unittest.TestCase):
             self.assertNotIn(
                 "private-token", (run_dir / "report-outbox.jsonl").read_text()
             )
+
+    def test_uploads_compact_evidence_after_report_and_removes_upload_copy(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            run_dir = write_run(
+                root,
+                "run_evidence",
+                account_id="acct_current",
+                events=[
+                    ("RUN_STARTED", {"mode": "play"}),
+                    (
+                        "EVIDENCE_SAVED",
+                        {
+                            "stage": "live",
+                            "category": "live",
+                            "path": "evidence/0001-live.jpg",
+                            "width": 960,
+                            "height": 540,
+                        },
+                    ),
+                ],
+            )
+            evidence_dir = run_dir / "evidence"
+            evidence_dir.mkdir()
+            image_path = evidence_dir / "0001-live.jpg"
+            image_path.write_bytes(b"\xff\xd8\xffsmall-jpeg\xff\xd9")
+            transport = EvidenceAwareTransport()
+            reporter = RemoteReporter(
+                settings(),
+                root,
+                run_dir,
+                transport=transport,
+                heartbeat_interval_s=9999,
+            )
+
+            outcome = reporter.process_once()
+
+            self.assertEqual(outcome.pending, 0)
+            self.assertEqual(
+                transport.urls,
+                [
+                    "https://runner.example/reports",
+                    "https://runner.example/evidence",
+                ],
+            )
+            evidence_request = transport.requests[1]
+            self.assertEqual(evidence_request["sourceSequence"], 2)
+            self.assertEqual(evidence_request["category"], "live")
+            self.assertFalse(image_path.exists())
+            state = json.loads((run_dir / "report-state.json").read_text())
+            self.assertEqual(state["evidenceSourceThrough"], 2)
+
+    def test_evidence_failure_does_not_back_off_normal_reports(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            run_dir = write_run(
+                root,
+                "run_evidence_retry",
+                account_id="acct_current",
+                events=[
+                    ("RUN_STARTED", {"mode": "play"}),
+                    (
+                        "EVIDENCE_SAVED",
+                        {
+                            "stage": "live",
+                            "category": "live",
+                            "path": "evidence/0001-live.jpg",
+                            "width": 960,
+                            "height": 540,
+                        },
+                    ),
+                ],
+            )
+            evidence_dir = run_dir / "evidence"
+            evidence_dir.mkdir()
+            (evidence_dir / "0001-live.jpg").write_bytes(
+                b"\xff\xd8\xffsmall-jpeg\xff\xd9"
+            )
+            transport = EvidenceAwareTransport(evidence_status=503)
+            reporter = RemoteReporter(
+                settings(),
+                root,
+                run_dir,
+                transport=transport,
+                heartbeat_interval_s=9999,
+            )
+
+            first = reporter.process_once()
+            with (run_dir / "events.jsonl").open("a", encoding="utf-8") as handle:
+                handle.write(
+                    json.dumps(
+                        {
+                            "schemaVersion": 1,
+                            "runId": "run_evidence_retry",
+                            "seq": 3,
+                            "occurredAt": "2026-07-31T12:00:03.000+08:00",
+                            "elapsedMs": 300,
+                            "type": "STATE_DETECTED",
+                            "payload": {
+                                "state": "IN_MATCH_ALIVE",
+                                "previousState": None,
+                                "source": "gameStates",
+                                "confidence": 0.99,
+                                "observationVersion": 1,
+                            },
+                        }
+                    )
+                    + "\n"
+                )
+            second = reporter.process_once()
+
+            self.assertIsNone(first.error)
+            self.assertGreater(first.pending, 0)
+            self.assertGreater(second.sent, 0)
+            self.assertEqual(transport.urls[-1], "https://runner.example/reports")
+            self.assertEqual(reporter._next_send_at, 0.0)
 
     def test_managed_run_binds_the_lease_fence_to_each_report_batch(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

@@ -40,7 +40,7 @@ from .play_session import (
     ReportDrainHandle,
     SessionIdentity,
 )
-from .progression_policy import TargetLevelPolicy
+from .progression_policy import TargetLevelAndRingPolicy
 from .runner_identity import IdentityVerification
 
 
@@ -65,7 +65,7 @@ class ManagedPlaySession(Protocol):
     def run(
         self,
         identity: SessionIdentity,
-        progression_policy: TargetLevelPolicy,
+        progression_policy: TargetLevelAndRingPolicy,
         capture_source: object,
         *,
         lease_is_current: Callable[[], bool],
@@ -1037,7 +1037,7 @@ class AccountOrchestrator:
             self._update_checkpoint(workflow_phase=WorkflowPhase.APEX_PLAYING)
             result = self.play_session.run(
                 self._session_identity(lease, identity_fact),
-                TargetLevelPolicy(lease.target_level),
+                TargetLevelAndRingPolicy(lease.target_level, target_ring=30),
                 self.capture_source,
                 lease_is_current=keeper.is_current,
                 on_run_started=self._record_run_started,
