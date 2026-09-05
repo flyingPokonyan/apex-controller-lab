@@ -232,6 +232,7 @@ class PlaySessionRunner:
         duration_s: float | None = None,
         countdown: int = 0,
         lease_is_current: Callable[[], bool] = lambda: True,
+        lease_diagnostics: Callable[[], dict[str, object]] | None = None,
         on_run_started: Callable[[str], None] = lambda _: None,
     ) -> PlaySessionResult:
         session_settings = self._session_settings(identity)
@@ -344,11 +345,18 @@ class PlaySessionRunner:
                 progression_policy=progression_policy,
                 ranked_road_progress_enabled=False,
                 lease_is_current=lease_is_current,
+                lease_diagnostics=lease_diagnostics,
                 notify=self.notify,
             )
             outcome = pilot.run(duration_s=duration_s)
             if outcome == "TARGET_REACHED":
                 finish_status = "TARGET_REACHED"
+            elif outcome == "LEASE_UNRECOVERED":
+                error_code = "LEASE_UNRECOVERED"
+                error_message = "租约续租未恢复，已停止游玩并进入清理流程"
+                finish_detail["reason"] = error_message
+                finish_detail["errorCode"] = error_code
+                exit_code = 1
             elif outcome == "STALLED":
                 # Not FAILED: nothing is wrong with the account, the runner
                 # just could not get the screen to move. The lease is released

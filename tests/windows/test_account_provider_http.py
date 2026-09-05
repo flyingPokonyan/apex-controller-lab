@@ -80,6 +80,14 @@ class FakeTransport:
 
 
 class HttpAccountProviderTest(unittest.TestCase):
+    def test_expired_recovery_is_an_explicit_opt_in_on_the_wire(self) -> None:
+        transport = FakeTransport(response(lease_payload()), response(lease_payload()))
+        provider = self.provider(transport)
+        provider.renew("lease_1", 7, "renew_1", "APEX_PLAYING", "run_1")
+        provider.renew("lease_1", 7, "recover_1", "APEX_PLAYING", "run_1", recover_expired=True)
+        self.assertNotIn("recoverExpired", transport.calls[0]["json"])
+        self.assertIs(transport.calls[1]["json"]["recoverExpired"], True)
+
     def provider(self, transport: FakeTransport) -> HttpAccountProvider:
         return HttpAccountProvider(
             "https://runner.example/v1/runner/account-leases",
@@ -102,6 +110,20 @@ class HttpAccountProviderTest(unittest.TestCase):
                 "provider-secret-token",
                 client_version="0.5.0",
             )
+
+    def test_close_retry_preserves_the_persisted_verification_time(self) -> None:
+        transport = FakeTransport(TimeoutError("offline"), response(lease_payload("RELEASED")))
+        cleanup = CleanupEvidence(True, True, True, verified_at=NOW)
+        for attempt in range(2):
+            # The second call also represents a reconstructed provider after restart.
+            provider = self.provider(transport)
+            if attempt == 0:
+                with self.assertRaises(LeaseProviderError):
+                    provider.close("lease_1", 7, "close_1", "RELEASED", "run_1", None, "LEASE_UNRECOVERED", cleanup)
+            else:
+                provider.close("lease_1", 7, "close_1", "RELEASED", "run_1", None, "LEASE_UNRECOVERED", cleanup)
+        self.assertEqual(transport.calls[0]["json"], transport.calls[1]["json"])
+        self.assertEqual(transport.calls[0]["json"]["cleanup"]["verifiedAt"], provider._rfc3339(NOW))
 
     def test_claim_uses_contract_and_keeps_token_out_of_repr(self) -> None:
         transport = FakeTransport(response(lease_payload()))

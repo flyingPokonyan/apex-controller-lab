@@ -24,6 +24,11 @@ REPORTABLE_INCIDENTS = {
     "FOREGROUND_PAUSED": "FOREGROUND_LOST",
     "DECISION_PAUSED": "ACTION_PAUSED",
     "REPORTER_ERROR": "REPORTER_ERROR",
+    "LEASE_UNCERTAIN": "LEASE_UNCERTAIN",
+    "LEASE_RENEW_FAILED": "LEASE_RENEW_FAILED",
+    "LEASE_RENEW_RECOVERED": "LEASE_RENEW_RECOVERED",
+    "LEASE_RECOVERED": "LEASE_RECOVERED",
+    "LEASE_UNRECOVERED": "LEASE_UNRECOVERED",
     # A stall is invisible from the remote side without these: heartbeats keep
     # arriving with `observedState: null` and the run looks alive, which is how
     # 20260803-083835 spent 75 minutes stuck without anything to point at.
@@ -37,6 +42,7 @@ ERROR_INCIDENTS = frozenset(
         "CAPTURE_ERROR",
         "RESOLUTION_MISMATCH",
         "REPORTER_ERROR",
+        "LEASE_UNRECOVERED",
         "STALL_UNRECOVERED",
     }
 )

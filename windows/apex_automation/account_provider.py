@@ -197,6 +197,7 @@ class CleanupEvidence:
     input_released: bool
     apex_exited: bool
     ea_signed_out: bool
+    verified_at: datetime | None = None
 
     @property
     def complete(self) -> bool:
@@ -238,6 +239,8 @@ class AccountProvider(Protocol):
         operation_id: str,
         phase: str,
         run_id: str | None,
+        *,
+        recover_expired: bool = False,
     ) -> LeaseStatus: ...
 
     def request_otp(
@@ -777,6 +780,8 @@ class HttpAccountProvider:
         operation_id: str,
         phase: str,
         run_id: str | None,
+        *,
+        recover_expired: bool = False,
     ) -> LeaseStatus:
         request: dict[str, object] = {
             "schemaVersion": 1,
@@ -785,6 +790,8 @@ class HttpAccountProvider:
         }
         if run_id is not None:
             request["runId"] = run_id
+        if recover_expired:
+            request["recoverExpired"] = True
         payload, response = self._request(
             "POST",
             self._lease_suffix(lease_id, "renew"),
@@ -882,7 +889,7 @@ class HttpAccountProvider:
             "cleanup": {
                 "apexProcessesStopped": cleanup.apex_exited,
                 "eaSignedOut": cleanup.ea_signed_out,
-                "verifiedAt": self._rfc3339(datetime.now(timezone.utc)),
+                "verifiedAt": self._rfc3339(cleanup.verified_at or datetime.now(timezone.utc)),
             },
             "reasonCode": reason_code,
         }
@@ -1072,6 +1079,8 @@ class FakeAccountProvider:
         operation_id: str,
         phase: str,
         run_id: str | None,
+        *,
+        recover_expired: bool = False,
     ) -> LeaseStatus:
         self.calls.append(
             ("renew", (lease_id, lease_fence, operation_id, phase, run_id))
@@ -1094,7 +1103,7 @@ class FakeAccountProvider:
         return self._idempotent(
             "renew",
             operation_id,
-            (lease_id, lease_fence, phase, run_id),
+            (lease_id, lease_fence, phase, run_id, recover_expired),
             renew_lease,
         )  # type: ignore[return-value]
 

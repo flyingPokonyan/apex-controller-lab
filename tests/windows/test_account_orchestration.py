@@ -7,6 +7,8 @@ from pathlib import Path
 import sys
 import tempfile
 import unittest
+import ssl
+from urllib.error import URLError
 
 
 REPOSITORY_ROOT = Path(__file__).resolve().parents[2]
@@ -41,6 +43,7 @@ from apex_automation.lease_keeper import (
     LeaseKeeper,
     LeaseKeeperSnapshot,
     LeaseKeeperState,
+    lease_error_detail,
 )
 from apex_automation.orchestration_state import (
     AtomicCheckpointStore,
@@ -202,6 +205,126 @@ class CheckpointStoreTest(unittest.TestCase):
 
 
 class LeaseKeeperTest(unittest.TestCase):
+    def test_long_outage_and_lost_ack_recover_with_new_key_and_frozen_retry_body(self) -> None:
+        now = datetime.now(timezone.utc)
+        lease = replace(FakeAccountProvider.lease("acct_1", now=now), expires_at=now + timedelta(seconds=120))
+        calls = []
+
+        class Provider(FakeAccountProvider):
+            def renew(self, *args, **kwargs):
+                calls.append((args, kwargs))
+                if len(calls) in {1, 3}:
+                    raise OSError("offline")
+                return LeaseStatus(
+                    lease_id=lease.lease_id, lease_fence=lease.lease_fence, account_id=lease.account_id,
+                    state=LeaseState.EXPIRED_UNCONFIRMED if len(calls) == 2 else LeaseState.ACTIVE,
+                    expires_at=lease.expires_at if len(calls) == 2 else now + timedelta(seconds=120),
+                    renew_after=now + timedelta(seconds=30),
+                )
+
+        keys = iter(["renew_1", "recover_1"])
+        keeper = LeaseKeeper(Provider([lease]), lease, phase=lambda: "APEX_PLAYING", run_id=lambda: "run_1",
+                             now=lambda: now, operation_id_factory=lambda: next(keys))
+        keeper.renew_once()
+        self.assertTrue(keeper.is_current())
+        now += timedelta(minutes=10)
+        self.assertFalse(keeper.is_current())
+        replay = keeper.renew_once()
+        self.assertEqual(replay.state, LeaseKeeperState.UNCERTAIN)
+        self.assertTrue(replay.retryable)
+        self.assertFalse(keeper.is_current())
+        self.assertEqual(calls[0], calls[1])
+        keeper.renew_once()
+        self.assertFalse(keeper.is_current())
+        keeper.renew_once()
+        self.assertTrue(keeper.is_current())
+        self.assertEqual(calls[2], calls[3])
+        self.assertEqual(calls[2][0][2], "recover_1")
+        self.assertEqual(calls[2][1], {"recover_expired": True})
+        self.assertEqual(keeper.diagnostics()["failureCount"], 0)
+
+    def test_server_expiry_overrides_remaining_local_time_before_explicit_recovery(self) -> None:
+        lease = FakeAccountProvider.lease("acct_1")
+        calls = []
+
+        class Provider(FakeAccountProvider):
+            def renew(self, *args, **kwargs):
+                calls.append((args, kwargs))
+                if len(calls) == 1:
+                    raise LeaseProviderError("expired", code="LEASE_EXPIRED", retryable=True)
+                if len(calls) == 2:
+                    raise OSError("recovery request lost")
+                return super().renew(*args, **kwargs)
+
+        keys = iter(["renew_1", "recover_1"])
+        keeper = LeaseKeeper(Provider([lease]), lease, phase=lambda: "APEX_PLAYING", run_id=lambda: "run_1",
+                             operation_id_factory=lambda: next(keys))
+        keeper.renew_once()
+        self.assertFalse(keeper.is_current())
+        keeper.renew_once()
+        # A later transport error cannot erase the server's expiry verdict,
+        # even if the client's clock still shows time on the original lease.
+        self.assertFalse(keeper.is_current())
+        keeper.renew_once()
+        self.assertTrue(keeper.is_current())
+        self.assertEqual(calls[1][0][2], "recover_1")
+        self.assertEqual(calls[1][1], {"recover_expired": True})
+        self.assertEqual(calls[1], calls[2])
+
+    def test_recovery_response_with_wrong_account_never_authorizes_input(self) -> None:
+        lease = FakeAccountProvider.lease("acct_1")
+
+        class Provider(FakeAccountProvider):
+            def renew(self, *args, **kwargs):
+                return replace(super().renew(*args, **kwargs), account_id="acct_2")
+
+        keeper = LeaseKeeper(Provider([lease]), lease, phase=lambda: "APEX_PLAYING", run_id=lambda: "run_1")
+        self.assertEqual(keeper.renew_once().state, LeaseKeeperState.STALE)
+        self.assertFalse(keeper.is_current())
+
+    def test_transient_error_keeps_only_the_already_granted_time(self) -> None:
+        now = datetime.now(timezone.utc)
+        lease = replace(FakeAccountProvider.lease("acct_1", now=now), expires_at=now + timedelta(seconds=120))
+
+        class OfflineProvider(FakeAccountProvider):
+            def renew(self, *args, **kwargs):
+                raise LeaseProviderError("offline", code="PROVIDER_UNREACHABLE", retryable=True)
+
+        keeper = LeaseKeeper(OfflineProvider([lease]), lease, phase=lambda: "APEX_PLAYING", run_id=lambda: "run_1", now=lambda: now)
+        keeper.renew_once()
+        self.assertTrue(keeper.is_current())
+        now += timedelta(seconds=119)
+        self.assertTrue(keeper.is_current())
+        now += timedelta(seconds=1)
+        self.assertFalse(keeper.is_current())
+        self.assertEqual(keeper.snapshot().expires_at, lease.expires_at)
+
+    def test_nonretryable_rejection_blocks_input_before_expiry(self) -> None:
+        lease = FakeAccountProvider.lease("acct_1")
+
+        class RejectedProvider(FakeAccountProvider):
+            def renew(self, *args, **kwargs):
+                raise LeaseProviderError("revoked", code="HTTP_403")
+
+        keeper = LeaseKeeper(RejectedProvider([lease]), lease, phase=lambda: "APEX_PLAYING", run_id=lambda: None)
+        keeper.renew_once()
+        self.assertFalse(keeper.is_current())
+        self.assertIn("HTTP_403", keeper.diagnostics()["reason"])
+
+    def test_tls_diagnostics_keep_error_type_without_url_or_token(self) -> None:
+        secret = "https://user:secret@example.test/?token=private-value"
+        tls_error = ssl.SSLEOFError(8, secret)
+        tls_error.reason = "UNEXPECTED_EOF_WHILE_READING"
+        transport_error = URLError(tls_error)
+        error = LeaseProviderError(secret, code="PROVIDER_UNREACHABLE", retryable=True)
+        error.__cause__ = transport_error
+        detail = lease_error_detail(error)
+        self.assertIn("SSLEOFError", detail)
+        self.assertIn("UNEXPECTED_EOF_WHILE_READING", detail)
+        self.assertIn("PROVIDER_UNREACHABLE", detail)
+        for value in ("https", "user", "secret", "example.test", "private-value"):
+            self.assertNotIn(value, detail)
+
     def test_uncertain_retry_reuses_the_same_operation_id(self) -> None:
         lease = FakeAccountProvider.lease("acct_1")
 
@@ -232,20 +355,32 @@ class LeaseKeeperTest(unittest.TestCase):
                 )
 
         provider = FlakyProvider()
+        phase = "APEX_PLAYING"
+        run_id = "run_1"
+        requests = []
+        renew = provider.renew
+
+        def capture_renew(*args):
+            requests.append(args)
+            return renew(*args)
+
+        provider.renew = capture_renew
         keeper = LeaseKeeper(
             provider,
             lease,
-            phase=lambda: "APEX_PLAYING",
-            run_id=lambda: "run_1",
+            phase=lambda: phase,
+            run_id=lambda: run_id,
             operation_id_factory=lambda: "renew_1",
         )
 
         first = keeper.renew_once()
+        phase, run_id = "APEX_STOPPING", "run_2"
         second = keeper.renew_once()
 
         self.assertEqual(first.state, LeaseKeeperState.UNCERTAIN)
         self.assertEqual(second.state, LeaseKeeperState.CURRENT)
         self.assertEqual(provider.operation_ids, ["renew_1", "renew_1"])
+        self.assertEqual(requests[0], requests[1])
         keeper.stop()
 
     def test_stale_fence_never_returns_to_current(self) -> None:
@@ -263,6 +398,9 @@ class LeaseKeeperTest(unittest.TestCase):
         )
 
         snapshot = keeper.renew_once()
+
+        keeper.provider = FakeAccountProvider([lease])
+        self.assertEqual(keeper.renew_once().state, LeaseKeeperState.STALE)
 
         self.assertEqual(snapshot.state, LeaseKeeperState.STALE)
         self.assertFalse(keeper.is_current())
@@ -350,6 +488,9 @@ class ScriptedLeaseKeeper:
     def is_current(self) -> bool:
         return self.state is LeaseKeeperState.CURRENT
 
+    def diagnostics(self) -> dict[str, object]:
+        return {"state": self.state.value, "reason": self.error_code}
+
     def start(self) -> None:
         return None
 
@@ -373,6 +514,7 @@ class FakeManagedSession:
         capture_source,
         *,
         lease_is_current,
+        lease_diagnostics,
         on_run_started,
     ) -> PlaySessionResult:
         self.log.append("play.start")
@@ -402,6 +544,75 @@ class FakeManagedSession:
 
 
 class AccountOrchestratorTest(unittest.TestCase):
+    def test_expired_cleanup_retries_after_network_loss_and_restart_before_claiming(self) -> None:
+        for response_lost_after_commit in (False, True):
+            with self.subTest(after_commit=response_lost_after_commit), tempfile.TemporaryDirectory() as directory:
+                lease = FakeAccountProvider.lease("acct_1")
+                close_requests = []
+
+                class InterruptedCloseProvider(FakeAccountProvider):
+                    failures = 1
+
+                    def close(self, *args, **kwargs):
+                        close_requests.append(args)
+                        if self.failures:
+                            self.failures -= 1
+                            if response_lost_after_commit:
+                                super().close(*args, **kwargs)
+                            raise LeaseProviderError("offline", code="PROVIDER_UNREACHABLE", retryable=True)
+                        return super().close(*args, **kwargs)
+
+                provider = InterruptedCloseProvider([lease])
+                provider.claim("claim_1", "LEVEL_TO_TARGET")
+                provider._statuses[lease.lease_id] = replace(
+                    provider.status(lease.lease_id, lease.lease_fence),
+                    state=LeaseState.EXPIRED_UNCONFIRMED,
+                )
+                store = AtomicCheckpointStore(Path(directory) / "account-cycle-status.json")
+                store.save(OrchestrationCheckpoint(
+                    device_id="device_1", workflow_phase=WorkflowPhase.APEX_STOPPING,
+                    lease_id=lease.lease_id, lease_fence=lease.lease_fence,
+                    account_id=lease.account_id, target_level=20,
+                    active_play_run_id="run_1", result_status="PLAYED",
+                    result_error_code="LEASE_UNRECOVERED",
+                    report_evidence={"runId": "run_1", "runFinishedSeq": 12},
+                ))
+                log = []
+                drain = FakeDrain(accepted_through=0)
+
+                def flush_reports(delay):
+                    self.assertEqual(len([c for c in provider.calls if c[0] == "claim"]), 1)
+                    drain.accepted_through = 12
+
+                def build(operation_id):
+                    return AccountOrchestrator(
+                        provider=provider, ea_driver=FakeEaDriver(log, "ea_1"),
+                        play_session=object(), checkpoint_store=store,
+                        device_id="device_1", capture_source=object(),
+                        recover_report_drain=lambda _: drain,
+                        operation_id_factory=lambda: operation_id,
+                        sleep=flush_reports, notify=lambda _: None,
+                    )
+
+                first = build("close_before_restart").run_once()
+                self.assertEqual(first.outcome, AccountCycleOutcome.PAUSED)
+                self.assertEqual(first.error_code, "PROVIDER_UNREACHABLE")
+                self.assertEqual(store.load().pending_operation, PendingOperation.CLOSE)
+                verified_at = store.load().cleanup_verified_at
+                self.assertIsNotNone(verified_at)
+                second = build("close_after_restart").run_once()
+                self.assertEqual(second.outcome, AccountCycleOutcome.COMPLETED)
+                self.assertEqual(second.error_code, "LEASE_UNRECOVERED")
+                self.assertFalse(store.load().has_lease)
+                self.assertTrue(drain.stopped)
+                self.assertEqual(log, ["apex.stop", "ea.sign_out"])
+                if response_lost_after_commit:
+                    self.assertEqual(len(close_requests), 1)
+                else:
+                    self.assertEqual(len(close_requests), 2)
+                    self.assertEqual(close_requests[0], close_requests[1])
+                self.assertEqual(len([c for c in provider.calls if c[0] == "claim"]), 1)
+
     def test_restart_recovers_server_lease_missing_from_local_checkpoint(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             lease = FakeAccountProvider.lease("acct_1")
@@ -571,6 +782,7 @@ class AccountOrchestratorTest(unittest.TestCase):
                     capture_source,
                     *,
                     lease_is_current,
+                    lease_diagnostics,
                     on_run_started,
                 ):
                     self.account_id = identity.account_id
@@ -1256,6 +1468,12 @@ class AccountOrchestratorTest(unittest.TestCase):
             ("FAILED", "PLAY_SESSION_FAILED", "FAILED", AccountCycleOutcome.COMPLETED),
             ("STOPPED", "OPERATOR_STOPPED", "RELEASED", AccountCycleOutcome.STOPPED),
             ("PLAYED", None, "RELEASED", AccountCycleOutcome.PAUSED),
+            (
+                "PLAYED",
+                "LEASE_UNRECOVERED",
+                "RELEASED",
+                AccountCycleOutcome.COMPLETED,
+            ),
             (
                 "PLAYED",
                 "KNOWN_STATE_STALL_UNRECOVERED",

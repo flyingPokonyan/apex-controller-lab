@@ -216,6 +216,29 @@ def settings(account_id: str = "acct_current") -> RunnerSettings:
 
 
 class ReporterTest(unittest.TestCase):
+    def test_lease_recovery_incidents_reach_forge_with_the_failure_reason(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            kinds = ["LEASE_RENEW_FAILED", "LEASE_RENEW_RECOVERED", "LEASE_UNCERTAIN", "LEASE_RECOVERED", "LEASE_UNRECOVERED"]
+            run_dir = write_run(
+                root, "lease-recovery", account_id="acct_current",
+                events=[(kind, {"reason": "SSLEOFError / UNEXPECTED_EOF_WHILE_READING" if kind == "LEASE_RENEW_FAILED" else kind}) for kind in kinds],
+            )
+            transport = FakeTransport()
+            reporter = RemoteReporter(
+                settings(), root, run_dir, transport=transport, heartbeat_interval_s=9999,
+            )
+            reporter.process_once()
+            incidents = [
+                event["payload"]
+                for request in transport.requests for event in request["events"]
+                if event["type"] == "INCIDENT"
+            ]
+            self.assertEqual([event["kind"] for event in incidents], kinds)
+            self.assertIn("UNEXPECTED_EOF_WHILE_READING", incidents[0]["message"])
+            self.assertEqual(incidents[-1]["severity"], "ERROR")
+            self.assertEqual(incidents[-1]["message"], "LEASE_UNRECOVERED")
+
     def test_stdlib_http_transport_sends_bearer_json_without_logging_token(
         self,
     ) -> None:

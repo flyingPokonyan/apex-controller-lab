@@ -1,6 +1,7 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
+from datetime import datetime, timezone
 from enum import Enum
 import threading
 import time
@@ -69,6 +70,7 @@ class ManagedPlaySession(Protocol):
         capture_source: object,
         *,
         lease_is_current: Callable[[], bool],
+        lease_diagnostics: Callable[[], dict[str, object]],
         on_run_started: Callable[[str], None],
     ) -> PlaySessionResult: ...
 
@@ -219,6 +221,7 @@ class AccountOrchestrator:
             report_evidence=None,
             result_status=None,
             result_error_code=None,
+            cleanup_verified_at=None,
             last_error_code=None,
         )
 
@@ -303,6 +306,16 @@ class AccountOrchestrator:
                     self._clear_lease_checkpoint()
                     return None
                 if status.terminal:
+                    if (
+                        checkpoint.workflow_phase in terminal_phases
+                        and checkpoint.active_play_run_id is not None
+                        and checkpoint.report_evidence is not None
+                    ):
+                        # A close response can be lost after the server commits.
+                        # Drain that run before clearing the lease and claiming.
+                        return self.provider.recover(
+                            checkpoint.lease_id or "", checkpoint.lease_fence or 0
+                        )
                     self._clear_lease_checkpoint()
                     return None
                 raise LeaseStaleError(
@@ -683,9 +696,12 @@ class AccountOrchestrator:
         cleanup = CleanupEvidence(True, True, signed_out)
         if not cleanup.complete:
             return self._pause("EA_SIGNOUT_FAILED", manual=True)
+        if self._lease_keeper is not None:
+            self._lease_keeper.stop(timeout_s=20.0)
+            self._lease_keeper = None
         self._update_checkpoint(workflow_phase=WorkflowPhase.LEASE_COMPLETING)
         with self._provider_operation_lock:
-            operation_id = self._begin_operation(PendingOperation.CLOSE)
+            operation_id, cleanup = self._begin_close_operation(cleanup)
             status = self.provider.close(
                 lease.lease_id,
                 lease.lease_fence,
@@ -709,6 +725,19 @@ class AccountOrchestrator:
             error_code=reason_code,
         )
 
+    def _begin_close_operation(self, cleanup: CleanupEvidence) -> tuple[str, CleanupEvidence]:
+        # Keep the cleanup timestamp stable with the idempotency key, including
+        # after restart. A new timestamp on retry changes the request hash.
+        if (
+            self._checkpoint.pending_operation is not PendingOperation.CLOSE
+            or self._checkpoint.cleanup_verified_at is None
+        ):
+            self._update_checkpoint(cleanup_verified_at=datetime.now(timezone.utc).isoformat())
+        operation_id = self._begin_operation(PendingOperation.CLOSE)
+        return operation_id, replace(
+            cleanup, verified_at=datetime.fromisoformat(self._checkpoint.cleanup_verified_at)
+        )
+
     def _submit_close(
         self,
         lease: AccountLease,
@@ -716,6 +745,11 @@ class AccountOrchestrator:
         evidence: CompletionEvidence | None,
         cleanup: CleanupEvidence,
     ) -> AccountCycleResult:
+        # The renewal worker must not overwrite the persisted CLOSE operation
+        # with its own pending RENEW while network recovery is in progress.
+        if self._lease_keeper is not None:
+            self._lease_keeper.stop(timeout_s=20.0)
+            self._lease_keeper = None
         self._update_checkpoint(workflow_phase=WorkflowPhase.LEASE_COMPLETING)
         if result.status == "TARGET_REACHED":
             outcome = "TARGET_REACHED"
@@ -727,7 +761,7 @@ class AccountOrchestrator:
             outcome = "RELEASED"
             reason_code = result.error_code or "SESSION_RELEASED"
         with self._provider_operation_lock:
-            operation_id = self._begin_operation(PendingOperation.CLOSE)
+            operation_id, cleanup = self._begin_close_operation(cleanup)
             status = self.provider.close(
                 lease.lease_id,
                 lease.lease_fence,
@@ -827,7 +861,14 @@ class AccountOrchestrator:
         )
         if (
             status.state is LeaseState.ACTIVE
-            or self._checkpoint.pending_operation is PendingOperation.CLOSE
+            or (
+                status.state is LeaseState.EXPIRED_UNCONFIRMED
+                and result.status != "TARGET_REACHED"
+            )
+            or (
+                not status.terminal
+                and self._checkpoint.pending_operation is PendingOperation.CLOSE
+            )
         ):
             return self._submit_close(
                 lease,
@@ -869,7 +910,10 @@ class AccountOrchestrator:
                         run_id=result.run_id,
                         error_code=result.error_code,
                     )
-                if result.status not in {"TARGET_REACHED", "FAILED"}:
+                if (
+                    result.status not in {"TARGET_REACHED", "FAILED"}
+                    and result.error_code != "LEASE_UNRECOVERED"
+                ):
                     return self._pause(
                         result.error_code or "SESSION_ENDED_WITHOUT_TARGET",
                         manual=True,
@@ -937,7 +981,7 @@ class AccountOrchestrator:
                         lease.lease_id,
                         lease.lease_fence,
                     )
-                    if not status.terminal:
+                    if status.state in {LeaseState.ACTIVE, LeaseState.COMPLETION_PENDING}:
                         self._start_lease_keeper(lease)
                     recovery = self._resume_terminal_workflow(lease)
                 else:
@@ -958,7 +1002,7 @@ class AccountOrchestrator:
                     lease.lease_id,
                     lease.lease_fence,
                 )
-                if not status.terminal:
+                if status.state in {LeaseState.ACTIVE, LeaseState.COMPLETION_PENDING}:
                     self._start_lease_keeper(lease)
                 return self._resume_terminal_workflow(lease)
             keeper = self._start_lease_keeper(lease)
@@ -1040,6 +1084,7 @@ class AccountOrchestrator:
                 TargetLevelPolicy(lease.target_level),
                 self.capture_source,
                 lease_is_current=keeper.is_current,
+                lease_diagnostics=keeper.diagnostics,
                 on_run_started=self._record_run_started,
             )
             if result.status == "STOPPED":

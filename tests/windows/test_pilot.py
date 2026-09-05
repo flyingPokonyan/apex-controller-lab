@@ -643,6 +643,191 @@ class PilotTest(unittest.TestCase):
         self.assertEqual(record["state"], "FULLSCREEN_ESC_BACK")
         self.assertEqual(self.sender.calls, [("tap", 1, 80)])
 
+    def connection_dialog(self, button: str = "继续") -> None:
+        self.enable_overlays()
+        self.screen()
+        # Run 26 live image, scaled to the runner's 2560x1440 reference canvas.
+        self.overlay_provider.readings = {
+            "titleCenter": ("已断开连接 由于你未进行操作，连接已断开。", 0.998),
+            "connectionDialogButtons": [(button, 1.0, (1237, 932, 1322, 983))],
+        }
+
+    def test_disconnect_continue_uses_the_observed_button_below_title_continue(self) -> None:
+        self.connection_dialog()
+        record = self._settle_overlay()
+        self.assertEqual(record["state"], "CONNECTION_INTERRUPTED")
+        self.assertEqual(self.sender.calls, [("click", 1279, 957)])
+
+    def test_disconnect_prefers_retry_and_stops_after_three_attempts(self) -> None:
+        self.connection_dialog("重试")
+        self.overlay_provider.readings["connectionDialogButtons"].append(
+            ("继续", 1.0, (1437, 932, 1522, 983))
+        )
+        self._settle_overlay()
+        for second in range(3, 35):
+            self.now = float(second)
+            self.pilot.step()
+        clicks = [call for call in self.sender.calls if call[0] == "click"]
+        self.assertEqual(clicks, [("click", 1279, 957)] * 3)
+        self.assertIn(("releaseAll",), self.sender.calls)
+
+    def test_connection_spinner_then_retry_is_found_on_a_later_scan(self) -> None:
+        self.connection_dialog("重试")
+        self.overlay_provider.readings.pop("connectionDialogButtons")
+        for second in (0.0, 1.5, 20.0, 40.0):
+            self.now = second
+            self.pilot.step()
+        self.assertEqual(self.sender.calls, [])
+
+        # The button appears after a long loading stretch and can move within
+        # the dialog; dispatch must use its new OCR position, not continueClick.
+        self.overlay_provider.readings["connectionDialogButtons"] = [
+            ("重试", 1.0, (1400, 950, 1480, 1000))
+        ]
+        self.now = 56.0
+        self.pilot.step()
+        self.assertEqual(self.sender.calls, [])
+        self.now = 57.0
+        record = self.pilot.step()
+        self.assertEqual(record["state"], "CONNECTION_INTERRUPTED")
+        self.assertEqual(self.sender.calls, [("click", 1440, 975)])
+
+    def test_continue_then_spinner_does_not_reuse_the_disappeared_button(self) -> None:
+        self.connection_dialog()
+        self._settle_overlay()
+        self.overlay_provider.readings.pop("connectionDialogButtons")
+        for second in (3.0, 6.0, 10.0, 22.0):
+            self.now = second
+            self.pilot.step()
+        self.assertEqual(self.sender.calls, [("click", 1279, 957)])
+
+        self.overlay_provider.readings["connectionDialogButtons"] = [
+            ("重试", 1.0, (1400, 950, 1480, 1000))
+        ]
+        self.now = 38.0
+        self.pilot.step()
+        self.now = 39.0
+        self.pilot.step()
+        self.assertEqual(self.sender.calls, [("click", 1279, 957), ("click", 1440, 975)])
+
+    def test_continue_without_connection_error_is_not_a_connection_dialog(self) -> None:
+        self.connection_dialog()
+        self.overlay_provider.readings.pop("titleCenter")
+        record = self._settle_overlay()
+        self.assertIsNone(record["state"])
+        self.assertEqual(self.sender.calls, [])
+
+    def test_connection_dialog_needs_positioned_exact_button_text(self) -> None:
+        for reading in [
+            ("继续", 1.0),
+            [("点击继续访问帮助页面", 1.0, (1000, 900, 1400, 980))],
+            [("继续", 0.5, (1237, 932, 1322, 983))],
+        ]:
+            with self.subTest(reading=reading):
+                self.connection_dialog()
+                self.overlay_provider.readings["connectionDialogButtons"] = reading
+                self._settle_overlay(first=self.now + 1)
+                self.assertEqual(self.sender.calls, [])
+
+    def test_lease_pause_is_bounded_even_without_foreground_or_progress_reading(self) -> None:
+        self.pilot.lease_is_current = lambda: False
+        self.guard.foreground = False
+        statuses = []
+        self.recorder.write_status = statuses.append
+        self.pilot.step()
+        self.now = 59.0
+        self.pilot.step()
+        self.assertIsNone(self.pilot.session_outcome)
+        self.now = 60.0
+        record = self.pilot.step()
+        self.assertEqual(record["decision"]["reason"], "LEASE_UNRECOVERED")
+        self.assertEqual(self.sender.calls, [("releaseAll",)])
+        self.assertTrue(all(s["runtimeState"] == "PAUSED" for s in statuses))
+        self.assertEqual(self.recorder.names().count("LEASE_UNCERTAIN"), 1)
+        self.assertEqual(self.recorder.names().count("LEASE_UNRECOVERED"), 1)
+        self.assertNotIn("STALL_UNRECOVERED", self.recorder.names())
+
+    def test_transient_lease_pause_recovers_and_reobserves_the_dialog(self) -> None:
+        self.connection_dialog()
+        self.pilot.lease_is_current = lambda: False
+        self.pilot.step()
+        self.now = 15.0
+        self.pilot.lease_is_current = lambda: True
+        self._settle_overlay(first=self.now)
+        self.assertEqual(self.sender.calls, [("releaseAll",), ("click", 1279, 957)])
+        self.assertIn("LEASE_RECOVERED", self.recorder.names())
+        self.assertIsNone(self.pilot.session_outcome)
+
+    def test_long_network_outage_waits_without_input_then_reobserves_new_retry_button(self) -> None:
+        self.connection_dialog()
+        self.pilot.lease_is_current = lambda: False
+        health = {"state": "UNCERTAIN", "retryable": True, "failureCount": 1, "reason": "PROVIDER_UNREACHABLE"}
+        self.pilot.lease_diagnostics = lambda: dict(health)
+        statuses = []
+        self.recorder.write_status = statuses.append
+        for second in (0.0, 60.0, 120.0, 300.0, 600.0):
+            self.now = second
+            health["failureCount"] += 1
+            self.pilot.step()
+        self.assertIsNone(self.pilot.session_outcome)
+        self.assertEqual(self.sender.calls, [("releaseAll",)])
+        self.assertEqual(statuses[-1]["pauseReason"], "LEASE_UNCERTAIN")
+        self.assertEqual(statuses[-1]["leaseHealth"]["failureCount"], 6)
+        self.assertNotIn("STALL_UNRECOVERED", self.recorder.names())
+
+        # The game changed while the lease was paused. Resume only after a
+        # fresh observation, using the newly positioned Retry button.
+        self.overlay_provider.readings["connectionDialogButtons"] = [
+            ("重试", 1.0, (1400, 950, 1480, 1000))
+        ]
+        self.pilot.lease_is_current = lambda: True
+        health.update(state="CURRENT", retryable=False, reason=None, failureCount=0)
+        self._settle_overlay(first=601.0)
+        self.assertEqual(self.sender.calls, [("releaseAll",), ("click", 1440, 975)])
+        self.assertIn("LEASE_RECOVERED", self.recorder.names())
+
+    def test_confirmed_ownership_loss_ends_play_without_waiting_for_network_grace(self) -> None:
+        self.connection_dialog()
+        self.pilot.lease_is_current = lambda: False
+        self.pilot.lease_diagnostics = lambda: {
+            "state": "STALE", "retryable": False, "reason": "STALE_LEASE"
+        }
+        self.pilot.step()
+        self.assertEqual(self.pilot.session_outcome, "LEASE_UNRECOVERED")
+        self.assertEqual(self.sender.calls, [("releaseAll",)])
+
+    def test_lease_errors_are_recorded_while_valid_and_debounced_until_recovery(self) -> None:
+        health = {"state": "UNCERTAIN", "reason": "SSLEOFError / UNEXPECTED_EOF_WHILE_READING", "failureCount": 1}
+        self.pilot.lease_diagnostics = lambda: dict(health)
+        self.pilot.step()
+        self.now = 1.0
+        self.pilot.step()
+        self.now = 60.0
+        health["failureCount"] = 10
+        self.pilot.step()
+        failures = [p for event, p in self.recorder.events if event == "LEASE_RENEW_FAILED"]
+        self.assertEqual(len(failures), 2)
+        self.assertEqual(failures[-1]["failureCount"], 10)
+        self.assertNotIn("LEASE_UNCERTAIN", self.recorder.names())
+        health.update(state="CURRENT", reason=None, failureCount=0)
+        self.now = 61.0
+        self.pilot.step()
+        self.assertIn("LEASE_RENEW_RECOVERED", self.recorder.names())
+
+    def test_lease_lost_during_button_ocr_prevents_the_click(self) -> None:
+        self.connection_dialog()
+        find_button = self.pilot._find_button
+
+        def expire_while_reading(spec, frame):
+            result = find_button(spec, frame)
+            self.pilot.lease_is_current = lambda: False
+            return result
+
+        self.pilot._find_button = expire_while_reading
+        self._settle_overlay()
+        self.assertEqual(self.sender.calls, [("releaseAll",)])
+        self.assertEqual(self.pilot.actions_sent, 0)
+
     def test_a_page_dismissed_by_its_corner_hint_is_read_before_it_is_closed(self) -> None:
         # 排位之路 is one of the pages `fullscreen-esc-back` closes without
         # knowing what it closed, and it carries 经历缩圈 x/30 — the counter

@@ -3,6 +3,12 @@
   "language": "zh-CN",
   "_note": "目标：从继续页清掉已知覆盖层，进入匹配并留在对局里。这里没有任何地方表达「下一步是什么」——优先级只在同一帧内多个能力同时可处理时仲裁。坐标全部复用目标机器的已有真实帧；大厅坐标来自 2026-07-29 实时 DXGI 帧，四个导览坐标来自既有 tutorial 样本。modeSelectClick 与 startMatchClick 是同一个大厅主按钮，只是按钮上的字不同（「选择」/「准备」）；分成两个名字是为了让日志里的 ACTION_SENT 说清当时按的是哪一件事。",
   "actions": {
+    "connectionDialogContinue": {
+      "region": "connectionDialogButtons",
+      "any": ["重试", "继续"],
+      "minConfidence": 0.7,
+      "exactMatch": true
+    },
     "continueClick": [1280, 865],
     "keepAsIsClick": [1425, 956],
     "modeSelectClick": [1280, 1295],
@@ -54,6 +60,17 @@
   },
   "_keyBindings": "扫描码写死在这里，等于假定了游戏里的键位。这些假定必须和目标账号实际绑的键一致，否则动作照发、游戏没反应，而画面上和「输入没送到」长得一模一样——2026-07-30 就栽在这上面：配置写 V(47)，当时账号绑在 N 上，白查了一轮反作弊。当前假定：1=ESC 安全返回，28=ENTER 安全继续，15=TAB 返回大厅，57=SPACE 确认返回大厅，47=V 近战，16=Q 战术技能，29=LCTRL 单独发射，18=E 发射。改键位的话这里也要跟着改；windows/probe-input.cmd 可以逐个验。另外 Apex 里有相当一批提示是长按而不是点按，那种要靠能力自己的 holdMs 或动作序列内的 durationMs 声明，默认的 keyTapMs 太短。",
   "capabilities": [
+    {
+      "id": "connection-dialog-continue",
+      "priority": 125,
+      "states": ["CONNECTION_INTERRUPTED"],
+      "action": "connectionDialogContinue",
+      "kind": "clickText",
+      "actionClass": "idempotent",
+      "confirmMs": 5000,
+      "maxAttempts": 3,
+      "_note": "两次稳定识别后点击本帧 OCR 定位的重试或继续；无按钮坐标时不发送输入，页面不变最多尝试三次。"
+    },
     {
       "id": "challenge-welcome-next",
       "priority": 124,

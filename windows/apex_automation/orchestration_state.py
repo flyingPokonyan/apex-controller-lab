@@ -59,6 +59,7 @@ class OrchestrationCheckpoint:
     report_evidence: dict[str, object] | None = None
     result_status: str | None = None
     result_error_code: str | None = None
+    cleanup_verified_at: str | None = None
     last_error_code: str | None = None
     updated_at: str | None = None
 
@@ -100,6 +101,7 @@ class OrchestrationCheckpoint:
             "reportEvidence": self.report_evidence,
             "resultStatus": self.result_status,
             "resultErrorCode": self.result_error_code,
+            "cleanupVerifiedAt": self.cleanup_verified_at,
             "lastErrorCode": self.last_error_code,
             "updatedAt": self.updated_at or _now(),
         }
@@ -148,6 +150,7 @@ class OrchestrationCheckpoint:
             report_evidence=_optional_mapping(payload.get("reportEvidence")),
             result_status=_optional_string(payload.get("resultStatus")),
             result_error_code=_optional_string(payload.get("resultErrorCode")),
+            cleanup_verified_at=_optional_string(payload.get("cleanupVerifiedAt")),
             last_error_code=_optional_string(payload.get("lastErrorCode")),
             updated_at=_optional_string(payload.get("updatedAt")),
         )

@@ -207,6 +207,21 @@ class PlaySessionRunnerTest(unittest.TestCase):
         self.assertEqual(result.error_code, "KNOWN_STATE_STALL_UNRECOVERED")
         self.assertIn("已知页面", result.error)
 
+    def test_lease_loss_finishes_with_a_specific_error_for_managed_cleanup(self) -> None:
+        identity = SessionIdentity.from_runner_settings(self.settings, self.verification)
+        FakePilot.outcome = "LEASE_UNRECOVERED"
+        with patch("apex_automation.play_session.CapabilityPilot", FakePilot):
+            result = self.runner.run(identity, ContinuePlayPolicy(), object())
+        self.assertEqual(result.status, "PLAYED")
+        self.assertEqual(result.error_code, "LEASE_UNRECOVERED")
+        self.assertEqual(result.exit_code, 1)
+        events = [
+            json.loads(line)
+            for line in (result.run_dir / "events.jsonl").read_text().splitlines()
+        ]
+        finished = next(event for event in events if event["type"] == "RUN_FINISHED")
+        self.assertEqual(finished["payload"]["errorCode"], "LEASE_UNRECOVERED")
+
     def test_managed_identity_requires_complete_lease_tuple(self) -> None:
         with self.assertRaisesRegex(ValueError, "leaseId/leaseFence"):
             SessionIdentity(

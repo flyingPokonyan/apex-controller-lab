@@ -179,6 +179,8 @@ class CapabilityPilot:
         progression_retry_ms: int = 5000,
         ranked_road_progress_enabled: bool = False,
         lease_is_current: Callable[[], bool] = lambda: True,
+        lease_diagnostics: Callable[[], dict[str, object]] | None = None,
+        lease_recovery_grace_ms: int = 60_000,
         status_interval_ms: int = 1000,
         live_evidence_interval_ms: int = 60_000,
         transition_evidence_interval_ms: int = 10_000,
@@ -237,6 +239,13 @@ class CapabilityPilot:
             raise ValueError("大厅等级经验失败后的复核间隔必须大于 0")
         self.progression_retry_s = progression_retry_ms / 1000
         self.lease_is_current = lease_is_current
+        self.lease_diagnostics = lease_diagnostics
+        self._lease_error_detail: str | None = None
+        self._lease_error_next_report_at = 0.0
+        if lease_recovery_grace_ms <= 0:
+            raise ValueError("租约恢复宽限必须大于 0")
+        self.lease_recovery_grace_s = lease_recovery_grace_ms / 1000
+        self._lease_uncertain_since: float | None = None
         self.status_interval_s = max(0.1, status_interval_ms / 1000)
 
         # Standing still is also a failure mode, and until now the only one
@@ -505,6 +514,8 @@ class CapabilityPilot:
             raise ValueError(f"文字点击动作 {action_name} 没有声明任何目标文字")
         if not all(isinstance(word, str) and word for word in words):
             raise ValueError(f"文字点击动作 {action_name} 的目标文字必须是非空字符串")
+        if not isinstance(spec.get("exactMatch", False), bool):
+            raise ValueError(f"文字点击动作 {action_name} 的 exactMatch 必须是布尔值")
         fallback = spec.get("fallbackScanCode")
         if fallback is not None and not isinstance(fallback, int):
             raise ValueError(f"文字点击动作 {action_name} 的兜底扫描码不是整数")
@@ -628,6 +639,8 @@ class CapabilityPilot:
             for token in eligible:
                 if word not in token.normalized:
                     continue
+                if spec.get("exactMatch", False) and word != token.normalized:
+                    continue
                 if token.roi is None:
                     # A region fallback read has no coordinates. Clicking the
                     # middle of the region because a word appeared somewhere
@@ -740,6 +753,8 @@ class CapabilityPilot:
             }
         if capability.kind == "clickText":
             found = self._find_button(spec, frame)
+            if not self._check_lease(self.monotonic()):
+                return {"skipped": "LEASE_UNCERTAIN"}
             if found is not None:
                 x, y, text, confidence = found
                 hold = self._hold_for_text(spec, text)
@@ -1538,11 +1553,17 @@ class CapabilityPilot:
             return
         writer(
             {
-                "runtimeState": "RUNNING" if self._foreground else "PAUSED",
+                "runtimeState": (
+                    "RUNNING"
+                    if self._foreground and self._lease_uncertain_since is None
+                    else "PAUSED"
+                ),
                 "elapsedMs": max(0, round((now - self.started) * 1000)),
                 "observedState": self.observed_state,
                 "foreground": self._foreground,
                 "observationVersion": self.state_version,
+                "pauseReason": "LEASE_UNCERTAIN" if self._lease_uncertain_since is not None else None,
+                "leaseHealth": self.lease_diagnostics() if self.lease_diagnostics is not None else None,
                 "frames": self.frames,
                 "actionsSent": self.actions_sent,
                 "evidenceFrames": self.evidence_count,
@@ -1954,6 +1975,8 @@ class CapabilityPilot:
         # this is the last point where refusing still costs nothing.
         self.guard.ensure_target_foreground()
         self.guard.ensure_not_aborted()
+        if not self._check_lease(self.monotonic()):
+            return
         detail = self._execute(capability, frame)
         if detail.get("skipped"):
             # A text-driven action that found no text sent nothing, and the
@@ -2064,10 +2087,92 @@ class CapabilityPilot:
             "expectedResolution": list(expected),
         }
 
+    def _check_lease(self, now: float) -> bool:
+        # Lease renewal runs in its own worker. Keep observing its result even
+        # when foreground/capture/progression are unavailable; a lease pause
+        # must never turn into an unrelated 30-minute screen-stall timeout.
+        health = {}
+        if self.lease_diagnostics is not None:
+            health = self.lease_diagnostics()
+            detail = health.get("reason")
+            if detail and (
+                detail != self._lease_error_detail or now >= self._lease_error_next_report_at
+            ):
+                self.recorder.log(
+                    "LEASE_RENEW_FAILED",
+                    leaseState=health.get("state"),
+                    **{key: value for key, value in health.items() if key != "state"},
+                )
+                action = (
+                    "后台继续重试；租约无效期间停止输入。"
+                    if health.get("retryable") is True
+                    else "等待租约状态核对；服务端明确拒绝时结束本次游玩。"
+                )
+                self.notify(f"续租异常：{detail}；{action}")
+                self._lease_error_detail = str(detail)
+                self._lease_error_next_report_at = now + 60.0
+            elif health.get("state") == "CURRENT" and self._lease_error_detail is not None:
+                self.recorder.log("LEASE_RENEW_RECOVERED", reason="续租通信已恢复")
+                self._lease_error_detail = None
+        retrying = health.get("state") == "UNCERTAIN" and health.get("retryable") is True
+        if self.lease_is_current():
+            if self._lease_uncertain_since is not None:
+                self.recorder.log(
+                    "LEASE_RECOVERED",
+                    pausedForMs=round((now - self._lease_uncertain_since) * 1000),
+                )
+                self._lease_uncertain_since = None
+                self.notify("租约已恢复，重新识别当前画面。")
+                self._write_status(now, force=True)
+            return True
+        if self._lease_uncertain_since is None:
+            self._lease_uncertain_since = now
+            self._release_all("LEASE_UNCERTAIN")
+            self.dispatcher.reset_for_pause()
+            self._reset_overlay_for_pause()
+            self._unknown_since = None
+            self._stall_since = None
+            self._stall_rounds = 0
+            self._known_stall_key = None
+            self._known_stall_since = None
+            self.recorder.log(
+                "LEASE_UNCERTAIN",
+                reason="租约有效性无法确认，已停止输入并等待续租恢复",
+                graceMs=None if retrying else round(self.lease_recovery_grace_s * 1000),
+                waitPolicy="RETRY_UNTIL_RECONNECTED" if retrying else "BOUNDED_RECHECK",
+            )
+            self.notify("暂停输入：等待租约续租恢复。")
+            self._write_status(now, force=True)
+        rejected = health.get("state") in {"STALE", "STOPPED"}
+        timed_out = now - self._lease_uncertain_since >= self.lease_recovery_grace_s
+        # A transport outage is not proof that ownership was revoked. The
+        # keeper keeps retrying while all gameplay input remains released.
+        # Keep the bounded fallback for callers without typed diagnostics.
+        if self.session_outcome is None and (rejected or (timed_out and not retrying)):
+            self.session_outcome = "LEASE_UNRECOVERED"
+            self.recorder.log(
+                "LEASE_UNRECOVERED",
+                pausedForMs=round((now - self._lease_uncertain_since) * 1000),
+                reason=(
+                    "租约已失效或续租被明确拒绝，结束游玩并进入清理流程"
+                    if rejected else "租约在恢复宽限内仍未有效，结束游玩并进入清理流程"
+                ),
+            )
+            self.notify("租约未恢复：结束本次游玩，交由托管流程清理并核对租约。")
+        return False
+
     def step(self) -> dict[str, Any]:
         now = self.monotonic()
         self.guard.ensure_not_aborted()
         record: dict[str, Any] = {"elapsedMs": round((now - self.started) * 1000)}
+
+        if not self._check_lease(now):
+            record["decision"] = {
+                "kind": "stop" if self.session_outcome else "wait",
+                "reason": self.session_outcome or "LEASE_UNCERTAIN",
+            }
+            self._write_status(now)
+            return record
 
         foreground = self.guard.target_is_foreground()
         if not foreground:
@@ -2133,6 +2238,10 @@ class CapabilityPilot:
         record["state"] = state
         record["baseState"] = base_state
         self._update_visit_tracking(base_state)
+
+        if not self._check_lease(now):
+            record["decision"] = {"kind": "wait", "reason": "LEASE_UNCERTAIN"}
+            return record
 
         self._settle_pending(state)
         self.dispatcher.note_state(state, now)
