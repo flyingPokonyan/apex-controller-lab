@@ -202,6 +202,7 @@ class EnterGameCapabilityTest(unittest.TestCase):
                 "fullFrame",
                 "challengePanelTasks",
                 "titleCenter",
+                "connectionDialogButtons",
                 "bottomCenter",
                 "bottomRight",
                 "bottomLeftBack",
