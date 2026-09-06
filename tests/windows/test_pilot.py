@@ -447,6 +447,31 @@ class PilotTest(unittest.TestCase):
         self.assertNotIn(("click", 1280, 1295), self.sender.calls)
         self.assertEqual(self.recorder.names().count("PROGRESSION_PAUSED"), 1)
 
+    def test_managed_recheck_resumes_after_two_agreeing_frames(self) -> None:
+        self.enable_progression(max_attempts=2)
+        self.pilot.progression_policy = TargetLevelPolicy(20)
+        lobby = {
+            "lobbyPrimaryButton": ("准备", 1.0),
+            "lobbyModeName": ("进化版机器人大逃杀", 1.0),
+            "lobbyLevel": ("5", 0.6404),
+            "lobbyXp": ("4.35K/6.35K", 0.997),
+        }
+        self.screen(**lobby)
+        self.pilot.step()
+        self.now = 0.3
+        self.assertEqual(self.pilot.step()["decision"]["reason"], "PAUSE_UNCERTAIN")
+        self.assertNotIn(("click", 1280, 1295), self.sender.calls)
+
+        self.screen(**lobby, lobbyLevelDigits1=("6", 0.97), lobbyLevelDigits2=("6", 0.93))
+        self.now = 5.4
+        self.assertEqual(self.pilot.step()["decision"]["reason"], "LOBBY_PROGRESS")
+        self.now = 5.7
+        self.assertEqual(self.pilot.step()["decision"]["capability"], "lobby-start-match")
+        progress = [p for event, p in self.recorder.events if event == "LOBBY_PROGRESS"][-1]
+        self.assertEqual(progress["level"], 6)
+        self.assertEqual(progress["levelReadMethod"], "digit-recheck")
+        self.assertEqual(progress["levelOriginalRawText"], "5")
+
     def test_target_read_while_queueing_defers_until_a_safe_lobby(self) -> None:
         self.enable_progression()
         self.pilot.progression_policy = TargetLevelPolicy(20)

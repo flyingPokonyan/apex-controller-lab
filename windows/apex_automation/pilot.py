@@ -1276,6 +1276,7 @@ class CapabilityPilot:
             "changed": False,
             "deltaApprox": None,
             "readStatus": "FAILED",
+            **({} if reading is None else reading.level_diagnostics()),
             "error": "大厅等级经验未能在限定帧数内得到一致读数"
             if reading is None
             else reading.error

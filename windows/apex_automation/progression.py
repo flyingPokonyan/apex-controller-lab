@@ -20,6 +20,7 @@ DEFAULT_XP_REGION = Region(
     roi=(200, 54, 356, 91),
     single_line=True,
 )
+LEVEL_RECHECK_MIN_CONFIDENCE = 0.85
 
 _LEVEL_PATTERN = re.compile(
     r"(?:(?:LV|LEVEL|等级)[.:：]?)?([0-9]{1,3})",
@@ -89,6 +90,23 @@ class LobbyProgressionReading:
     level_evidence: ProgressionEvidence
     xp_evidence: ProgressionEvidence
     error: str | None = None
+    level_original_evidence: ProgressionEvidence | None = None
+    level_recheck_evidence: tuple[ProgressionEvidence, ...] = ()
+
+    def level_diagnostics(self) -> dict[str, object]:
+        if self.level_original_evidence is None:
+            return {}
+        return {
+            "levelReadMethod": "digit-recheck"
+            if self.level_evidence is not self.level_original_evidence
+            else "primary",
+            "levelOriginalRawText": self.level_original_evidence.raw_text,
+            "levelOriginalConfidence": round(self.level_original_evidence.confidence, 4),
+            "levelRechecks": [
+                {"rawText": evidence.raw_text, "confidence": round(evidence.confidence, 4)}
+                for evidence in self.level_recheck_evidence
+            ],
+        }
 
     @property
     def is_complete(self) -> bool:
@@ -145,6 +163,7 @@ class LobbyProgressionReading:
             "changed": changed,
             "deltaApprox": delta_approx,
             "readStatus": self.read_status,
+            **self.level_diagnostics(),
         }
 
 
@@ -176,7 +195,7 @@ def _evidence_problem(
 
 
 class LobbyProgressionReader:
-    """Read the fixed 2560x1440 lobby level and XP regions once."""
+    """Read lobby progress, rechecking an uncertain level without its badge edges."""
 
     def __init__(
         self,
@@ -202,6 +221,39 @@ class LobbyProgressionReader:
             return self.provider.read(frame, region), None
         except Exception as error:
             return (), str(error)
+
+    def _recheck_level(
+        self, frame: np.ndarray,
+    ) -> tuple[ProgressionEvidence | None, tuple[ProgressionEvidence, ...]]:
+        left, top, right, bottom = self.level_region.roi
+        height = bottom - top
+        if height < 16:
+            return None, ()
+        evidence: list[ProgressionEvidence] = []
+        levels: list[int | None] = []
+        # Keep the full width so 16/19/20 cannot become 6/9/0 through clipping.
+        # Trim only the badge's upper/lower decoration. At the default ROI the
+        # two views are (36,32,76,73) and (36,34,76,73).
+        for index, top_fraction in enumerate((0.10, 0.14)):
+            region = Region(
+                name=f"{self.level_region.name}Digits{index + 1}",
+                roi=(left, top + round(height * top_fraction), right,
+                     bottom - round(height * 0.06)),
+                single_line=True,
+            )
+            tokens, error = self._read_region(frame, region)
+            candidate = _evidence(tokens)
+            evidence.append(candidate)
+            problem = _evidence_problem(
+                "等级复核", candidate, error,
+                max(self.min_confidence, LEVEL_RECHECK_MIN_CONFIDENCE),
+            )
+            levels.append(None if problem else parse_level(candidate.raw_text))
+        if levels[0] is not None and levels[0] == levels[1]:
+            # Report the weaker of the two agreeing observations, not the
+            # highest-scoring interpretation of an ambiguous digit.
+            return min(evidence, key=lambda item: item.confidence), tuple(evidence)
+        return None, tuple(evidence)
 
     def read(self, frame: np.ndarray) -> LobbyProgressionReading:
         begin_frame = getattr(self.provider, "begin_frame", None)
@@ -239,6 +291,15 @@ class LobbyProgressionReader:
         level = (
             None if level_problem is not None else parse_level(level_evidence.raw_text)
         )
+        original_level_evidence = None
+        recheck_evidence: tuple[ProgressionEvidence, ...] = ()
+        if level is None and level_error is None:
+            original_level_evidence = level_evidence
+            recovered, recheck_evidence = self._recheck_level(frame)
+            if recovered is not None:
+                level_evidence = recovered
+                level = parse_level(recovered.raw_text)
+                level_problem = None
         xp_pair = (
             None if xp_problem is not None else parse_xp_pair(xp_evidence.raw_text)
         )
@@ -258,6 +319,8 @@ class LobbyProgressionReader:
             level_evidence=level_evidence,
             xp_evidence=xp_evidence,
             error="; ".join(problems) or None,
+            level_original_evidence=original_level_evidence,
+            level_recheck_evidence=recheck_evidence,
         )
 
 

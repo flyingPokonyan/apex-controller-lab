@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+import os
 import sys
 import unittest
 
@@ -34,8 +35,10 @@ class FakeProvider:
         values: dict[tuple[int, int, int, int], tuple[OcrToken, ...]],
     ) -> None:
         self.values = values
+        self.calls = []
 
     def read(self, frame: np.ndarray, region) -> tuple[OcrToken, ...]:
+        self.calls.append(region)
         return self.values.get(region.roi, ())
 
 
@@ -150,6 +153,131 @@ class LobbyProgressionReaderTest(unittest.TestCase):
         self.assertIn("经验文字格式无法确认", result.error or "")
         payload = result.as_event_payload("STATE_REENTRY")
         self.assertIsNone(payload["level"])
+
+
+class LobbyLevelRecheckTest(unittest.TestCase):
+    FRAME = np.zeros((100, 400, 3), dtype=np.uint8)
+
+    def reader(self, first=("6", 0.97), second=("6", 0.93), *,
+               primary=("5", 0.6404), xp="4.35K/6.35K", minimum=0.65):
+        provider = FakeProvider({
+            DEFAULT_LEVEL_REGION.roi: (OcrToken(*primary),),
+            DEFAULT_XP_REGION.roi: (OcrToken(xp, 0.997),),
+            (36, 32, 76, 73): (OcrToken(*first),),
+            (36, 34, 76, 73): (OcrToken(*second),),
+        })
+        return LobbyProgressionReader(provider, min_confidence=minimum), provider
+
+    def test_good_primary_read_has_no_extra_ocr_calls(self):
+        reader, provider = self.reader(primary=("20", 0.99))
+        result = reader.read(self.FRAME)
+        self.assertEqual(result.level, 20)
+        self.assertEqual(len(provider.calls), 2)
+        self.assertEqual(result.level_diagnostics(), {})
+
+    def test_recovers_recorded_d163_low_confidence_five_as_six(self):
+        reader, provider = self.reader()
+        result = reader.read(self.FRAME)
+        self.assertTrue(result.is_complete)
+        self.assertEqual(result.level, 6)
+        self.assertEqual(result.level_evidence.confidence, 0.93)
+        self.assertEqual(result.xp_current_approx, 4350)
+        self.assertEqual(len(provider.calls), 4)
+        payload = result.as_event_payload("INITIAL")
+        self.assertEqual(payload["levelReadMethod"], "digit-recheck")
+        self.assertEqual(payload["levelOriginalRawText"], "5")
+        self.assertEqual(payload["levelOriginalConfidence"], 0.6404)
+        self.assertEqual([x["rawText"] for x in payload["levelRechecks"]], ["6", "6"])
+
+    def test_recovery_still_requires_two_complete_frames(self):
+        reader, _ = self.reader()
+        stable = LobbyProgressionStabilizer()
+        self.assertIsNone(stable.observe(reader.read(self.FRAME)))
+        result = stable.observe(reader.read(self.FRAME))
+        self.assertEqual(result.level, 6)
+
+    def test_conflicting_nineteen_and_twenty_are_not_accepted(self):
+        reader, _ = self.reader(("19", 0.96), ("20", 0.99))
+        result = reader.read(self.FRAME)
+        self.assertFalse(result.is_complete)
+        self.assertIsNone(result.level)
+        self.assertEqual(result.level_evidence.raw_text, "5")
+        from apex_automation.pilot import CapabilityPilot
+        payload = CapabilityPilot._failed_progression_payload("INITIAL", result)
+        self.assertIsNone(payload["level"])
+        self.assertEqual([x["rawText"] for x in payload["levelRechecks"]], ["19", "20"])
+
+    def test_one_weak_recheck_cannot_be_outvoted(self):
+        reader, _ = self.reader(("6", 0.99), ("6", 0.84))
+        self.assertFalse(reader.read(self.FRAME).is_complete)
+
+    def test_higher_configured_threshold_is_preserved(self):
+        reader, _ = self.reader(("6", 0.99), ("6", 0.94), minimum=0.95)
+        self.assertFalse(reader.read(self.FRAME).is_complete)
+
+    def test_missing_or_malformed_recheck_does_not_guess_a_number(self):
+        for bad in ("", "O6", "1000"):
+            with self.subTest(bad=bad):
+                reader, _ = self.reader(("6", 0.99), (bad, 0.99))
+                self.assertFalse(reader.read(self.FRAME).is_complete)
+
+    def test_xp_failure_is_not_bypassed_by_a_recovered_level(self):
+        reader, _ = self.reader(xp="4.35K/?")
+        result = reader.read(self.FRAME)
+        self.assertFalse(result.is_complete)
+        self.assertEqual(result.level, 6)
+        self.assertIsNone(result.as_event_payload("INITIAL")["level"])
+
+    def test_twenty_keeps_both_digits_and_still_requires_safe_lobby(self):
+        reader, provider = self.reader(("20", 0.97), ("20", 0.95))
+        result = reader.read(self.FRAME)
+        self.assertEqual(result.level, 20)
+        self.assertTrue(all(r.roi[0] == 36 and r.roi[2] == 76 for r in provider.calls[2:]))
+        context = ProgressionContext(
+            "LOBBY_READY_TARGET", True, False, True, False, True,
+        )
+        self.assertEqual(
+            TargetLevelPolicy(20).decide(ProgressionOutcome.confirmed(result, attempts=2), context),
+            ProgressionDecision.TARGET_REACHED,
+        )
+
+
+@unittest.skipUnless(os.environ.get("APEX_REAL_OCR_TESTS") == "1", "opt-in actual RapidOCR fixture checks")
+class LobbyLevelImageRecheckTest(unittest.TestCase):
+    """Stored JPEG previews, resized with the runtime's Lanczos kernel.
+
+    These small fixtures contain only the top-left level/XP panel. They are
+    not the original Windows capture and do not prove live input behavior.
+    Enable explicitly so a normal unit run never downloads OCR models.
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        from apex_automation.ocr_obstacles import RapidOcrProvider
+        cls.provider = RapidOcrProvider()
+
+    def frame(self, name):
+        import cv2
+        return cv2.imread(str(Path(__file__).with_name("fixtures") / name))
+
+    def test_d163_six_is_recovered_by_two_real_rechecks(self):
+        frame = self.frame("lobby-incident-progress-preview.png")
+        reader = LobbyProgressionReader(self.provider)
+        recovered, candidates = reader._recheck_level(frame)
+        self.assertEqual([parse_level(x.raw_text) for x in candidates], [6, 6])
+        self.assertGreaterEqual(recovered.confidence, 0.85)
+        result = reader.read(frame)
+        self.assertTrue(result.is_complete)
+        self.assertEqual(result.level, 6)
+        self.assertEqual(result.xp_current_approx, 4350)
+
+    def test_d163_completed_twenty_preserves_both_digits(self):
+        frame = self.frame("lobby-level20-progress-preview.png")
+        reader = LobbyProgressionReader(self.provider)
+        recovered, candidates = reader._recheck_level(frame)
+        self.assertEqual([parse_level(x.raw_text) for x in candidates], [20, 20])
+        self.assertGreaterEqual(recovered.confidence, 0.85)
+        self.assertEqual(reader.read(frame).level, 20)
 
 
 class LobbyProgressionStabilizerTest(unittest.TestCase):
