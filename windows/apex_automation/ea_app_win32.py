@@ -34,6 +34,7 @@ from .ea_app import (
     OtpChallenge,
 )
 from .ea_evidence import EaLoginEvidence
+from .ea_onboarding import library_tour_close_point, library_tour_visible
 from .ea_pages import (
     ACCOUNT_FIELD_TERMS,
     AUTHENTICATOR_TERMS,
@@ -665,6 +666,37 @@ class WindowsEaHybridDriver:
         except Exception as error:  # pragma: no cover - diagnostics only
             self.notify(f"EA 登录证据写入失败：{type(error).__name__}")
 
+    def _dismiss_library_tour(
+        self, hwnd: int, observation: EaObservation,
+    ) -> EaObservation:
+        if not library_tour_visible(observation.tokens):
+            return observation
+        for attempt in range(1, 3):
+            point = library_tour_close_point(
+                observation.frame, observation.tokens, observation.rect,
+            )
+            if point is not None:
+                self._record("library-tour-close", observation, attempt=attempt)
+                self.notify("EA App 检测到游戏库新手引导，正在关闭")
+                self._click_point(hwnd, *point)
+            self.sleep(1.0)
+            # A blank frame or one missed OCR pass cannot confirm dismissal.
+            clear_observations = 0
+            for _ in range(3):
+                observation = self._observe(hwnd)
+                if library_tour_visible(observation.tokens):
+                    break
+                if observation.page is EaPage.SIGNED_IN:
+                    clear_observations += 1
+                    if clear_observations >= 2:
+                        self._record("library-tour-dismissed", observation)
+                        return observation
+                else:
+                    clear_observations = 0
+                self.sleep(0.5)
+        self._record("library-tour-stuck", observation)
+        raise EaAppAutomationError("EA App 游戏库新手引导未能确认关闭，已停止点击")
+
     def _identity(self, hwnd: int) -> EaIdentityFact | None:
         """Read the signed-in badge from its own tight crop.
 
@@ -796,6 +828,7 @@ class WindowsEaHybridDriver:
         observation: EaObservation | None = None
         for _ in range(8):
             observation = self._observe(hwnd)
+            observation = self._dismiss_library_tour(hwnd, observation)
             state = self._state(hwnd, observation)
             if state is not EaUiState.UNKNOWN:
                 self._record("preflight", observation, state=state.value)
@@ -1140,6 +1173,7 @@ class WindowsEaHybridDriver:
         while time.monotonic() < deadline:
             self.sleep(2.0)
             observation = self._observe(hwnd)
+            observation = self._dismiss_library_tour(hwnd, observation)
             # Whatever EA puts on screen here gets a frame the first time it
             # appears. Waiting for the timeout to explain itself meant an
             # unexpected page — a verification prompt, say — left no evidence
@@ -1210,6 +1244,7 @@ class WindowsEaHybridDriver:
         while time.monotonic() < deadline:
             hwnd = self._ea_window()
             observation = self._observe(hwnd)
+            observation = self._dismiss_library_tour(hwnd, observation)
             match = self._matching_identity(observation, expected_ea_account_id)
             if match is not None and match.verified:
                 self._record(
@@ -1531,6 +1566,7 @@ class WindowsEaHybridDriver:
         # interactive.  Wait for the actual launch control instead.
         for _ in range(15):
             observation = self._observe(hwnd)
+            observation = self._dismiss_library_tour(hwnd, observation)
             point = self._anchor(
                 observation,
                 ("apexlegends",),
@@ -1582,6 +1618,7 @@ class WindowsEaHybridDriver:
                 self.sleep(2.0)
                 continue
 
+            observation = self._dismiss_library_tour(hwnd, observation)
             local_data = self._continue_local_data_point(observation)
             if local_data is not None:
                 if cloud_recovery_clicks >= 2:
@@ -1764,6 +1801,7 @@ class WindowsEaHybridDriver:
         signed_in_page_seen = False
         for _ in range(8):
             observation = self._observe(hwnd)
+            observation = self._dismiss_library_tour(hwnd, observation)
             # Anything still inside the login flow — the account page, the
             # password page, a verification prompt — means no session was ever
             # established, so there is nothing to sign out of. Failing here
