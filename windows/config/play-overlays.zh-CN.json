@@ -98,10 +98,9 @@
     {
       "id": "match-quality-survey-close",
       "state": "MATCH_QUALITY_SURVEY",
-      "_note": "20260807-162638 的真实帧显示该页覆盖在大厅上，标题为「比赛质量调查」，中部明确写着「ESC 关闭调查」。两个「不/是」按钮会提交答案，不属于自动化任务；这里只按页面提供的 ESC 关闭，不点击问卷选项。",
+      "_note": "20260917 D163 实图覆盖在赛后结算上。标题「比赛质量调查」在 titleCenter；中部的「ESC 关闭调查」也在 titleCenter（约 y715），不在 bottomCenter（y>=820）。旧规则第二项永远读不到，整页被当成未知画面卡死。标题已经唯一，不再依赖 ESC 文案。关闭动作见能力集：点「不/否」。",
       "requirements": [
-        {"region": "titleCenter", "all": ["比赛质量调查"], "minConfidence": 0.65},
-        {"region": "bottomCenter", "all": ["esc", "关闭调查"], "minConfidence": 0.65}
+        {"region": "titleCenter", "all": ["比赛质量调查"], "minConfidence": 0.65}
       ]
     },
     {

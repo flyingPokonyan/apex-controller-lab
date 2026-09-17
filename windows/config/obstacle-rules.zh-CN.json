@@ -40,17 +40,13 @@
         {
           "region": "titleCenter",
           "all": ["比赛质量调查"]
-        },
-        {
-          "region": "bottomCenter",
-          "all": ["esc", "关闭调查"]
         }
       ],
       "action": {
-        "name": "escapeScanCode",
-        "kind": "key",
-        "maxAttempts": 2,
-        "confirmMs": 2000
+        "name": "matchQualitySurveyDecline",
+        "kind": "clickText",
+        "maxAttempts": 3,
+        "confirmMs": 3000
       }
     },
     {

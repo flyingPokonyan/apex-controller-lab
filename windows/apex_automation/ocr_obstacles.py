@@ -323,11 +323,14 @@ class OcrObstacleDetector:
                 raise ValueError(f"OCR 规则 {rule.rule_id} 未声明 safePage，不能启用动作")
             if rule.enabled and not rule.requirements:
                 raise ValueError(f"OCR 规则 {rule.rule_id} 没有正向页面证据")
-            if rule.action.kind != "key":
-                raise ValueError(f"OCR 规则 {rule.rule_id} 只允许键盘消除动作")
-            if rule.action.name not in SAFE_KEY_ACTIONS:
+            if rule.action.kind == "key":
+                if rule.action.name not in SAFE_KEY_ACTIONS:
+                    raise ValueError(
+                        f"OCR 规则 {rule.rule_id} 的动作不在安全键白名单：{rule.action.name}"
+                    )
+            elif rule.action.kind != "clickText":
                 raise ValueError(
-                    f"OCR 规则 {rule.rule_id} 的动作不在安全键白名单：{rule.action.name}"
+                    f"OCR 规则 {rule.rule_id} 只允许键盘或文字点击消除动作"
                 )
             if not 1 <= rule.action.max_attempts <= 3:
                 raise ValueError(f"OCR 规则 {rule.rule_id} 的最大尝试次数必须为 1 到 3")

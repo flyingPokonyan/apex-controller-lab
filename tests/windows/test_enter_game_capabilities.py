@@ -332,6 +332,34 @@ class EnterGameCapabilityTest(unittest.TestCase):
         action = self.capabilities.for_state("NEWS_WELCOME")[0]
         self.assertEqual(self.payload["actions"][action.action], 1)
 
+    def test_match_quality_survey_is_recognised_when_esc_hint_is_in_the_title_band(self) -> None:
+        # 20260917 D163 live frame, scaled to the 2560x1440 reference canvas.
+        # The ESC hint is around y715 (titleCenter); the 不/是 buttons are
+        # around y853. The old bottomCenter requirement never saw the hint.
+        provider = FakeLayoutProvider(
+            (
+                OcrToken("比赛质量调查", 0.99, (980, 580, 1580, 660)),
+                OcrToken("你是否享受刚刚进行的比赛？", 0.98, (860, 670, 1700, 720)),
+                OcrToken("ESC 关闭调查", 0.97, (1190, 700, 1370, 740)),
+                OcrToken("不", 0.99, (1100, 840, 1260, 900)),
+                OcrToken("是", 0.99, (1320, 840, 1480, 900)),
+            )
+        )
+        analysis = OcrStateDetector.from_path(
+            FullFrameOcrProvider(provider), OVERLAYS
+        ).analyze(np.zeros((1440, 2560, 3), dtype=np.uint8))
+
+        self.assertIsNone(analysis.error)
+        self.assertEqual(analysis.decision.state, "MATCH_QUALITY_SURVEY")
+        action = self.capabilities.for_state("MATCH_QUALITY_SURVEY")[0]
+        self.assertEqual(action.id, "dismiss-match-quality-survey")
+        self.assertEqual(action.kind, "clickText")
+        self.assertEqual(
+            self.payload["actions"][action.action]["any"],
+            ["不", "否"],
+        )
+        self.assertTrue(self.payload["actions"][action.action]["exactMatch"])
+
     def test_a_modal_over_the_lobby_is_handled_before_the_lobby(self) -> None:
         dispatcher = self._dispatcher()
         decision = dispatcher.decide("CLIMB_SETTINGS_MODAL", 1, 0.0)

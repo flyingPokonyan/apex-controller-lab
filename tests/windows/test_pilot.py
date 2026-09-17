@@ -549,19 +549,40 @@ class PilotTest(unittest.TestCase):
         self.assertEqual(record["state"], "RETICLE_UNLOCKED")
         self.assertEqual(self.sender.calls, [("tap", 57, 80)])
 
-    def test_match_quality_survey_is_closed_with_escape(self) -> None:
+    def test_match_quality_survey_clicks_no_instead_of_sending_escape(self) -> None:
         self.enable_overlays()
         self.screen()
+        # 20260917 D163: ESC hint sits in the title band, buttons sit lower.
         self.overlay_provider.readings = {
-            "titleCenter": ("比赛质量调查", 0.99),
-            "bottomCenter": ("ESC 关闭调查", 0.99),
+            "titleCenter": ("比赛质量调查 ESC 关闭调查", 0.99),
+            "fullFrame": [
+                ("不", 0.99, (1100, 840, 1260, 900)),
+                ("是", 0.99, (1320, 840, 1480, 900)),
+            ],
         }
 
         record = self._settle_overlay()
 
         self.assertEqual(record["state"], "MATCH_QUALITY_SURVEY")
         self.assertEqual(record["decision"]["capability"], "dismiss-match-quality-survey")
-        self.assertEqual(self.sender.calls, [("tap", 1, 80)])
+        self.assertEqual(self.sender.calls, [("click", 1180, 870)])
+
+    def test_match_quality_survey_does_not_click_whether_in_the_question(self) -> None:
+        self.enable_overlays()
+        self.screen()
+        self.overlay_provider.readings = {
+            "titleCenter": ("比赛质量调查", 0.99),
+            "fullFrame": [
+                ("你是否享受刚刚进行的比赛", 0.99, (860, 670, 1700, 720)),
+                ("否", 0.99, (1100, 840, 1260, 900)),
+                ("是", 0.99, (1320, 840, 1480, 900)),
+            ],
+        }
+
+        record = self._settle_overlay()
+
+        self.assertEqual(record["state"], "MATCH_QUALITY_SURVEY")
+        self.assertEqual(self.sender.calls, [("click", 1180, 870)])
 
     def test_a_known_page_uses_its_visible_prompt_after_primary_exhausts(self) -> None:
         self.enable_overlays()

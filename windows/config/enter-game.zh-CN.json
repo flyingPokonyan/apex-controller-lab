@@ -9,6 +9,13 @@
       "minConfidence": 0.7,
       "exactMatch": true
     },
+    "matchQualitySurveyDecline": {
+      "region": "fullFrame",
+      "any": ["不", "否"],
+      "minConfidence": 0.7,
+      "exactMatch": true,
+      "_note": "20260917 D163 实图：「ESC 关闭调查」落在调查条中部，右下角还有输入法更新窗会吃掉 ESC。点「不/否」关闭问卷；exactMatch 避免点到问句里的「是否」。"
+    },
     "continueClick": [1280, 865],
     "keepAsIsClick": [1425, 956],
     "modeSelectClick": [1280, 1295],
@@ -116,12 +123,12 @@
       "id": "dismiss-match-quality-survey",
       "priority": 123,
       "states": ["MATCH_QUALITY_SURVEY"],
-      "action": "escapeScanCode",
-      "kind": "key",
+      "action": "matchQualitySurveyDecline",
+      "kind": "clickText",
       "actionClass": "idempotent",
-      "confirmMs": 2000,
-      "maxAttempts": 2,
-      "_note": "真实调查页明确写着「ESC 关闭调查」。不点击「不/是」，避免替账号提交比赛质量反馈。"
+      "confirmMs": 3000,
+      "maxAttempts": 3,
+      "_note": "标题认出调查页后，按本帧 OCR 坐标点「不」或「否」。ESC 在这页不可靠：提示本身不在 bottomCenter，同帧输入法更新窗还会截走按键。"
     },
     {
       "id": "dismiss-level-up",
