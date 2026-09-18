@@ -15,6 +15,7 @@ sys.path.insert(0, str(REPOSITORY_ROOT / "windows"))
 
 from apex_automation.account_provider import OtpMethod, SecretCredentials
 from apex_automation.ea_app import (
+    EaAccountBanned,
     EaApexDownloadRequired,
     EaApexStartFailed,
     EaLoginRejected,
@@ -111,6 +112,29 @@ SIGNED_IN_PAGE = tokens(
     "Apex Legends",
 )
 
+# Transcribed from the remote-desktop screenshot of the English ban overlay.
+BANNED_OVERLAY = tokens(
+    "Library",
+    "Your account has been banned",
+    "You can still play your purchased games, but you won't be able to buy "
+    "new games or access online and social features within the EA app.",
+    "If you wish to appeal the ban or need further assistance, visit help.ea.com.",
+    "Error code: EC:107",
+    "CLOSE",
+    "Apex Legends",
+    "Update complete",
+    "ShadowSam6872",
+)
+
+EMPTY_LIBRARY = tokens(
+    "Library",
+    "Your library is empty",
+    "Looking for something?",
+    "Apex Legends",
+    "Update complete",
+    "ShadowSam6872",
+)
+
 
 class PageClassificationTest(unittest.TestCase):
     def test_forgot_password_link_does_not_make_the_email_page_a_password_page(
@@ -162,6 +186,13 @@ class PageClassificationTest(unittest.TestCase):
     def test_signed_in_needs_more_than_one_marker(self) -> None:
         self.assertIs(classify_page(SIGNED_IN_PAGE), EaPage.SIGNED_IN)
         self.assertIs(classify_page(tokens("Store")), EaPage.UNKNOWN)
+
+    def test_ban_overlay_outranks_library_chrome(self) -> None:
+        self.assertIs(classify_page(BANNED_OVERLAY), EaPage.BANNED)
+        self.assertIn("banned", page_markers(BANNED_OVERLAY))
+
+    def test_empty_library_after_closing_the_ban_dialog_is_not_a_ban(self) -> None:
+        self.assertIsNot(classify_page(EMPTY_LIBRARY), EaPage.BANNED)
 
     def test_expired_session_is_its_own_page(self) -> None:
         self.assertIs(
@@ -456,6 +487,27 @@ class EaLaunchRecoveryTest(unittest.TestCase):
 
         self.assertEqual(clicks, [(120, 460)])
         self.assertEqual(records, ["apex-entry", "apex-download-required"])
+
+    def test_ban_overlay_closes_and_fails_before_clicking_play(self) -> None:
+        banned = self.observation(
+            ("Library", 80, 40),
+            ("Your account has been banned", 960, 360),
+            ("Error code: EC:107", 960, 620),
+            ("CLOSE", 1100, 700),
+            ("Apex Legends", 120, 460),
+            ("Update complete", 140, 500),
+        )
+        clicks: list[tuple[int, int]] = []
+        records: list[str] = []
+        driver = self.driver([banned], clicks, records)
+        driver.notify = lambda _message: None
+
+        with self.assertRaises(EaAccountBanned) as caught:
+            driver.start_apex()
+
+        self.assertEqual(caught.exception.reason_code, "EA_ACCOUNT_BANNED")
+        self.assertEqual(clicks, [(1100, 700)])
+        self.assertEqual(records, ["account-banned-close", "account-banned"])
 
     def test_download_flow_registers_existing_copy_before_restart(self) -> None:
         download_page = self.observation(("DOWNLOAD", 975, 535))

@@ -21,6 +21,7 @@ from .account_provider import (
 )
 from .ea_app import (
     ApexExitEvidence,
+    EaAccountBanned,
     EaAppAutomationError,
     EaApexDownloadRequired,
     EaApexStartFailed,
@@ -36,6 +37,7 @@ from .ea_app import (
 from .ea_evidence import EaLoginEvidence
 from .ea_onboarding import library_tour_close_point, library_tour_visible
 from .ea_pages import (
+    ACCOUNT_BANNED_CLOSE_TERMS,
     ACCOUNT_FIELD_TERMS,
     AUTHENTICATOR_TERMS,
     EMAIL_CODE_TERMS,
@@ -696,6 +698,44 @@ class WindowsEaHybridDriver:
                 self.sleep(0.5)
         self._record("library-tour-stuck", observation)
         raise EaAppAutomationError("EA App 游戏库新手引导未能确认关闭，已停止点击")
+
+    def _account_ban_close_point(
+        self, observation: EaObservation,
+    ) -> tuple[int, int] | None:
+        if observation.page is not EaPage.BANNED:
+            return None
+        return self._anchor(
+            observation,
+            ACCOUNT_BANNED_CLOSE_TERMS,
+            x_range=(0.35, 0.90),
+            y_range=(0.40, 0.95),
+            exact=True,
+        )
+
+    def _dismiss_account_ban(
+        self, hwnd: int, observation: EaObservation,
+    ) -> EaObservation:
+        point = self._account_ban_close_point(observation)
+        if point is None:
+            return observation
+        self._record("account-banned-close", observation)
+        self._click_point(hwnd, *point)
+        self.sleep(1.0)
+        return self._observe(hwnd)
+
+    def _raise_if_account_banned(
+        self, hwnd: int, observation: EaObservation,
+    ) -> EaObservation:
+        if observation.page is not EaPage.BANNED:
+            return observation
+        point = self._account_ban_close_point(observation)
+        if point is not None:
+            self._record("account-banned-close", observation)
+            self._click_point(hwnd, *point)
+            self.sleep(1.0)
+        self._record("account-banned", observation)
+        self.notify("EA App 报告当前账号已封禁，正在退出并换号")
+        raise EaAccountBanned("EA App 报告账号已封禁")
 
     def _identity(self, hwnd: int) -> EaIdentityFact | None:
         """Read the signed-in badge from its own tight crop.
@@ -1567,6 +1607,7 @@ class WindowsEaHybridDriver:
         for _ in range(15):
             observation = self._observe(hwnd)
             observation = self._dismiss_library_tour(hwnd, observation)
+            self._raise_if_account_banned(hwnd, observation)
             point = self._anchor(
                 observation,
                 ("apexlegends",),
@@ -1619,6 +1660,7 @@ class WindowsEaHybridDriver:
                 continue
 
             observation = self._dismiss_library_tour(hwnd, observation)
+            self._raise_if_account_banned(hwnd, observation)
             local_data = self._continue_local_data_point(observation)
             if local_data is not None:
                 if cloud_recovery_clicks >= 2:
@@ -1802,6 +1844,7 @@ class WindowsEaHybridDriver:
         for _ in range(8):
             observation = self._observe(hwnd)
             observation = self._dismiss_library_tour(hwnd, observation)
+            observation = self._dismiss_account_ban(hwnd, observation)
             # Anything still inside the login flow — the account page, the
             # password page, a verification prompt — means no session was ever
             # established, so there is nothing to sign out of. Failing here

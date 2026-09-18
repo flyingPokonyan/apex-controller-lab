@@ -21,6 +21,7 @@ class EaPage(str, Enum):
     CAPTCHA = "CAPTCHA"
     EXPIRED_SESSION = "EXPIRED_SESSION"
     SIGNED_IN = "SIGNED_IN"
+    BANNED = "BANNED"
     UNKNOWN = "UNKNOWN"
 
 
@@ -118,6 +119,22 @@ EXPIRED_SESSION_TERMS = (
     "登录已过期",
 )
 
+# Overlay on the signed-in Library. It must outrank nav words like "Library"
+# or the driver will keep hunting for Play underneath a dialog that never
+# goes away. EC:107 is the code on the current English client.
+ACCOUNT_BANNED_TERMS = (
+    "youraccounthasbeenbanned",
+    "accounthasbeenbanned",
+    "errorcodeec107",
+    "ec107",
+    "账号已被封禁",
+    "帐户已被封禁",
+    "你的账号已被封禁",
+    "你的帐户已被封禁",
+)
+
+ACCOUNT_BANNED_CLOSE_TERMS = ("close", "关闭")
+
 # Two independent markers are required, so a single stray word on the login
 # page cannot promote it to the signed-in surface.
 SIGNED_IN_TERMS = (
@@ -207,6 +224,8 @@ def is_login_error(compact: str) -> bool:
 
 def classify_page(normalized_tokens: Iterable[str]) -> EaPage:
     compact = compact_text(normalized_tokens)
+    if has_any(compact, ACCOUNT_BANNED_TERMS):
+        return EaPage.BANNED
     if has_any(compact, CAPTCHA_TERMS):
         return EaPage.CAPTCHA
     if has_any(compact, EXPIRED_SESSION_TERMS):
@@ -262,6 +281,7 @@ def page_markers(normalized_tokens: Iterable[str]) -> tuple[str, ...]:
         ("otp", OTP_TERMS),
         ("captcha", CAPTCHA_TERMS),
         ("expired", EXPIRED_SESSION_TERMS),
+        ("banned", ACCOUNT_BANNED_TERMS),
         ("submit", SUBMIT_TERMS),
         ("error", LOGIN_ERROR_TERMS),
         ("nav", SIGNED_IN_TERMS),

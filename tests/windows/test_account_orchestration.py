@@ -32,6 +32,7 @@ from apex_automation.account_orchestrator import (
 )
 from apex_automation.ea_app import (
     ApexExitEvidence,
+    EaAccountBanned,
     EaAppAutomationError,
     EaApexDownloadRequired,
     EaApexStartFailed,
@@ -921,6 +922,62 @@ class AccountOrchestratorTest(unittest.TestCase):
             self.assertEqual(result.outcome, AccountCycleOutcome.COMPLETED)
             close_call = [item for item in provider.calls if item[0] == "close"][-1]
             self.assertEqual(close_call[1][3], "FAILED")
+            self.assertLess(log.index("apex.stop"), log.index("ea.sign_out"))
+            self.assertFalse(store.load().has_lease)
+
+    def test_ea_ban_during_apex_start_closes_lease_as_banned(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            lease = replace(
+                FakeAccountProvider.lease("acct_1"),
+                expected_ea_account_id="ea_1",
+            )
+            provider = FakeAccountProvider(
+                [lease],
+                credentials={
+                    "acct_1": SecretCredentials("login@example.test", "password")
+                },
+                otp_factory=lambda challenge_id, started_at: OtpCode(
+                    code="123456",
+                    challenge_id=challenge_id,
+                    received_at=started_at,
+                    expires_at=started_at + timedelta(minutes=1),
+                ),
+            )
+            log: list[str] = []
+
+            class BannedAtLaunchDriver(FakeEaDriver):
+                def start_apex(self) -> None:
+                    self.log.append("apex.start")
+                    raise EaAccountBanned("EA App 报告账号已封禁")
+
+            store = AtomicCheckpointStore(
+                Path(directory) / "account-cycle-status.json"
+            )
+            result = AccountOrchestrator(
+                provider=provider,
+                ea_driver=BannedAtLaunchDriver(log, "ea_1"),
+                play_session=object(),
+                checkpoint_store=store,
+                device_id="device_1",
+                capture_source=object(),
+                operation_id_factory=iter(
+                    [
+                        "claim_1",
+                        "renew_1",
+                        "credentials_1",
+                        "otp_1",
+                        "close_1",
+                        "extra_1",
+                    ]
+                ).__next__,
+                notify=lambda _: None,
+            ).run_once()
+
+            self.assertEqual(result.outcome, AccountCycleOutcome.COMPLETED)
+            self.assertEqual(result.error_code, "EA_ACCOUNT_BANNED")
+            close_call = [item for item in provider.calls if item[0] == "close"][-1]
+            self.assertEqual(close_call[1][3], "FAILED")
+            self.assertEqual(close_call[1][6], "EA_ACCOUNT_BANNED")
             self.assertLess(log.index("apex.stop"), log.index("ea.sign_out"))
             self.assertFalse(store.load().has_lease)
 

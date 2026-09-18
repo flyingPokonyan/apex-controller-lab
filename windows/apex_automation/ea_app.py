@@ -26,6 +26,10 @@ class EaCaptchaRequired(EaAppAutomationError):
     reason_code = "CAPTCHA"
 
 
+class EaAccountBanned(EaAppAutomationError):
+    reason_code = "EA_ACCOUNT_BANNED"
+
+
 class EaIdentityMismatch(EaAppAutomationError):
     reason_code = "IDENTITY_MISMATCH"
 
