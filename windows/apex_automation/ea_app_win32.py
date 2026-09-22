@@ -1214,6 +1214,7 @@ class WindowsEaHybridDriver:
             self.sleep(2.0)
             observation = self._observe(hwnd)
             observation = self._dismiss_library_tour(hwnd, observation)
+            self._raise_if_account_banned(hwnd, observation)
             # Whatever EA puts on screen here gets a frame the first time it
             # appears. Waiting for the timeout to explain itself meant an
             # unexpected page — a verification prompt, say — left no evidence
@@ -1285,6 +1286,7 @@ class WindowsEaHybridDriver:
             hwnd = self._ea_window()
             observation = self._observe(hwnd)
             observation = self._dismiss_library_tour(hwnd, observation)
+            self._raise_if_account_banned(hwnd, observation)
             match = self._matching_identity(observation, expected_ea_account_id)
             if match is not None and match.verified:
                 self._record(
@@ -1597,9 +1599,15 @@ class WindowsEaHybridDriver:
         return executable.lower() in result.stdout.lower()
 
     def start_apex(self) -> None:
-        if any(self._process_running(name) for name in APEX_EXECUTABLES):
-            return
         hwnd = self._ea_window()
+        # A leftover Apex process used to skip the Library overlay. The ban
+        # dialog still sits on EA, and the play session then scans melee
+        # against an account that cannot go online.
+        if any(self._process_running(name) for name in APEX_EXECUTABLES):
+            observation = self._observe(hwnd)
+            observation = self._dismiss_library_tour(hwnd, observation)
+            self._raise_if_account_banned(hwnd, observation)
+            return
         # The orchestrator verifies the stable EA identity immediately before
         # entering this method.  Do not repeat that check here: the CEF surface
         # occasionally yields an empty OCR frame while it is otherwise fully

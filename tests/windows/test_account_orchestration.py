@@ -981,6 +981,55 @@ class AccountOrchestratorTest(unittest.TestCase):
             self.assertLess(log.index("apex.stop"), log.index("ea.sign_out"))
             self.assertFalse(store.load().has_lease)
 
+    def test_ea_ban_during_sign_in_closes_lease_as_banned(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            lease = replace(
+                FakeAccountProvider.lease("acct_1"),
+                expected_ea_account_id="ea_1",
+            )
+            provider = FakeAccountProvider(
+                [lease],
+                credentials={
+                    "acct_1": SecretCredentials("login@example.test", "password")
+                },
+            )
+            log: list[str] = []
+
+            class BannedAtSignInDriver(FakeEaDriver):
+                def sign_in(self, credentials, otp_supplier):
+                    self.log.append("ea.sign_in")
+                    raise EaAccountBanned("EA App 报告账号已封禁")
+
+            store = AtomicCheckpointStore(
+                Path(directory) / "account-cycle-status.json"
+            )
+            result = AccountOrchestrator(
+                provider=provider,
+                ea_driver=BannedAtSignInDriver(log, "ea_1"),
+                play_session=object(),
+                checkpoint_store=store,
+                device_id="device_1",
+                capture_source=object(),
+                operation_id_factory=iter(
+                    [
+                        "claim_1",
+                        "renew_1",
+                        "credentials_1",
+                        "close_1",
+                        "extra_1",
+                    ]
+                ).__next__,
+                notify=lambda _: None,
+            ).run_once()
+
+            self.assertEqual(result.outcome, AccountCycleOutcome.COMPLETED)
+            self.assertEqual(result.error_code, "EA_ACCOUNT_BANNED")
+            close_call = [item for item in provider.calls if item[0] == "close"][-1]
+            self.assertEqual(close_call[1][3], "FAILED")
+            self.assertEqual(close_call[1][6], "EA_ACCOUNT_BANNED")
+            self.assertEqual(log, ["ea.start", "ea.current_identity", "ea.sign_in", "apex.stop", "ea.sign_out"])
+            self.assertFalse(store.load().has_lease)
+
     def test_happy_path_orders_cleanup_before_close_and_clears_lease(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             now = datetime.now(timezone.utc)

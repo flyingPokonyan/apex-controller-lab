@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from datetime import datetime, timezone
 from pathlib import Path
 import json
 import sys
@@ -18,6 +19,8 @@ from apex_automation.ea_app import (
     EaAccountBanned,
     EaApexDownloadRequired,
     EaApexStartFailed,
+    EaAppAutomationError,
+    EaIdentityFact,
     EaLoginRejected,
     EaOtpUnavailable,
 )
@@ -470,7 +473,29 @@ class EaLaunchRecoveryTest(unittest.TestCase):
         driver._record = lambda step, *_args, **_kwargs: records.append(step)
         driver._process_running = lambda _name: False
         driver.sleep = lambda _seconds: None
+        driver.evidence = None
+        driver.notify = lambda _message: None
+        driver._dismiss_expired_session = lambda _hwnd: False
         return driver
+
+    def banned_overlay(self, account_id: str = "BlazeCobra_670") -> EaObservation:
+        return self.observation(
+            ("Library", 80, 40),
+            ("Your account has been banned", 960, 360),
+            ("Error code: EC:107", 960, 620),
+            ("CLOSE", 1100, 700),
+            ("Apex Legends", 120, 460),
+            ("Update complete", 140, 500),
+            (account_id, 1700, 40),
+        )
+
+    def assert_raises_account_banned(self, action, clicks, records) -> None:
+        with self.assertRaises(EaAccountBanned) as caught:
+            action()
+        self.assertEqual(caught.exception.reason_code, "EA_ACCOUNT_BANNED")
+        self.assertEqual(clicks, [(1100, 700)])
+        self.assertIn("account-banned-close", records)
+        self.assertIn("account-banned", records)
 
     def test_download_page_fails_fast_without_clicking_playing_copy(self) -> None:
         entry = self.observation(("Apex Legends", 120, 460))
@@ -508,6 +533,80 @@ class EaLaunchRecoveryTest(unittest.TestCase):
         self.assertEqual(caught.exception.reason_code, "EA_ACCOUNT_BANNED")
         self.assertEqual(clicks, [(1100, 700)])
         self.assertEqual(records, ["account-banned-close", "account-banned"])
+
+    def test_sign_in_ban_overlay_before_credentials_does_not_ban_this_lease(self) -> None:
+        # A leftover overlay from the previous session can still be on screen
+        # when this lease starts signing in. Marking the new account banned
+        # would be the wrong account.
+        clicks: list[tuple[int, int]] = []
+        records: list[str] = []
+        driver = self.driver([self.banned_overlay()], clicks, records)
+        credentials = SecretCredentials("login@example.test", "password")
+
+        with self.assertRaises(EaAppAutomationError) as caught:
+            driver.sign_in(credentials, lambda _challenge: None)
+
+        self.assertEqual(caught.exception.reason_code, "EA_UI_UNKNOWN")
+        self.assertNotIsInstance(caught.exception, EaAccountBanned)
+        self.assertEqual(clicks, [])
+
+    def test_sign_in_ban_overlay_after_password_fails_as_banned(self) -> None:
+        password = self.observation(
+            ("Password", 400, 500),
+            ("Sign in", 400, 650),
+        )
+        clicks: list[tuple[int, int]] = []
+        records: list[str] = []
+        driver = self.driver([password, self.banned_overlay()], clicks, records)
+        driver._submit_password = lambda *_args, **_kwargs: "enter"
+        driver._identity = lambda _hwnd: EaIdentityFact(
+            "BlazeCobra_670", "ea-window-ocr:0.990", True
+        )
+        credentials = SecretCredentials("login@example.test", "password")
+
+        self.assert_raises_account_banned(
+            lambda: driver.sign_in(credentials, lambda _challenge: None),
+            clicks,
+            records,
+        )
+
+    def test_identity_wait_ban_overlay_fails_even_when_badge_is_readable(self) -> None:
+        clicks: list[tuple[int, int]] = []
+        records: list[str] = []
+        driver = self.driver([self.banned_overlay()], clicks, records)
+        driver._identity = lambda _hwnd: EaIdentityFact(
+            "BlazeCobra_670", "ea-window-ocr:0.990", True
+        )
+
+        self.assert_raises_account_banned(
+            lambda: driver._await_identity(
+                1,
+                lambda _challenge: None,
+                otp_methods=(OtpMethod.TOTP,),
+                initial_challenge_started_at=datetime.now(timezone.utc),
+            ),
+            clicks,
+            records,
+        )
+
+    def test_verify_identity_ban_overlay_fails_even_when_badge_is_readable(self) -> None:
+        clicks: list[tuple[int, int]] = []
+        records: list[str] = []
+        driver = self.driver([self.banned_overlay()], clicks, records)
+
+        self.assert_raises_account_banned(
+            lambda: driver.verify_identity("BlazeCobra_670"),
+            clicks,
+            records,
+        )
+
+    def test_start_apex_ban_overlay_is_not_skipped_when_apex_already_running(self) -> None:
+        clicks: list[tuple[int, int]] = []
+        records: list[str] = []
+        driver = self.driver([self.banned_overlay()], clicks, records)
+        driver._process_running = lambda _name: True
+
+        self.assert_raises_account_banned(driver.start_apex, clicks, records)
 
     def test_download_flow_registers_existing_copy_before_restart(self) -> None:
         download_page = self.observation(("DOWNLOAD", 975, 535))
