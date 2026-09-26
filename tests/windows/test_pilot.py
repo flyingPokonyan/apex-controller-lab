@@ -1049,7 +1049,7 @@ class PilotTest(unittest.TestCase):
         record = self._settle_overlay()
         self.assertEqual(record["state"], "MODE_PANEL_TARGET_VISIBLE")
         self.assertNotIn(("tap", 1, 80), self.sender.calls)
-        self.assertEqual({call for call in self.sender.calls}, {("click", 1750, 696)})
+        self.assertEqual({call for call in self.sender.calls}, {("click", 2145, 696)})
         self.assertIn("OVERLAY_RULE_OUTRANKED", self.recorder.names())
 
     def test_a_ticked_fill_box_is_unticked_before_the_match_is_started(self) -> None:

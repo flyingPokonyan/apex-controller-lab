@@ -21,8 +21,8 @@
     "modeSelectClick": [1280, 1295],
     "modeCardClick": [308, 1215],
     "startMatchClick": [1280, 1295],
-    "targetCardClick": [1750, 696],
-    "targetConfirmClick": [1700, 806],
+    "targetCardClick": [2145, 696],
+    "targetConfirmClick": [2040, 808],
     "fillToggleClick": [86, 222],
     "rankedRoadCardClick": [2256, 1282],
     "challengeNextClick": [2500, 216],
@@ -379,7 +379,7 @@
       "confirmMs": 2000,
       "maxAttempts": 3,
       "allowedNextStates": ["MODE_PANEL_TARGET_HOVERED", "LOBBY_READY_TARGET", "LOBBY_READY_TARGET_FILL_ON"],
-      "_note": "点卡片只是把焦点移过去，重复无害。坐标落在目标卡片的标题上（进化版机器人大逃杀，标题实测 x1637-2055 / y675-717）。20260730-215512 实测这一击通常一步到位：888.8s 点下去，891.2s 就已经回到大厅，悬停态只是兜底。"
+      "_note": "点卡片只是把焦点移过去，重复无害。坐标落在目标卡片的标题上。2026-09-26 改版后标题在训练栏中间那张卡的 x1941-2349 / y677-715，点击取标题中心 [2145, 696]。20260730-215512 实测这一击通常一步到位，悬停态只是兜底。"
     },
     {
       "id": "mode-panel-confirm-hovered",
