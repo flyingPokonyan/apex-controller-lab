@@ -981,8 +981,8 @@ class AccountOrchestratorTest(unittest.TestCase):
             close_call = [item for item in provider.calls if item[0] == "close"][-1]
             self.assertEqual(close_call[1][3], "FAILED")
             self.assertEqual(close_call[1][6], "EA_ACCOUNT_BANNED")
-            sign_out = log.index("ea.sign_out")
-            self.assertLess(log.index("apex.stop"), sign_out)
+            self.assertIn("apex.stop", log)
+            self.assertNotIn("ea.sign_out", log)
 
     def test_ea_ban_still_closes_when_sign_out_fails(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -1151,6 +1151,66 @@ class AccountOrchestratorTest(unittest.TestCase):
             self.assertNotIn("EA_ACCOUNT_BANNED", close_codes)
             self.assertFalse(store.load().has_lease)
 
+    def test_unread_leftover_ban_signs_out_then_logs_in(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            lease = replace(
+                FakeAccountProvider.lease("acct_1"),
+                expected_ea_account_id="ea_1",
+            )
+            provider = FakeAccountProvider(
+                [lease],
+                credentials={
+                    "acct_1": SecretCredentials("login@example.test", "password")
+                },
+                otp_factory=lambda challenge_id, started_at: OtpCode(
+                    code="123456",
+                    challenge_id=challenge_id,
+                    received_at=started_at,
+                    expires_at=started_at + timedelta(minutes=1),
+                ),
+            )
+            log: list[str] = []
+
+            class UnreadLeftoverBan(FakeEaDriver):
+                def current_page_is_banned(self) -> bool:
+                    return "ea.sign_out" not in self.log
+
+                def current_identity(self):
+                    self.log.append("ea.current_identity")
+                    return None
+
+            store = AtomicCheckpointStore(
+                Path(directory) / "account-cycle-status.json"
+            )
+            result = AccountOrchestrator(
+                provider=provider,
+                ea_driver=UnreadLeftoverBan(log, "ea_1"),
+                play_session=FakeManagedSession(log, FakeDrain()),
+                checkpoint_store=store,
+                device_id="device_1",
+                capture_source=object(),
+                operation_id_factory=iter(
+                    [
+                        "claim_1",
+                        "renew_1",
+                        "credentials_1",
+                        "otp_1",
+                        "close_1",
+                        "extra_1",
+                    ]
+                ).__next__,
+                completion_poll_s=0.1,
+                sleep=lambda _: None,
+                notify=lambda _: None,
+            ).run_once()
+
+            self.assertEqual(result.outcome, AccountCycleOutcome.COMPLETED)
+            self.assertIsNone(result.error_code)
+            self.assertLess(log.index("ea.sign_out"), log.index("ea.sign_in"))
+            close_codes = [item[1][6] for item in provider.calls if item[0] == "close"]
+            self.assertNotIn("EA_ACCOUNT_BANNED", close_codes)
+            self.assertFalse(store.load().has_lease)
+
     def test_ea_ban_during_sign_in_closes_lease_as_banned(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             lease = replace(
@@ -1197,7 +1257,7 @@ class AccountOrchestratorTest(unittest.TestCase):
             close_call = [item for item in provider.calls if item[0] == "close"][-1]
             self.assertEqual(close_call[1][3], "FAILED")
             self.assertEqual(close_call[1][6], "EA_ACCOUNT_BANNED")
-            self.assertEqual(log, ["ea.start", "ea.current_identity", "ea.sign_in", "apex.stop", "ea.sign_out"])
+            self.assertEqual(log, ["ea.start", "ea.current_identity", "ea.sign_in", "apex.stop"])
             self.assertFalse(store.load().has_lease)
 
     def test_happy_path_orders_cleanup_before_close_and_clears_lease(self) -> None:

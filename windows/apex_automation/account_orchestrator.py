@@ -548,10 +548,16 @@ class AccountOrchestrator:
         same_account = current is not None and identity_matches(
             expected, current.ea_account_id
         )
-        if banned and (current is None or same_account):
+        if banned and same_account:
             raise EaAccountBanned("EA App 报告当前账号已封禁")
-        if current is not None and not same_account:
-            if not self.ea_driver.sign_out():
+        leftover = banned or (current is not None and not same_account)
+        if leftover:
+            self.notify("EA App 仍停留在上一账号或封禁页，正在退出后换号")
+            try:
+                signed_out = self.ea_driver.sign_out()
+            except EaAppAutomationError:
+                signed_out = False
+            if not signed_out:
                 raise EaAppAutomationError("EA App 无法确认已退出其他账号")
             current = None
         if current is None:
@@ -705,16 +711,21 @@ class AccountOrchestrator:
             return self._pause("APEX_EXIT_TIMEOUT", manual=True)
         self._update_checkpoint(workflow_phase=WorkflowPhase.EA_SIGNING_OUT)
         signed_out = False
-        try:
-            signed_out = self.ea_driver.sign_out()
-        except EaAccountBanned as error:
-            reason_code = error.reason_code
-            signed_out = True
-        except EaAppAutomationError:
-            if not is_account_ban_reason(reason_code):
-                return self._pause("EA_SIGNOUT_FAILED", manual=True)
         if is_account_ban_reason(reason_code):
+            # Ban overlays and empty-library shells do not reliably expose
+            # Sign out. Waiting here used to pause the cycle instead of 换号.
+            # The next claim signs out the leftover session before login.
             signed_out = True
+        else:
+            try:
+                signed_out = self.ea_driver.sign_out()
+            except EaAccountBanned as error:
+                reason_code = error.reason_code
+                signed_out = True
+            except EaAppAutomationError:
+                return self._pause("EA_SIGNOUT_FAILED", manual=True)
+            if is_account_ban_reason(reason_code):
+                signed_out = True
         cleanup = CleanupEvidence(True, True, signed_out)
         if not cleanup.complete:
             return self._pause("EA_SIGNOUT_FAILED", manual=True)
@@ -1211,7 +1222,11 @@ class AccountOrchestrator:
                 result.outcome is AccountCycleOutcome.COMPLETED
                 and result.error_code is not None
             ):
-                delay = max(1.0, idle_s)
+                delay = (
+                    1.0
+                    if is_account_ban_reason(result.error_code)
+                    else max(1.0, idle_s)
+                )
                 self.notify(
                     f"上一账号因 {result.error_code} 收口；"
                     f"Runner 等待 {delay:g} 秒后再领号"

@@ -1917,7 +1917,11 @@ class WindowsEaHybridDriver:
         identity: EaIdentityFact | None,
     ) -> tuple[EaObservation, tuple[int, int]] | None:
         for name, point in self._account_menu_triggers(self._observe(hwnd), identity):
-            self._click_point(hwnd, *point)
+            try:
+                self._click_point(hwnd, *point)
+            except EaAppAutomationError:
+                self._record("signout-menu-focus-failed", trigger=name)
+                continue
             self.sleep(1.2)
             menu = self._observe(hwnd)
             item = self._anchor(menu, SIGN_OUT_TERMS)
@@ -1926,7 +1930,10 @@ class WindowsEaHybridDriver:
                 return menu, item
             self._record("signout-menu-missing", menu, trigger=name)
             # Close whatever that click did open before trying the next one.
-            self._focus(hwnd)
+            try:
+                self._focus(hwnd)
+            except EaAppAutomationError:
+                continue
             self._tap(VK_ESCAPE)
             self.sleep(0.5)
         return None
@@ -1938,7 +1945,10 @@ class WindowsEaHybridDriver:
         for _ in range(8):
             observation = self._observe(hwnd)
             observation = self._dismiss_library_tour(hwnd, observation)
-            observation = self._dismiss_account_ban(hwnd, observation)
+            try:
+                observation = self._dismiss_account_ban(hwnd, observation)
+            except EaAppAutomationError:
+                observation = self._observe(hwnd)
             # Anything still inside the login flow — the account page, the
             # password page, a verification prompt — means no session was ever
             # established, so there is nothing to sign out of. Failing here
@@ -1947,8 +1957,12 @@ class WindowsEaHybridDriver:
             if observation.page in PRE_LOGIN_PAGES:
                 self._record("signout-not-signed-in", observation)
                 return True
-            signed_in_page_seen = (
-                signed_in_page_seen or observation.page is EaPage.SIGNED_IN
+            # Empty library and the EC:107 overlay are still a signed-in
+            # session. They used to skip the account menu, so 换号 kept the
+            # banned account on screen and the next lease looked banned too.
+            signed_in_page_seen = signed_in_page_seen or observation.page in (
+                EaPage.SIGNED_IN,
+                EaPage.BANNED,
             )
             identity = self._identity(hwnd)
             if identity is not None:
@@ -1960,7 +1974,11 @@ class WindowsEaHybridDriver:
         if opened is None:
             return False
         _, item = opened
-        self._click_point(hwnd, *item)
+        try:
+            self._click_point(hwnd, *item)
+        except EaAppAutomationError:
+            self._record("signout-item-failed")
+            return False
         deadline = time.monotonic() + 25.0
         confirmed = False
         while time.monotonic() < deadline:
@@ -1975,7 +1993,11 @@ class WindowsEaHybridDriver:
             confirm = self._anchor(observation, SIGN_OUT_CONFIRM_TERMS)
             if confirm is not None and confirm != item:
                 self._record("signout-confirm", observation)
-                self._click_point(hwnd, *confirm)
+                try:
+                    self._click_point(hwnd, *confirm)
+                except EaAppAutomationError:
+                    self._record("signout-confirm-failed", observation)
+                    return False
                 confirmed = True
         self._record("signout-timeout", self._observe(hwnd))
         return False

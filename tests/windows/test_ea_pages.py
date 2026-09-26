@@ -319,6 +319,27 @@ class IdentityMatchTest(unittest.TestCase):
         self.assertFalse(driver.sign_out())
         self.assertEqual(opened, [None])
 
+    def test_sign_out_tries_the_menu_on_an_empty_library_ban(self) -> None:
+        observation = EaObservation(
+            rect=(0, 0, 1920, 1080),
+            frame=np.zeros((1, 1), dtype=np.uint8),
+            tokens=(),
+            page=EaPage.BANNED,
+        )
+        opened = []
+        driver = object.__new__(WindowsEaHybridDriver)
+        driver._ea_window = lambda: 1
+        driver._observe = lambda _hwnd: observation
+        driver._dismiss_library_tour = lambda _hwnd, seen: seen
+        driver._dismiss_account_ban = lambda _hwnd, seen: seen
+        driver._identity = lambda _hwnd: None
+        driver._record = lambda *_args, **_kwargs: None
+        driver._open_account_menu = lambda _hwnd, identity: opened.append(identity)
+        driver.sleep = lambda _seconds: None
+
+        self.assertFalse(driver.sign_out())
+        self.assertEqual(opened, [None])
+
 
 class AnchorTargetingTest(unittest.TestCase):
     """`_anchor` is a static rule over OCR boxes, so it runs off Windows."""
