@@ -119,9 +119,10 @@ EXPIRED_SESSION_TERMS = (
     "登录已过期",
 )
 
-# Overlay on the signed-in Library. It must outrank nav words like "Library"
-# or the driver will keep hunting for Play underneath a dialog that never
-# goes away. EC:107 is the code on the current English client.
+# Overlay on the signed-in Library, and the empty-library shell that remains
+# after the overlay is dismissed. Both mean this EA session cannot go online.
+# They must outrank nav words like "Library" or the driver keeps hunting for
+# Play. EC:107 is the code on the current English client.
 ACCOUNT_BANNED_TERMS = (
     "youraccounthasbeenbanned",
     "accounthasbeenbanned",
@@ -130,6 +131,9 @@ ACCOUNT_BANNED_TERMS = (
     "beenbanned",
     "errorcodeec107",
     "ec107",
+    "yourlibraryisempty",
+    "libraryisempty",
+    "lookingforsomething",
     "账号已被封禁",
     "帐户已被封禁",
     "你的账号已被封禁",
@@ -137,6 +141,9 @@ ACCOUNT_BANNED_TERMS = (
     "账号已封禁",
     "帐户已封禁",
     "已被封禁",
+    "你的游戏库是空的",
+    "游戏库是空的",
+    "游戏库为空",
 )
 
 ACCOUNT_BANNED_CLOSE_TERMS = ("close", "关闭")

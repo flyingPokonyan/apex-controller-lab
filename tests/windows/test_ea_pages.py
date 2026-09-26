@@ -202,8 +202,9 @@ class PageClassificationTest(unittest.TestCase):
         self.assertIs(classify_page(tokens("Error code", "EC:107")), EaPage.BANNED)
         self.assertIs(classify_page(tokens("账号已封禁")), EaPage.BANNED)
 
-    def test_empty_library_after_closing_the_ban_dialog_is_not_a_ban(self) -> None:
-        self.assertIsNot(classify_page(EMPTY_LIBRARY), EaPage.BANNED)
+    def test_empty_library_after_the_ban_dialog_is_still_banned(self) -> None:
+        self.assertIs(classify_page(EMPTY_LIBRARY), EaPage.BANNED)
+        self.assertIn("banned", page_markers(EMPTY_LIBRARY))
 
     def test_expired_session_is_its_own_page(self) -> None:
         self.assertIs(
@@ -543,6 +544,27 @@ class EaLaunchRecoveryTest(unittest.TestCase):
         self.assertEqual(clicks, [(1100, 700)])
         self.assertIn("account-banned", records)
         self.assertIn("account-banned-close", records)
+
+    def test_empty_library_fails_as_banned_without_a_close_button(self) -> None:
+        empty = self.observation(
+            ("Library", 80, 40),
+            ("Your library is empty", 960, 360),
+            ("Looking for something?", 960, 520),
+            ("Apex Legends", 120, 460),
+            ("Update complete", 140, 500),
+            ("CyberTony8S42", 1700, 40),
+        )
+        clicks: list[tuple[int, int]] = []
+        records: list[str] = []
+        driver = self.driver([empty], clicks, records)
+
+        with self.assertRaises(EaAccountBanned) as caught:
+            driver.start_apex()
+
+        self.assertEqual(caught.exception.reason_code, "EA_ACCOUNT_BANNED")
+        self.assertEqual(clicks, [])
+        self.assertEqual(records, ["account-banned"])
+        self.assertNotIn("apex-entry", records)
 
     def test_ban_overlay_still_fails_as_banned_when_close_click_fails(self) -> None:
         clicks: list[tuple[int, int]] = []
