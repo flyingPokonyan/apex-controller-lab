@@ -154,6 +154,7 @@ PRE_LOGIN_PAGES = (
     EaPage.OTP,
     EaPage.EXPIRED_SESSION,
 )
+GW_OWNER = 4
 
 
 if sys.platform == "win32":
@@ -213,6 +214,19 @@ class WindowsEaHybridDriver:
         self.user32 = ctypes.windll.user32
         self.kernel32 = ctypes.windll.kernel32
         self.user32.GetForegroundWindow.restype = wintypes.HWND
+        self.user32.GetParent.argtypes = [wintypes.HWND]
+        self.user32.GetParent.restype = wintypes.HWND
+        self.user32.GetWindow.argtypes = [wintypes.HWND, wintypes.UINT]
+        self.user32.GetWindow.restype = wintypes.HWND
+        self.user32.BringWindowToTop.argtypes = [wintypes.HWND]
+        self.user32.BringWindowToTop.restype = wintypes.BOOL
+        self.user32.AttachThreadInput.argtypes = [
+            wintypes.DWORD,
+            wintypes.DWORD,
+            wintypes.BOOL,
+        ]
+        self.user32.AttachThreadInput.restype = wintypes.BOOL
+        self.kernel32.GetCurrentThreadId.restype = wintypes.DWORD
         self.user32.GetWindowThreadProcessId.argtypes = [
             wintypes.HWND,
             ctypes.POINTER(wintypes.DWORD),
@@ -324,13 +338,58 @@ class WindowsEaHybridDriver:
             raise EaAppAutomationError("无法读取 EA App 窗口边界")
         return rect.left, rect.top, rect.right, rect.bottom
 
+    def _window_belongs_to_ea(self, ea_hwnd: int, candidate: int) -> bool:
+        """True when the foreground window is the EA frame or one of its dialogs."""
+
+        if not candidate:
+            return False
+        ea_hwnd = int(ea_hwnd)
+        current = int(candidate)
+        seen: set[int] = set()
+        for _ in range(8):
+            if not current or current in seen:
+                break
+            if current == ea_hwnd:
+                return True
+            seen.add(current)
+            parent = int(self.user32.GetParent(current) or 0)
+            owner = int(self.user32.GetWindow(current, GW_OWNER) or 0)
+            current = parent or owner
+        pid_ea = wintypes.DWORD()
+        pid_other = wintypes.DWORD()
+        self.user32.GetWindowThreadProcessId(ea_hwnd, ctypes.byref(pid_ea))
+        self.user32.GetWindowThreadProcessId(int(candidate), ctypes.byref(pid_other))
+        return bool(pid_ea.value and pid_ea.value == pid_other.value)
+
     def _focus(self, hwnd: int) -> None:
         hwnd = self._live(hwnd)
         self.user32.ShowWindow(hwnd, SW_RESTORE)
-        self.user32.SetForegroundWindow(hwnd)
-        self.sleep(0.4)
-        if int(self.user32.GetForegroundWindow()) != hwnd:
-            raise EaAppAutomationError("EA App 无法取得前台焦点")
+        foreground = int(self.user32.GetForegroundWindow() or 0)
+        if self._window_belongs_to_ea(hwnd, foreground):
+            return
+        current_thread = int(self.kernel32.GetCurrentThreadId())
+        fg_pid = wintypes.DWORD()
+        fg_thread = int(
+            self.user32.GetWindowThreadProcessId(foreground, ctypes.byref(fg_pid))
+            or 0
+        )
+        attached = False
+        if foreground and fg_thread and fg_thread != current_thread:
+            attached = bool(self.user32.AttachThreadInput(current_thread, fg_thread, True))
+        try:
+            self.user32.BringWindowToTop(hwnd)
+            self.user32.SetForegroundWindow(hwnd)
+            self.sleep(0.4)
+            if self._window_belongs_to_ea(
+                hwnd, int(self.user32.GetForegroundWindow() or 0)
+            ):
+                return
+        finally:
+            if attached:
+                self.user32.AttachThreadInput(current_thread, fg_thread, False)
+        if self._window_belongs_to_ea(hwnd, int(self.user32.GetForegroundWindow() or 0)):
+            return
+        raise EaAppAutomationError("EA App 无法取得前台焦点")
 
     def _send(self, inputs: list["INPUT"]) -> None:
         array_type = INPUT * len(inputs)
@@ -728,13 +787,16 @@ class WindowsEaHybridDriver:
     ) -> EaObservation:
         if observation.page is not EaPage.BANNED:
             return observation
-        point = self._account_ban_close_point(observation)
-        if point is not None:
-            self._record("account-banned-close", observation)
-            self._click_point(hwnd, *point)
-            self.sleep(1.0)
         self._record("account-banned", observation)
         self.notify("EA App 报告当前账号已封禁，正在退出并换号")
+        point = self._account_ban_close_point(observation)
+        if point is not None:
+            try:
+                self._record("account-banned-close", observation)
+                self._click_point(hwnd, *point)
+                self.sleep(1.0)
+            except EaAppAutomationError:
+                self._record("account-banned-close-failed", observation)
         raise EaAccountBanned("EA App 报告账号已封禁")
 
     def _identity(self, hwnd: int) -> EaIdentityFact | None:
@@ -882,17 +944,37 @@ class WindowsEaHybridDriver:
 
     def current_identity(self) -> EaIdentityFact | None:
         hwnd = self._ea_window()
+        observation = self._observe(hwnd)
         # A login page never carries a current identity, whatever the corner
-        # crop happens to recognise there.
-        if self._observe(hwnd).page in (
-            EaPage.EMAIL,
-            EaPage.PASSWORD,
-            EaPage.OTP,
-            EaPage.CAPTCHA,
-            EaPage.EXPIRED_SESSION,
-        ):
+        # crop happens to recognise there. A ban overlay still belongs to the
+        # signed-in session underneath it.
+        if observation.page in PRE_LOGIN_PAGES or observation.page is EaPage.CAPTCHA:
             return None
-        return self._identity(hwnd)
+        identity = self._identity(hwnd)
+        if identity is not None:
+            return identity
+        candidates: list[tuple[float, str]] = []
+        for token in observation.tokens:
+            for candidate in identity_candidates([token.normalized]):
+                if is_ui_chrome(candidate):
+                    continue
+                candidates.append((token.confidence, candidate))
+        if not candidates:
+            return None
+        confidence, account_id = max(candidates)
+        if self.evidence is not None:
+            self.evidence.protect(account_id)
+        return EaIdentityFact(
+            ea_account_id=account_id,
+            source=f"ea-window-ocr:{confidence:.3f}",
+            verified=confidence >= 0.70,
+        )
+
+    def current_page_is_banned(self) -> bool:
+        hwnd = self._ea_window()
+        observation = self._observe(hwnd)
+        observation = self._dismiss_library_tour(hwnd, observation)
+        return observation.page is EaPage.BANNED
 
     def _submit(
         self,
@@ -1040,6 +1122,10 @@ class WindowsEaHybridDriver:
         self._record("signin-start", observation)
         if observation.page is EaPage.CAPTCHA:
             raise EaCaptchaRequired("EA App 出现 Captcha，已暂停")
+        if observation.page is EaPage.BANNED:
+            observation = self._dismiss_account_ban(hwnd, observation)
+        if observation.page is EaPage.BANNED:
+            self._raise_if_account_banned(hwnd, observation)
         if observation.page is EaPage.EMAIL:
             observation = self._submit_login_identifier(hwnd, observation, credentials)
         challenge_started_at = datetime.now(timezone.utc)

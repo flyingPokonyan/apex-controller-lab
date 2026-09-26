@@ -125,12 +125,18 @@ EXPIRED_SESSION_TERMS = (
 ACCOUNT_BANNED_TERMS = (
     "youraccounthasbeenbanned",
     "accounthasbeenbanned",
+    "hasbeenbanned",
+    "accountbanned",
+    "beenbanned",
     "errorcodeec107",
     "ec107",
     "账号已被封禁",
     "帐户已被封禁",
     "你的账号已被封禁",
     "你的帐户已被封禁",
+    "账号已封禁",
+    "帐户已封禁",
+    "已被封禁",
 )
 
 ACCOUNT_BANNED_CLOSE_TERMS = ("close", "关闭")

@@ -194,6 +194,14 @@ class PageClassificationTest(unittest.TestCase):
         self.assertIs(classify_page(BANNED_OVERLAY), EaPage.BANNED)
         self.assertIn("banned", page_markers(BANNED_OVERLAY))
 
+    def test_ban_overlay_matches_fragmented_ocr(self) -> None:
+        self.assertIs(
+            classify_page(tokens("account has been banned")),
+            EaPage.BANNED,
+        )
+        self.assertIs(classify_page(tokens("Error code", "EC:107")), EaPage.BANNED)
+        self.assertIs(classify_page(tokens("账号已封禁")), EaPage.BANNED)
+
     def test_empty_library_after_closing_the_ban_dialog_is_not_a_ban(self) -> None:
         self.assertIsNot(classify_page(EMPTY_LIBRARY), EaPage.BANNED)
 
@@ -476,6 +484,7 @@ class EaLaunchRecoveryTest(unittest.TestCase):
         driver.evidence = None
         driver.notify = lambda _message: None
         driver._dismiss_expired_session = lambda _hwnd: False
+        driver._dismiss_library_tour = lambda _hwnd, observation: observation
         return driver
 
     def banned_overlay(self, account_id: str = "BlazeCobra_670") -> EaObservation:
@@ -532,23 +541,47 @@ class EaLaunchRecoveryTest(unittest.TestCase):
 
         self.assertEqual(caught.exception.reason_code, "EA_ACCOUNT_BANNED")
         self.assertEqual(clicks, [(1100, 700)])
-        self.assertEqual(records, ["account-banned-close", "account-banned"])
+        self.assertIn("account-banned", records)
+        self.assertIn("account-banned-close", records)
 
-    def test_sign_in_ban_overlay_before_credentials_does_not_ban_this_lease(self) -> None:
-        # A leftover overlay from the previous session can still be on screen
-        # when this lease starts signing in. Marking the new account banned
-        # would be the wrong account.
+    def test_ban_overlay_still_fails_as_banned_when_close_click_fails(self) -> None:
         clicks: list[tuple[int, int]] = []
         records: list[str] = []
         driver = self.driver([self.banned_overlay()], clicks, records)
+        driver.notify = lambda _message: None
+
+        def boom(_hwnd, _x, _y) -> None:
+            raise EaAppAutomationError("EA App 无法取得前台焦点")
+
+        driver._click_point = boom
+
+        with self.assertRaises(EaAccountBanned) as caught:
+            driver.start_apex()
+
+        self.assertEqual(caught.exception.reason_code, "EA_ACCOUNT_BANNED")
+        self.assertEqual(clicks, [])
+        self.assertIn("account-banned", records)
+        self.assertIn("account-banned-close-failed", records)
+
+    def test_sign_in_ban_overlay_before_credentials_is_the_signed_in_session(self) -> None:
+        # If identity was unreadable, sign-in still sees the overlay of the
+        # session that is actually signed in. Closing it and reporting banned
+        # is what lets the orchestrator mark this lease and claim another.
+        clicks: list[tuple[int, int]] = []
+        records: list[str] = []
+        driver = self.driver(
+            [self.banned_overlay(), self.banned_overlay()],
+            clicks,
+            records,
+        )
         credentials = SecretCredentials("login@example.test", "password")
 
-        with self.assertRaises(EaAppAutomationError) as caught:
+        with self.assertRaises(EaAccountBanned) as caught:
             driver.sign_in(credentials, lambda _challenge: None)
 
-        self.assertEqual(caught.exception.reason_code, "EA_UI_UNKNOWN")
-        self.assertNotIsInstance(caught.exception, EaAccountBanned)
-        self.assertEqual(clicks, [])
+        self.assertEqual(caught.exception.reason_code, "EA_ACCOUNT_BANNED")
+        self.assertEqual(clicks, [(1100, 700), (1100, 700)])
+        self.assertIn("account-banned", records)
 
     def test_sign_in_ban_overlay_after_password_fails_as_banned(self) -> None:
         password = self.observation(

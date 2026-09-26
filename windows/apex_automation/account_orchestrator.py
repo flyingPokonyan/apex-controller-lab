@@ -21,13 +21,17 @@ from .account_provider import (
     OtpCode,
 )
 from .ea_app import (
+    ApexExitEvidence,
+    EaAccountBanned,
     EaAppAutomationError,
     EaApexDownloadRequired,
     EaApexStartFailed,
     EaAppDriver,
     EaIdentityFact,
     OtpChallenge,
+    is_account_ban_reason,
 )
+from .ea_pages import identity_matches
 from .lease_keeper import LeaseKeeper, LeaseKeeperSnapshot, LeaseKeeperState
 from .orchestration_state import (
     AtomicCheckpointStore,
@@ -539,8 +543,14 @@ class AccountOrchestrator:
             raise EaAppAutomationError("租约缺少可验证的 EA 稳定账号 ID")
         self._update_checkpoint(workflow_phase=WorkflowPhase.EA_STARTING)
         self.ea_driver.ensure_started()
+        banned = self.ea_driver.current_page_is_banned()
         current = self.ea_driver.current_identity()
-        if current is not None and current.ea_account_id != expected:
+        same_account = current is not None and identity_matches(
+            expected, current.ea_account_id
+        )
+        if banned and (current is None or same_account):
+            raise EaAccountBanned("EA App 报告当前账号已封禁")
+        if current is not None and not same_account:
             if not self.ea_driver.sign_out():
                 raise EaAppAutomationError("EA App 无法确认已退出其他账号")
             current = None
@@ -684,15 +694,27 @@ class AccountOrchestrator:
     ) -> AccountCycleResult:
         try:
             exit_evidence = self.ea_driver.stop_apex()
+        except EaAccountBanned as error:
+            reason_code = error.reason_code
+            exit_evidence = ApexExitEvidence(True, True)
         except EaAppAutomationError:
             return self._pause("CLEANUP_UNCONFIRMED", manual=True)
-        if not exit_evidence.all_processes_exited:
+        if not exit_evidence.all_processes_exited and not is_account_ban_reason(
+            reason_code
+        ):
             return self._pause("APEX_EXIT_TIMEOUT", manual=True)
         self._update_checkpoint(workflow_phase=WorkflowPhase.EA_SIGNING_OUT)
+        signed_out = False
         try:
             signed_out = self.ea_driver.sign_out()
+        except EaAccountBanned as error:
+            reason_code = error.reason_code
+            signed_out = True
         except EaAppAutomationError:
-            return self._pause("EA_SIGNOUT_FAILED", manual=True)
+            if not is_account_ban_reason(reason_code):
+                return self._pause("EA_SIGNOUT_FAILED", manual=True)
+        if is_account_ban_reason(reason_code):
+            signed_out = True
         cleanup = CleanupEvidence(True, True, signed_out)
         if not cleanup.complete:
             return self._pause("EA_SIGNOUT_FAILED", manual=True)

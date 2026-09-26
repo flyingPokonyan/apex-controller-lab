@@ -30,6 +30,10 @@ class EaAccountBanned(EaAppAutomationError):
     reason_code = "EA_ACCOUNT_BANNED"
 
 
+def is_account_ban_reason(reason_code: str | None) -> bool:
+    return "BANNED" in str(reason_code or "").upper()
+
+
 class EaIdentityMismatch(EaAppAutomationError):
     reason_code = "IDENTITY_MISMATCH"
 
@@ -87,6 +91,8 @@ class EaAppDriver(Protocol):
 
     def current_identity(self) -> EaIdentityFact | None: ...
 
+    def current_page_is_banned(self) -> bool: ...
+
     def sign_in(
         self,
         credentials: SecretCredentials,
@@ -121,6 +127,10 @@ class UnavailableEaAppDriver:
     def current_identity(self) -> EaIdentityFact | None:
         self._unavailable()
         return None
+
+    def current_page_is_banned(self) -> bool:
+        self._unavailable()
+        return False
 
     def sign_in(
         self,

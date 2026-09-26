@@ -440,6 +440,9 @@ class FakeEaDriver:
         self.log.append("ea.current_identity")
         return None
 
+    def current_page_is_banned(self) -> bool:
+        return False
+
     def sign_in(self, credentials, otp_supplier):
         self.log.append("ea.sign_in")
         now = datetime.now(timezone.utc)
@@ -978,7 +981,174 @@ class AccountOrchestratorTest(unittest.TestCase):
             close_call = [item for item in provider.calls if item[0] == "close"][-1]
             self.assertEqual(close_call[1][3], "FAILED")
             self.assertEqual(close_call[1][6], "EA_ACCOUNT_BANNED")
-            self.assertLess(log.index("apex.stop"), log.index("ea.sign_out"))
+            sign_out = log.index("ea.sign_out")
+            self.assertLess(log.index("apex.stop"), sign_out)
+
+    def test_ea_ban_still_closes_when_sign_out_fails(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            lease = replace(
+                FakeAccountProvider.lease("acct_1"),
+                expected_ea_account_id="ea_1",
+            )
+            provider = FakeAccountProvider(
+                [lease],
+                credentials={
+                    "acct_1": SecretCredentials("login@example.test", "password")
+                },
+            )
+            log: list[str] = []
+
+            class BannedSignOutFails(FakeEaDriver):
+                def current_identity(self):
+                    self.log.append("ea.current_identity")
+                    return EaIdentityFact(self.ea_account_id, "fake-uia", True)
+
+                def start_apex(self) -> None:
+                    self.log.append("apex.start")
+                    raise EaAccountBanned("EA App 报告账号已封禁")
+
+                def sign_out(self) -> bool:
+                    self.log.append("ea.sign_out")
+                    return False
+
+            store = AtomicCheckpointStore(
+                Path(directory) / "account-cycle-status.json"
+            )
+            result = AccountOrchestrator(
+                provider=provider,
+                ea_driver=BannedSignOutFails(log, "ea_1"),
+                play_session=object(),
+                checkpoint_store=store,
+                device_id="device_1",
+                capture_source=object(),
+                operation_id_factory=iter(
+                    [
+                        "claim_1",
+                        "renew_1",
+                        "credentials_1",
+                        "otp_1",
+                        "close_1",
+                        "extra_1",
+                    ]
+                ).__next__,
+                notify=lambda _: None,
+            ).run_once()
+
+            self.assertEqual(result.outcome, AccountCycleOutcome.COMPLETED)
+            self.assertEqual(result.error_code, "EA_ACCOUNT_BANNED")
+            close_call = [item for item in provider.calls if item[0] == "close"][-1]
+            self.assertEqual(close_call[1][3], "FAILED")
+            self.assertEqual(close_call[1][6], "EA_ACCOUNT_BANNED")
+            self.assertTrue(close_call[1][7].ea_signed_out)
+            self.assertFalse(store.load().has_lease)
+
+    def test_matching_ban_overlay_before_login_closes_as_banned(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            lease = replace(
+                FakeAccountProvider.lease("acct_1"),
+                expected_ea_account_id="ea_1",
+            )
+            provider = FakeAccountProvider(
+                [lease],
+                credentials={
+                    "acct_1": SecretCredentials("login@example.test", "password")
+                },
+            )
+            log: list[str] = []
+
+            class OverlayMatchesLease(FakeEaDriver):
+                def current_page_is_banned(self) -> bool:
+                    return True
+
+                def current_identity(self):
+                    self.log.append("ea.current_identity")
+                    return EaIdentityFact(self.ea_account_id, "fake-uia", True)
+
+            store = AtomicCheckpointStore(
+                Path(directory) / "account-cycle-status.json"
+            )
+            result = AccountOrchestrator(
+                provider=provider,
+                ea_driver=OverlayMatchesLease(log, "ea_1"),
+                play_session=object(),
+                checkpoint_store=store,
+                device_id="device_1",
+                capture_source=object(),
+                operation_id_factory=iter(
+                    ["claim_1", "renew_1", "close_1", "extra_1"]
+                ).__next__,
+                notify=lambda _: None,
+            ).run_once()
+
+            self.assertEqual(result.outcome, AccountCycleOutcome.COMPLETED)
+            self.assertEqual(result.error_code, "EA_ACCOUNT_BANNED")
+            self.assertNotIn("ea.sign_in", log)
+            close_call = [item for item in provider.calls if item[0] == "close"][-1]
+            self.assertEqual(close_call[1][6], "EA_ACCOUNT_BANNED")
+            self.assertFalse(store.load().has_lease)
+
+    def test_leftover_ban_overlay_for_another_account_signs_out_then_logs_in(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            lease = replace(
+                FakeAccountProvider.lease("acct_1"),
+                expected_ea_account_id="ea_1",
+            )
+            provider = FakeAccountProvider(
+                [lease],
+                credentials={
+                    "acct_1": SecretCredentials("login@example.test", "password")
+                },
+                otp_factory=lambda challenge_id, started_at: OtpCode(
+                    code="123456",
+                    challenge_id=challenge_id,
+                    received_at=started_at,
+                    expires_at=started_at + timedelta(minutes=1),
+                ),
+            )
+            log: list[str] = []
+
+            class LeftoverOtherAccount(FakeEaDriver):
+                def current_page_is_banned(self) -> bool:
+                    return True
+
+                def current_identity(self):
+                    self.log.append("ea.current_identity")
+                    if "ea.sign_out" in self.log:
+                        return None
+                    return EaIdentityFact("AeroJason452B", "fake-uia", True)
+
+            store = AtomicCheckpointStore(
+                Path(directory) / "account-cycle-status.json"
+            )
+            result = AccountOrchestrator(
+                provider=provider,
+                ea_driver=LeftoverOtherAccount(log, "ea_1"),
+                play_session=FakeManagedSession(log, FakeDrain()),
+                checkpoint_store=store,
+                device_id="device_1",
+                capture_source=object(),
+                operation_id_factory=iter(
+                    [
+                        "claim_1",
+                        "renew_1",
+                        "credentials_1",
+                        "otp_1",
+                        "close_1",
+                        "extra_1",
+                    ]
+                ).__next__,
+                completion_poll_s=0.1,
+                sleep=lambda _: None,
+                notify=lambda _: None,
+            ).run_once()
+
+            self.assertEqual(result.outcome, AccountCycleOutcome.COMPLETED)
+            self.assertIsNone(result.error_code)
+            self.assertLess(log.index("ea.sign_out"), log.index("ea.sign_in"))
+            close_codes = [item[1][6] for item in provider.calls if item[0] == "close"]
+            self.assertNotIn("EA_ACCOUNT_BANNED", close_codes)
             self.assertFalse(store.load().has_lease)
 
     def test_ea_ban_during_sign_in_closes_lease_as_banned(self) -> None:
