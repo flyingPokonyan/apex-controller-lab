@@ -16,6 +16,7 @@ from apex_automation.capabilities import CapabilityDispatcher, CapabilitySet
 from apex_automation.config import load_config
 from apex_automation.ocr_obstacles import OcrToken
 from apex_automation.ocr_states import OcrStateDetector
+from apex_automation.intro_unlock import IntroUnlock
 from apex_automation.pilot import CapabilityPilot
 from apex_automation.progression import LobbyProgressionReader
 from apex_automation.progression_policy import TargetLevelAndRingPolicy, TargetLevelPolicy
@@ -156,6 +157,12 @@ class PilotTest(unittest.TestCase):
     def overlay_screen(self, text: str = "", confidence: float = 1.0) -> None:
         self.overlay_provider.readings = {} if not text else {"fullFrame": (text, confidence)}
 
+    def enable_intro_lease(self) -> None:
+        self.pilot.progression_reader = LobbyProgressionReader(self.provider)
+        self.pilot.progression_stabilizer.reset()
+        self.pilot.progression_policy = TargetLevelPolicy(5)
+        self.pilot.intro = IntroUnlock()
+
     def enable_progression(self, *, max_attempts: int = 3) -> None:
         self.pilot.progression_reader = LobbyProgressionReader(self.provider)
         self.pilot.progression_stabilizer.reset()
@@ -184,6 +191,53 @@ class PilotTest(unittest.TestCase):
             progression_policy=TargetLevelAndRingPolicy(target_level, target_ring=30),
             ranked_road_progress_enabled=True,
         )
+
+    def test_a_level_one_lease_enters_the_firing_range_when_the_mode_card_does_nothing(self) -> None:
+        self.enable_intro_lease()
+        self.screen(
+            lobbyPrimaryButton=("准备", 1.0),
+            lobbyModeName=("训练", 1.0),
+            lobbyLevel=("1", 1.0),
+            lobbyXp=("0/100", 1.0),
+        )
+
+        self.pilot.step()
+        self.pilot.step()
+        self.assertEqual(self.sender.calls, [("click", 308, 1215)])
+
+        self.now += 3
+        self.pilot.step()
+
+        self.assertEqual(self.sender.calls[-1], ("click", 1280, 1295))
+        self.assertEqual(self.pilot.intro.phase, "leave_range")
+        self.screen()
+        self.now += 1
+        self.pilot.step()
+        self.now += 8
+        self.pilot.step()
+        self.assertEqual(self.sender.calls[-1], ("tap", 1, self.pilot.key_tap_ms))
+        sent = [call for call in self.sender.calls if call[0] == "tap"]
+        self.pilot.step()
+        self.assertEqual(sent, [call for call in self.sender.calls if call[0] == "tap"])
+
+    def test_a_higher_level_lease_keeps_treating_the_training_lobby_as_a_mode_change(self) -> None:
+        self.enable_intro_lease()
+        self.pilot.progression_policy = TargetLevelPolicy(20)
+        self.screen(
+            lobbyPrimaryButton=("准备", 1.0),
+            lobbyModeName=("训练", 1.0),
+            lobbyLevel=("8", 1.0),
+            lobbyXp=("0/100", 1.0),
+        )
+
+        self.pilot.step()
+        self.pilot.step()
+        self.now += 3
+        self.pilot.step()
+
+        self.assertEqual(self.pilot.intro.phase, "inactive")
+        self.assertNotIn(("click", 1280, 1295), self.sender.calls)
+        self.assertIn(("click", 308, 1215), self.sender.calls)
 
     def test_the_shipped_capability_set_is_executable_as_written(self) -> None:
         # Construction validates every action name and kind, so reaching this

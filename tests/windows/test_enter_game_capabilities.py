@@ -193,6 +193,28 @@ class EnterGameCapabilityTest(unittest.TestCase):
                 self.assertTrue(action["any"])
                 self.assertNotIn("fallbackScanCode", action)
 
+    def test_quit_match_confirm_clicks_yes_and_does_not_press_escape(self) -> None:
+        provider = FakeLayoutProvider(
+            (
+                OcrToken("退出比赛", 0.99, (1100, 560, 1460, 640)),
+                OcrToken("退出比赛？", 0.98, (1120, 650, 1440, 710)),
+                OcrToken("是", 0.99, (1080, 860, 1240, 930)),
+                OcrToken("ESC 取消", 0.97, (1280, 860, 1520, 930)),
+            )
+        )
+        analysis = OcrStateDetector.from_path(
+            FullFrameOcrProvider(provider), OVERLAYS
+        ).analyze(np.zeros((1440, 2560, 3), dtype=np.uint8))
+
+        self.assertIsNone(analysis.error)
+        self.assertEqual(analysis.decision.state, "QUIT_MATCH_CONFIRM")
+        action = self.capabilities.for_state("QUIT_MATCH_CONFIRM")[0]
+        self.assertEqual(action.id, "confirm-quit-match")
+        self.assertEqual(action.kind, "clickText")
+        self.assertEqual(self.payload["actions"][action.action]["any"], ["是"])
+        self.assertTrue(self.payload["actions"][action.action]["exactMatch"])
+        self.assertNotIn("fallbackScanCode", self.payload["actions"][action.action])
+
     def test_known_overlay_pages_are_all_routed_into_the_capability_set(self) -> None:
         detector = OcrStateDetector.from_path(object(), OVERLAYS)
         overlay_states = detector.states

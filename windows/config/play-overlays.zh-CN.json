@@ -128,6 +128,30 @@
       ]
     },
     {
+      "id": "quit-match-confirm",
+      "state": "QUIT_MATCH_CONFIRM",
+      "_note": "结算页按 TAB 返回大厅时，死亡回放那一页会先弹出「退出比赛？」。按钮是「是」和「ESC 取消」。这个画面以前没有任何规则，两分钟后停滞恢复按 Esc，正好点在取消上，确认框关掉又回到结算，同一轮能重复三四次。必须点「是」。",
+      "requirements": [
+        {"region": "fullFrame", "all": ["退出比赛"], "minConfidence": 0.65}
+      ]
+    },
+    {
+      "id": "leave-match-confirm",
+      "state": "LEAVE_MATCH_CONFIRM",
+      "_note": "训练场退出的确认框，标题是「返回大厅」，正文是「是否离开？」，按钮是「是」和「ESC 取消」。必须排在离开菜单之前：确认框上也有「返回大厅」，但只有它有「是否离开」。平时不自动点，只在新号退出训练场时由 IntroUnlock 使用。",
+      "requirements": [
+        {"region": "fullFrame", "all": ["是否离开"], "minConfidence": 0.65}
+      ]
+    },
+    {
+      "id": "leave-match-menu",
+      "state": "LEAVE_MATCH_MENU",
+      "_note": "训练场里按 Esc 弹出的菜单，只有「设置」和「返回大厅」。左下角同时有「ESC 返回」，所以这条必须排在 fullscreen-esc-back 前面，否则会再按一次 Esc 把菜单关掉。",
+      "requirements": [
+        {"region": "fullFrame", "all": ["返回大厅", "设置"], "minConfidence": 0.65}
+      ]
+    },
+    {
       "id": "fullscreen-esc-back",
       "state": "FULLSCREEN_ESC_BACK",
       "_note": "Apex 的全屏页统一在左下角写「ESC 返回」，位置固定在 x74-202 / y1325-1357。20260730-215512 一次跑里就有四页落在这上面：奖励页（004）、排位之路（035）和另外两张（002、017）——奖励页正是本来该被 reward-continue 接住却漏掉的那一页，它的标题「奖励」在 x107-265，落在 titleCenter 的左边界 320 之外，页面上也根本没有「继续」或「领取」，只有 ESC。与其为每一页写一条规则，不如认这句提示本身。必须排在专门规则后面，让专门规则先赢；并且只在快速识别认不出这一帧时才成立（见画像里的 unknownOnlyStates）——模式面板左下角也写着同一句话，没有这道闸门就会一进面板就退出去。传奇选择页实测没有这句提示，不会误伤。两个词分开写是因为全屏 OCR 可能把「ESC」和「返回」切成两块，all 不要求顺序。",

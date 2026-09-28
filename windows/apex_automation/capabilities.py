@@ -371,6 +371,44 @@ class CapabilityDispatcher:
     def cycle_count(self, state: str) -> int:
         return sum(1 for _, entry in self._state_entries if entry == state)
 
+    def drop_unsent(self, capability_id: str) -> None:
+        """Forget a fire decision that has not been sent yet.
+
+        The intro sequence sometimes loses the race to `decide`: the normal
+        click is already recorded as pending, and the replacement has to take
+        that slot before any input goes out.
+        """
+
+        pending = self.pending
+        if pending is None or pending.capability.id != capability_id:
+            return
+        self.handled_observation_versions.discard(pending.origin_observation_version)
+        if self.blocked_observation_version == pending.origin_observation_version:
+            self.blocked_observation_version = None
+        attempt = self.attempts.get(capability_id, 0) - 1
+        if attempt > 0:
+            self.attempts[capability_id] = attempt
+        else:
+            self.attempts.pop(capability_id, None)
+        self.pending = None
+
+    def adopt(
+        self,
+        capability: Capability,
+        state: str,
+        observation_version: int,
+        now: float,
+    ) -> Decision:
+        """Fire a capability the screen dictionary did not select."""
+
+        return self._start(
+            capability,
+            state,
+            observation_version,
+            now,
+            reason="INTRO_UNLOCK",
+        )
+
     def confirm_pending(self, evidence_state: str) -> tuple[bool, PendingAction | None]:
         """Settle an outstanding action against the screen that followed it."""
         pending = self.pending

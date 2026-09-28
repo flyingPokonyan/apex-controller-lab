@@ -53,6 +53,27 @@
       "keyPrompts": {"ESC": 1, "SPACE": 57, "ENTER": 28},
       "_note": "已知低风险页面的主动作耗尽后，用当前帧全屏 OCR 重新定位页面真正写出的安全命令，以不同的输入方式再尝试一次。必须有文字坐标才点击；「按住/长按」改为 SPACE 长按；同一个文字块明确以 ESC/SPACE/ENTER 提示开头时发送对应安全键，不点击键盘提示。找不到时不发任何键，也不会轮按 SPACE/ENTER/ESC。"
     },
+    "introReturnLobbyClick": {
+      "region": "fullFrame",
+      "any": ["返回大厅"],
+      "minConfidence": 0.7,
+      "exactMatch": true,
+      "_note": "训练场里按 Esc 之后的小菜单。按钮就是「返回大厅」。exactMatch 避免点到确认框标题上同一句话。"
+    },
+    "introConfirmLeaveClick": {
+      "region": "fullFrame",
+      "any": ["是"],
+      "minConfidence": 0.7,
+      "exactMatch": true,
+      "_note": "「是否离开？」下面的「是」。exactMatch 不能点到「是否」里的那个字，也不能按 Esc——这一页的 Esc 是取消。"
+    },
+    "introWelcomeModeClick": {
+      "region": "fullFrame",
+      "any": ["迎新赛"],
+      "minConfidence": 0.7,
+      "exactMatch": true,
+      "_note": "新号离开训练场后，机器人匹配还锁着。模式面板上点标题就是「迎新赛」的那张卡。exactMatch 避免点到锁卡上的「完成迎新赛即可解锁」。大厅已经停在迎新赛时不会走到这里。"
+    },
     "stallRecovery": {
       "region": "fullFrame",
       "any": ["继续", "重试", "确定", "确认", "接受", "返回大厅", "好的", "关闭", "返回"],
@@ -67,6 +88,62 @@
   },
   "_keyBindings": "扫描码写死在这里，等于假定了游戏里的键位。这些假定必须和目标账号实际绑的键一致，否则动作照发、游戏没反应，而画面上和「输入没送到」长得一模一样——2026-07-30 就栽在这上面：配置写 V(47)，当时账号绑在 N 上，白查了一轮反作弊。当前假定：1=ESC 安全返回，28=ENTER 安全继续，15=TAB 返回大厅，57=SPACE 确认返回大厅，47=V 近战，16=Q 战术技能，29=LCTRL 单独发射，18=E 发射。改键位的话这里也要跟着改；windows/probe-input.cmd 可以逐个验。另外 Apex 里有相当一批提示是长按而不是点按，那种要靠能力自己的 holdMs 或动作序列内的 durationMs 声明，默认的 keyTapMs 太短。",
   "capabilities": [
+    {
+      "id": "confirm-quit-match",
+      "priority": 131,
+      "states": ["QUIT_MATCH_CONFIRM"],
+      "action": "introConfirmLeaveClick",
+      "kind": "clickText",
+      "actionClass": "idempotent",
+      "confirmMs": 8000,
+      "maxAttempts": 2,
+      "allowedNextStates": [
+        "LOBBY_READY_OTHER",
+        "LOBBY_SELECT_REQUIRED",
+        "LOBBY_READY_TRAINING",
+        "LOBBY_READY_TARGET",
+        "LOBBY_READY_TARGET_FILL_ON",
+        "POST_MATCH_SUMMARY"
+      ],
+      "_note": "「退出比赛？」点「是」。Esc 是取消，停滞恢复以前会按到它，所以这条必须先于任何 Esc 兜底把页面认出来。"
+    },
+    {
+      "id": "intro-confirm-leave",
+      "priority": 130,
+      "states": ["LEAVE_MATCH_CONFIRM"],
+      "action": "introConfirmLeaveClick",
+      "kind": "clickText",
+      "actionClass": "idempotent",
+      "confirmMs": 8000,
+      "maxAttempts": 2,
+      "allowedNextStates": [
+        "LOBBY_READY_OTHER",
+        "LOBBY_SELECT_REQUIRED",
+        "LOBBY_READY_TRAINING",
+        "LOBBY_READY_TARGET",
+        "LOBBY_READY_TARGET_FILL_ON"
+      ],
+      "_note": "新号退出训练场的确认框。只在 IntroUnlock 处于 leave_range 时才会真正发出；其它时候飞行员会丢掉这一击，避免在普通对局里误点「是」。"
+    },
+    {
+      "id": "intro-return-to-lobby",
+      "priority": 130,
+      "states": ["LEAVE_MATCH_MENU"],
+      "action": "introReturnLobbyClick",
+      "kind": "clickText",
+      "actionClass": "idempotent",
+      "confirmMs": 2500,
+      "maxAttempts": 2,
+      "allowedNextStates": [
+        "LEAVE_MATCH_CONFIRM",
+        "LOBBY_READY_OTHER",
+        "LOBBY_SELECT_REQUIRED",
+        "LOBBY_READY_TRAINING",
+        "LOBBY_READY_TARGET",
+        "LOBBY_READY_TARGET_FILL_ON"
+      ],
+      "_note": "训练场 Esc 菜单上的「返回大厅」。和确认框一样，只在离开训练场的那一段生效。"
+    },
     {
       "id": "connection-dialog-continue",
       "priority": 125,
@@ -297,7 +374,8 @@
         "LOBBY_READY_TRAINING",
         "LOBBY_READY_OTHER",
         "LOBBY_SELECT_REQUIRED",
-        "CLIMB_SETTINGS_MODAL"
+        "CLIMB_SETTINGS_MODAL",
+        "QUIT_MATCH_CONFIRM"
       ],
       "_note": "操作者确认返回大厅需要完整执行 TAB，再长按 SPACE。序列轻按 TAB 80ms，等待 1500ms 让确认页稳定出现，再长按 SPACE 2000ms；不要求额外识别确认页，也绝不在未知画面上单独发送 SPACE。20260730-191304 已记录程序发出旧版 800ms 序列并进入黑屏加载；这里把间隔放宽以兼容慢切页，最后仍只以已认识的大厅态或攀爬设置弹窗作为成功后置。"
     },

@@ -14,6 +14,7 @@ import numpy as np
 from .capabilities import Capability, CapabilityDispatcher, Decision
 from .frame_normalization import CaptureResolutionMismatch
 from .config import RunnerConfig
+from .intro_unlock import CONFIRM_LEAVE, IntroUnlock, LEAVE_RANGE_ESC, RETURN_LOBBY
 from .ocr_obstacles import SAFE_KEY_ACTIONS, normalize_ocr_text
 from .ocr_states import OcrStateDetector
 from .progression import (
@@ -28,6 +29,7 @@ from .progression_policy import (
     ProgressionOutcome,
     ProgressionPolicy,
     ProgressionStatus,
+    TargetLevelPolicy,
 )
 from .safety import ForegroundLost
 
@@ -235,6 +237,7 @@ class CapabilityPilot:
             raise ValueError("大厅等级经验最大读取次数不能小于稳定确认次数")
         self.progression_max_attempts = progression_max_attempts
         self.progression_policy = progression_policy or ContinuePlayPolicy()
+        self.intro = IntroUnlock()
         if progression_retry_ms <= 0:
             raise ValueError("大厅等级经验失败后的复核间隔必须大于 0")
         self.progression_retry_s = progression_retry_ms / 1000
@@ -1478,6 +1481,62 @@ class CapabilityPilot:
         self.notify("  ↳ 查看排位之路进度")
         return "RANKED_ROAD_PROGRESS"
 
+    def _decide_with_intro(self, state: str | None, now: float):
+        """Clear a new account's firing range, then keep queueing 迎新赛.
+
+        The normal dispatcher still owns every other screen. This only
+        replaces a decision that would press 准备 on a locked training lobby,
+        leave that range, or keep poking a bot card the game will not select.
+        """
+
+        level = None
+        outcome = self._progression_outcome
+        if (
+            outcome is not None
+            and outcome.status is ProgressionStatus.CONFIRMED
+            and outcome.reading is not None
+        ):
+            level = outcome.reading.level
+        self.intro.observe(
+            level=level,
+            leased=(
+                isinstance(self.progression_policy, TargetLevelPolicy)
+                and bool(self.lease_is_current())
+            ),
+            state=state,
+            rounds_returned=self.rounds_returned_to_lobby,
+        )
+        for phase in self.intro.consume_transitions():
+            self.recorder.log("INTRO_UNLOCK", phase=phase, state=state)
+            self.notify(f"[新号] {phase}")
+
+        decision = self.dispatcher.decide(state, self.state_version, now)
+        if (
+            self.intro.phase != "leave_range"
+            and decision.kind == "fire"
+            and decision.capability is not None
+            and decision.capability.id in {RETURN_LOBBY.id, CONFIRM_LEAVE.id}
+        ):
+            # Those pages also appear if Esc is pressed in a real match. The
+            # buttons are only safe while we are walking a new account out of
+            # the firing range.
+            self.dispatcher.drop_unsent(decision.capability.id)
+            decision = Decision("wait", reason="INTRO_LOCKED")
+        command = self.intro.command(state, decision, now, self.dispatcher.pending)
+        if command is None:
+            return decision
+        for phase in self.intro.consume_transitions():
+            self.recorder.log("INTRO_UNLOCK", phase=phase, state=state)
+            self.notify(f"[新号] {phase}")
+        if command.undo_id:
+            self.dispatcher.drop_unsent(command.undo_id)
+        return self.dispatcher.adopt(
+            command.capability,
+            state or "INTRO_RANGE",
+            self.state_version,
+            now,
+        )
+
     def _apply_progression_policy(
         self,
         state: str | None,
@@ -2299,12 +2358,19 @@ class CapabilityPilot:
             }
             self._write_status(self.monotonic())
             return record
-        decision = self.dispatcher.decide(state, self.state_version, now)
+        decision = self._decide_with_intro(state, now)
         record["decision"] = {"kind": decision.kind, "reason": decision.reason}
         self.counters[f"{decision.kind}:{decision.reason}"] += 1
         self._track_known_stall(decision, state, now, frame)
 
-        if decision.kind == "fire" and state is not None:
+        # An unnamed frame normally authorises nothing. The one exception is
+        # the Esc that leaves the firing range: that screen has no rule of its
+        # own, and waiting for one would just stand in the tutorial.
+        intro_escape = (
+            decision.capability is not None
+            and decision.capability.id == LEAVE_RANGE_ESC.id
+        )
+        if decision.kind == "fire" and (state is not None or intro_escape):
             record["decision"]["capability"] = decision.capability.id
             try:
                 self._act(decision, state, frame)
