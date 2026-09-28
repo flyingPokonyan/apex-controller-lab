@@ -64,6 +64,21 @@ class IntroUnlockTest(unittest.TestCase):
         self.assertEqual(first.capability, LEAVE_RANGE_ESC)
         self.assertIsNone(self.intro.command(None, Decision("wait", reason="NO_STATE"), 21, None))
 
+    def test_esc_does_not_fire_again_while_the_leave_menu_is_changing(self) -> None:
+        # 20260928 Kit07Kit: the second Esc opened 设置/返回大厅, the click on
+        # 返回大厅 was sent, and two seconds later a third Esc closed the menu
+        # because the retry deadline from the previous Esc had just expired.
+        self.latch()
+        self.intro.command("LOBBY_READY_TRAINING", fire("lobby-change-mode"), 0, None)
+        self.intro.command("LOBBY_READY_TRAINING", fire("lobby-change-mode", 2), 1, None)
+        opened = self.intro.command(None, Decision("wait", reason="NO_STATE"), 20, None)
+        assert opened is not None
+        self.assertEqual(opened.capability, LEAVE_RANGE_ESC)
+
+        self.assertIsNone(self.intro.command("LEAVE_MATCH_MENU", fire(RETURN_LOBBY.id), 41, None))
+        self.assertIsNone(self.intro.command(None, Decision("wait", reason="NO_STATE"), 43, None))
+        self.assertEqual(self.intro._esc_sent, 1)
+
     def test_the_leave_menu_is_left_to_its_own_capability(self) -> None:
         self.latch()
         self.intro.command("LOBBY_READY_TRAINING", fire("lobby-change-mode"), 0, None)

@@ -152,6 +152,7 @@ class IntroUnlock:
         self._range_click_sent = False
         self._esc_not_before = 0.0
         self._esc_sent = 0
+        self._menu_seen = False
         self._welcome_click_sent = False
         self._welcome_clicks = 0
         self._bots_failed = False
@@ -264,13 +265,19 @@ class IntroUnlock:
         now: float,
         pending: PendingAction | None,
     ) -> IntroCommand | None:
+        if state in {LEAVE_CONFIRM, LEAVE_MENU}:
+            # Esc on this menu is "返回", and on the next dialog it is "取消".
+            # Another Esc while the page is changing closes the leave we just
+            # opened. Hold it until the click has had time to land.
+            self._menu_seen = True
+            self._esc_not_before = max(self._esc_not_before, now + ESC_RETRY_S)
         if state == LEAVE_CONFIRM:
             return None if self._already(decision, CONFIRM_LEAVE.id) else self._instead(CONFIRM_LEAVE, decision)
         if state == LEAVE_MENU:
             return None if self._already(decision, RETURN_LOBBY.id) else self._instead(RETURN_LOBBY, decision)
         if state is not None:
             return None
-        if pending is not None and pending.capability.id == LEAVE_RANGE_ESC.id and now < pending.retry_at:
+        if pending is not None and pending.capability.id in {RETURN_LOBBY.id, CONFIRM_LEAVE.id, LEAVE_RANGE_ESC.id} and now < pending.retry_at:
             return None
         if now < self._esc_not_before or self._esc_sent >= ESC_ATTEMPTS:
             return None
