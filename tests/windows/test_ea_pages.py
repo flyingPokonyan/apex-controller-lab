@@ -229,8 +229,25 @@ class IdentityMatchTest(unittest.TestCase):
     def test_candidates_keep_account_shaped_runs_only(self) -> None:
         found = identity_candidates(tokens("maraninovo253", "Play", "1234567890"))
         self.assertIn("maraninovo253", found)
-        self.assertNotIn("play", found)
+        # Four letters is a legal EA id, so the shape check keeps "play".
+        # The reader drops it afterwards because it is a button label.
+        self.assertIn("play", found)
+        self.assertTrue(is_ui_chrome("play"))
         self.assertNotIn("1234567890", found)
+
+    def test_underscore_ids_stay_candidates_after_the_underscore_is_removed(self) -> None:
+        found = identity_candidates(tokens("Chi_Ho77", "ho_07hin", "man_kit8"))
+        self.assertIn("chiho77", found)
+        self.assertIn("ho07hin", found)
+        self.assertIn("mankit8", found)
+        self.assertFalse(is_ui_chrome("chiho77"))
+
+    def test_lease_id_matches_the_badge_without_the_underscore(self) -> None:
+        self.assertTrue(identity_matches("Chi_Ho77", "chiho77"))
+        self.assertTrue(identity_matches("Chi_Ho77", "Chi_Ho77"))
+        self.assertTrue(identity_matches("ho_07hin", "ho07hin"))
+        self.assertFalse(identity_matches("Chi_Ho77", "Chi_Ho78"))
+        self.assertFalse(identity_matches("Chi_Ho77", "ho_07hin"))
 
     def test_known_ocr_confusions_still_match(self) -> None:
         self.assertTrue(identity_matches("ubyh3jlp5fr1", "ubyh3j1p5fr1"))
@@ -253,6 +270,9 @@ class IdentityMatchTest(unittest.TestCase):
         self.assertTrue(is_ui_chrome("installedgames"))
         self.assertFalse(is_ui_chrome("maraninovo253"))
         self.assertFalse(is_ui_chrome("f4vbjqygvlb"))
+        self.assertFalse(is_ui_chrome("chiho77"))
+        self.assertTrue(is_ui_chrome("play"))
+        self.assertTrue(is_ui_chrome("next"))
 
     def test_identity_reader_protects_the_observed_id_from_evidence(self) -> None:
         protected = []
@@ -276,6 +296,39 @@ class IdentityMatchTest(unittest.TestCase):
 
         self.assertIsNotNone(identity)
         self.assertEqual(protected, ["itntlxv5qk84"])
+
+    def test_identity_reader_accepts_an_id_that_underscore_shrinks_below_eight(self) -> None:
+        class Ocr:
+            def read(self, frame, region):
+                return (OcrToken("Chi_Ho77", 0.99),)
+
+        driver = object.__new__(WindowsEaHybridDriver)
+        driver.evidence = None
+        driver.ocr = Ocr()
+        driver._live = lambda hwnd: hwnd
+        driver._frame = lambda: np.zeros((1080, 1920), dtype=np.uint8)
+        driver._clip_rect = lambda hwnd, frame: (0, 0, 1920, 1080)
+
+        identity = driver._identity(1)
+
+        self.assertIsNotNone(identity)
+        self.assertEqual(identity.ea_account_id, "chiho77")
+        self.assertTrue(identity.verified)
+        self.assertTrue(identity_matches("Chi_Ho77", identity.ea_account_id))
+
+    def test_identity_reader_does_not_treat_play_as_an_account(self) -> None:
+        class Ocr:
+            def read(self, frame, region):
+                return (OcrToken("Play", 0.99),)
+
+        driver = object.__new__(WindowsEaHybridDriver)
+        driver.evidence = None
+        driver.ocr = Ocr()
+        driver._live = lambda hwnd: hwnd
+        driver._frame = lambda: np.zeros((1080, 1920), dtype=np.uint8)
+        driver._clip_rect = lambda hwnd, frame: (0, 0, 1920, 1080)
+
+        self.assertIsNone(driver._identity(1))
 
     def test_identity_reader_falls_back_to_the_lower_home_badge(self) -> None:
         regions = []

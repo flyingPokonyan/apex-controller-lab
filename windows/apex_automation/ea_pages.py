@@ -12,6 +12,8 @@ from enum import Enum
 import re
 from typing import Iterable, Sequence
 
+from .ocr_obstacles import normalize_ocr_text
+
 
 class EaPage(str, Enum):
     EMAIL = "EMAIL"
@@ -196,7 +198,9 @@ _IDENTITY_FOLD = str.maketrans(
     {"0": "o", "1": "l", "i": "l", "5": "s", "8": "b"}
 )
 
-_IDENTITY_CANDIDATE = re.compile(r"[a-z0-9]{8,20}")
+# EA origin ids: a letter, then 3–15 letters, digits, or underscores.
+# Punctuation is removed first, so Chi_Ho77 is matched as chiho77.
+_IDENTITY_CANDIDATE = re.compile(r"[a-z][a-z0-9]{3,15}")
 
 
 def compact_text(normalized_tokens: Iterable[str]) -> str:
@@ -324,13 +328,45 @@ UI_CHROME_WORDS = (
     "playlist",
 )
 
+# Whole tokens only. A substring check would also reject a real id that
+# happens to contain one of these button labels.
+UI_CHROME_EXACT = frozenset(
+    {
+        "play",
+        "next",
+        "sign",
+        "signin",
+        "login",
+        "start",
+        "close",
+        "back",
+        "help",
+        "done",
+        "skip",
+        "update",
+        "launch",
+        "cancel",
+        "email",
+        "verify",
+        "continue",
+    }
+)
+
 
 def is_ui_chrome(candidate: str) -> bool:
+    if candidate in UI_CHROME_EXACT:
+        return True
     return any(word in candidate for word in UI_CHROME_WORDS)
 
 
 def fold_identity(value: str) -> str:
-    return value.strip().lower().translate(_IDENTITY_FOLD)
+    """Fold OCR confusions after the same punctuation strip as the badge reader.
+
+    The lease still has the underscore (`Chi_Ho77`) while the candidate does
+    not (`chiho77`). Stripping both sides is what makes those one id.
+    """
+
+    return normalize_ocr_text(value).translate(_IDENTITY_FOLD)
 
 
 def identity_matches(expected: str, observed: str) -> bool:
@@ -344,9 +380,7 @@ def identity_candidates(normalized_tokens: Iterable[str]) -> tuple[str, ...]:
 
     found: list[str] = []
     for token in normalized_tokens:
-        for candidate in _IDENTITY_CANDIDATE.findall(token):
-            if any(character.isalpha() for character in candidate):
-                found.append(candidate)
+        found.extend(_IDENTITY_CANDIDATE.findall(normalize_ocr_text(token)))
     return tuple(sorted(set(found), key=len, reverse=True))
 
 
