@@ -77,7 +77,9 @@ LOBBY_CONTEXT_STATES = frozenset(
         "LOBBY_READY_TARGET_FILL_ON",
         "LOBBY_READY_TRAINING",
         "LOBBY_READY_TARGET",
+        "LOBBY_READY_WELCOME",
         "LOBBY_READY_OTHER",
+        "MODE_PANEL_WELCOME_VISIBLE",
         "MODE_PANEL_TARGET_VISIBLE",
         "MODE_PANEL_TARGET_HOVERED",
     }
@@ -91,6 +93,7 @@ SAFE_LOBBY_STATES = frozenset(
         "LOBBY_READY_TARGET_FILL_ON",
         "LOBBY_READY_TRAINING",
         "LOBBY_READY_TARGET",
+        "LOBBY_READY_WELCOME",
         "LOBBY_READY_OTHER",
     }
 )
@@ -1482,11 +1485,12 @@ class CapabilityPilot:
         return "RANKED_ROAD_PROGRESS"
 
     def _decide_with_intro(self, state: str | None, now: float):
-        """Clear a new account's firing range, then keep queueing 迎新赛.
+        """Clear a level-1 firing range, then leave mode choice to the rules.
 
-        The normal dispatcher still owns every other screen. This only
-        replaces a decision that would press 准备 on a locked training lobby,
-        leave that range, or keep poking a bot card the game will not select.
+        迎新赛 and 机器人 are normal capabilities: the title still reads 迎新赛
+        and the dispatcher queues it; once that title is gone it selects the
+        bot card. This only replaces a decision that would press 准备 on a
+        locked training lobby, or leave that range.
         """
 
         level = None

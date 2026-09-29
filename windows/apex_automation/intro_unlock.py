@@ -1,14 +1,13 @@
-"""New leased accounts cannot pick 机器人匹配 until the game unlocks it.
+"""Level-1 leases still clear the firing range when the mode card will not open.
 
-The copy on the lobby changes between seasons, so this does not look for the
-banner. A managed lease whose lobby reads level 1 gets one chance to open the
-mode card. If that click does not leave the training lobby, the card is locked:
-press 准备, and once the firing range is up press Esc, then 返回大厅, then 是.
-Afterwards, and for any later level while the bot card still will not select,
-try the card once per lobby visit. If it does not take, close the panel and
-queue the mode already on the lobby card — on these accounts that is 迎新赛 —
-instead of ending the session. Normal mode selection resumes only when the
-lobby is actually the bot playlist.
+迎新赛 is not a level gate and this module does not choose it. While the lobby
+card or the mode-panel title reads 迎新赛, the normal capabilities queue that
+playlist. Once the title changes, those same capabilities select 机器人.
+A managed lease whose lobby reads level 1 still gets one chance to open the
+mode card. If that click does not leave the training lobby, press 准备, and
+once the firing range is up press Esc, then 返回大厅, then 是. Seeing 迎新赛
+leaves that path: do not spend bot-card clicks, and do not press 准备 on a
+lobby that is only "some other mode".
 """
 
 from __future__ import annotations
@@ -21,6 +20,9 @@ from .capabilities import Capability, Decision, PendingAction
 TRAINING_LOBBY = "LOBBY_READY_TRAINING"
 QUEUEING = "LOBBY_QUEUEING"
 WELCOME_LOBBY = "LOBBY_READY_OTHER"
+WELCOME_READY = "LOBBY_READY_WELCOME"
+WELCOME_PANEL = "MODE_PANEL_WELCOME_VISIBLE"
+WELCOME_STATES = frozenset({WELCOME_READY, WELCOME_PANEL})
 SELECT_LOBBY = "LOBBY_SELECT_REQUIRED"
 LEAVE_MENU = "LEAVE_MATCH_MENU"
 LEAVE_CONFIRM = "LEAVE_MATCH_CONFIRM"
@@ -78,7 +80,7 @@ LEAVE_RANGE_ESC = _capability(
     "idempotent",
     confirm_ms=int(ESC_RETRY_S * 1000),
     max_attempts=ESC_ATTEMPTS,
-    allowed_next_states=(LEAVE_MENU, LEAVE_CONFIRM, WELCOME_LOBBY, SELECT_LOBBY, *TARGET_LOBBIES),
+    allowed_next_states=(LEAVE_MENU, LEAVE_CONFIRM, WELCOME_LOBBY, WELCOME_READY, SELECT_LOBBY, *TARGET_LOBBIES),
     states=("INTRO_RANGE",),
 )
 RETURN_LOBBY = _capability(
@@ -88,7 +90,7 @@ RETURN_LOBBY = _capability(
     "idempotent",
     confirm_ms=2500,
     max_attempts=2,
-    allowed_next_states=(LEAVE_CONFIRM, WELCOME_LOBBY, SELECT_LOBBY, TRAINING_LOBBY, *TARGET_LOBBIES),
+    allowed_next_states=(LEAVE_CONFIRM, WELCOME_LOBBY, WELCOME_READY, SELECT_LOBBY, TRAINING_LOBBY, *TARGET_LOBBIES),
     states=(LEAVE_MENU,),
 )
 CONFIRM_LEAVE = _capability(
@@ -98,37 +100,17 @@ CONFIRM_LEAVE = _capability(
     "idempotent",
     confirm_ms=8000,
     max_attempts=2,
-    allowed_next_states=(WELCOME_LOBBY, SELECT_LOBBY, TRAINING_LOBBY, *TARGET_LOBBIES),
+    allowed_next_states=(WELCOME_LOBBY, WELCOME_READY, SELECT_LOBBY, TRAINING_LOBBY, *TARGET_LOBBIES),
     states=(LEAVE_CONFIRM,),
-)
-START_WELCOME = _capability(
-    "intro-start-welcome-match",
-    "startMatchClick",
-    "click",
-    "commit",
-    confirm_ms=3000,
-    max_attempts=2,
-    allowed_next_states=(QUEUEING,),
-    states=(WELCOME_LOBBY,),
 )
 SELECT_WELCOME = _capability(
     "intro-select-welcome-mode",
     "introWelcomeModeClick",
     "clickText",
-    "idempotent",
+    "commit",
     confirm_ms=3000,
     max_attempts=2,
-    allowed_next_states=(WELCOME_LOBBY, QUEUEING, SELECT_LOBBY),
-    states=tuple(PANEL_STATES),
-)
-CLOSE_LOCKED_PANEL = _capability(
-    "intro-close-locked-mode-panel",
-    "escapeScanCode",
-    "key",
-    "idempotent",
-    confirm_ms=2500,
-    max_attempts=2,
-    allowed_next_states=(WELCOME_LOBBY, SELECT_LOBBY, *TARGET_LOBBIES),
+    allowed_next_states=(WELCOME_READY, QUEUEING),
     states=tuple(PANEL_STATES),
 )
 FOCUS_TARGET = "mode-panel-focus-target"
@@ -192,8 +174,9 @@ class IntroUnlock:
         if rounds_returned > self._rounds_seen:
             self._rounds_seen = rounds_returned
             if self.phase == "welcome_match":
-                # The card may have unlocked during the match. Try it once
-                # more on the next lobby visit, and queue 迎新赛 again if not.
+                # The card may have unlocked during the match. The normal rules
+                # pick 迎新赛 or 机器人 from the title; this only resets the
+                # one exact-match recovery.
                 self._bots_failed = False
                 self._welcome_clicks = 0
                 self._welcome_click_sent = False
@@ -202,7 +185,7 @@ class IntroUnlock:
         if self.phase == "clear_range":
             if state in TARGET_LOBBIES:
                 self._set("done")
-            elif state in PANEL_STATES or state in {WELCOME_LOBBY, SELECT_LOBBY}:
+            elif state in WELCOME_STATES or state in PANEL_STATES or state in {WELCOME_LOBBY, SELECT_LOBBY}:
                 self._set("welcome_match")
             return
 
@@ -211,7 +194,7 @@ class IntroUnlock:
                 return
             if state in TARGET_LOBBIES:
                 self._set("done")
-            elif state in {WELCOME_LOBBY, SELECT_LOBBY} or state in PANEL_STATES:
+            elif state in WELCOME_STATES or state in {WELCOME_LOBBY, SELECT_LOBBY} or state in PANEL_STATES:
                 self._set("welcome_match")
             return
 
@@ -288,24 +271,21 @@ class IntroUnlock:
     def _welcome(self, state: str | None, decision: Decision) -> IntroCommand | None:
         if decision.reason == "AWAITING_POSTCONDITION":
             return None
+        # The title is still 迎新赛. The normal capability presses 准备 or
+        # clicks that card. Do not open the bot card first.
+        if state in WELCOME_STATES:
+            return None
         if (
             state in PANEL_STATES
             and decision.reason == "ATTEMPTS_EXHAUSTED"
             and decision.capability is not None
             and decision.capability.id == FOCUS_TARGET
+            and self._panel_closes < SELECT_WELCOME.max_attempts
         ):
-            # Three clicks on the bot card did nothing: it is still locked.
-            # Close the panel and queue the mode already selected underneath.
+            # The welcome-title rule missed, and the bot card would not select.
+            # One exact-match click looks for the title itself. It does not
+            # hit the lock hint, and it does not press 准备 on an unpinned lobby.
             self._bots_failed = True
-            if self._panel_closes < CLOSE_LOCKED_PANEL.max_attempts:
-                self._panel_closes += 1
-                return IntroCommand(CLOSE_LOCKED_PANEL)
-            return None
-        if state == WELCOME_LOBBY and self._bots_failed and self._welcome_clicks < START_WELCOME.max_attempts:
-            self._welcome_clicks += 1
-            self._welcome_click_sent = True
-            return self._instead(START_WELCOME, decision)
-        if state in PANEL_STATES and self._bots_failed and self._panel_closes < SELECT_WELCOME.max_attempts:
             self._panel_closes += 1
             return self._instead(SELECT_WELCOME, decision)
         return None

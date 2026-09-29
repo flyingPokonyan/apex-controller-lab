@@ -239,6 +239,29 @@ class PilotTest(unittest.TestCase):
         self.assertNotIn(("click", 1280, 1295), self.sender.calls)
         self.assertIn(("click", 308, 1215), self.sender.calls)
 
+    def test_a_welcome_lobby_presses_ready_instead_of_opening_the_bot_card(self) -> None:
+        self.screen(lobbyPrimaryButton=("准备", 1.0), lobbyModeName=("迎新赛", 1.0))
+
+        record = self.pilot.step()
+
+        self.assertEqual(record["state"], "LOBBY_READY_WELCOME")
+        self.assertEqual(record["decision"]["capability"], "lobby-start-welcome-match")
+        self.assertEqual(self.sender.calls, [("click", 1280, 1295)])
+        self.assertNotIn(("click", 308, 1215), self.sender.calls)
+        self.assertNotIn(("click", 2145, 696), self.sender.calls)
+
+    def test_an_open_panel_with_both_cards_selects_welcome_not_the_bot(self) -> None:
+        self.screen(
+            modePanelWelcomeCard=("迎新赛", 1.0),
+            modePanelTargetCard=("进化版机器人大逃杀", 1.0),
+        )
+
+        record = self.pilot.step()
+
+        self.assertEqual(record["state"], "MODE_PANEL_WELCOME_VISIBLE")
+        self.assertEqual(record["decision"]["capability"], "mode-panel-select-welcome")
+        self.assertNotIn(("click", 2145, 696), self.sender.calls)
+
     def test_the_shipped_capability_set_is_executable_as_written(self) -> None:
         # Construction validates every action name and kind, so reaching this
         # line means no capability can fail halfway through sending an input.

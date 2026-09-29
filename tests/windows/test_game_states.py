@@ -29,6 +29,14 @@ LIVE_READINGS: dict[str, dict[str, tuple[str, float]]] = {
         "lobbyModeName": ("训练", 1.000),
         "lobbyPrimaryButton": ("准备", 1.000),
     },
+    "LOBBY_READY_WELCOME": {
+        "lobbyModeName": ("迎新赛", 0.999),
+        "lobbyPrimaryButton": ("准备", 1.000),
+    },
+    "MODE_PANEL_WELCOME_VISIBLE": {
+        "modePanelWelcomeCard": ("迎新赛", 0.999),
+        "modePanelTargetCard": ("进化版机器人大逃杀", 0.999),
+    },
     "LOBBY_SELECT_REQUIRED": {
         "lobbyModeName": ("训练", 1.000),
         "lobbyPrimaryButton": ("选择", 1.000),
@@ -158,9 +166,52 @@ class GameStateRoutingTest(unittest.TestCase):
         detector = self._detector({})
         enabled = [rule.state for rule in detector.rules if rule.enabled]
         self.assertEqual(enabled[-1], "LOBBY_READY_OTHER")
-        for named in ("LOBBY_READY_TRAINING", "LOBBY_READY_TARGET"):
+        for named in ("LOBBY_READY_TRAINING", "LOBBY_READY_TARGET", "LOBBY_READY_WELCOME"):
             with self.subTest(state=named):
                 self.assertLess(enabled.index(named), enabled.index("LOBBY_READY_OTHER"))
+        self.assertLess(
+            enabled.index("MODE_PANEL_WELCOME_VISIBLE"),
+            enabled.index("MODE_PANEL_TARGET_VISIBLE"),
+        )
+
+    def test_welcome_is_queued_only_while_the_title_still_says_so(self) -> None:
+        # 2026-09-29 ahshing888hei: the closed lobby title line is 迎新赛, and
+        # the open panel's left card title is the same word while the bot card
+        # is also on screen. First match wins, so welcome has to beat the bot
+        # card. After the title changes, that word is absent and the bot card
+        # is the match.
+        welcome_lobby = self._detector(
+            {"lobbyModeName": ("迎新赛", 0.999), "lobbyPrimaryButton": ("准备", 1.000)}
+        ).analyze(np.zeros((4, 4, 3), np.uint8))
+        self.assertEqual(welcome_lobby.decision.state, "LOBBY_READY_WELCOME")
+
+        both_cards = self._detector(
+            {
+                "modePanelWelcomeCard": ("迎新赛", 0.999),
+                "modePanelTargetCard": ("进化版机器人大逃杀", 0.999),
+            }
+        ).analyze(np.zeros((4, 4, 3), np.uint8))
+        self.assertEqual(both_cards.decision.state, "MODE_PANEL_WELCOME_VISIBLE")
+
+        for mode in ("未上榜", "大逃杀", "三人赛", "控制"):
+            with self.subTest(mode=mode):
+                lobby = self._detector(
+                    {"lobbyModeName": (mode, 0.999), "lobbyPrimaryButton": ("准备", 1.000)}
+                ).analyze(np.zeros((4, 4, 3), np.uint8))
+                self.assertEqual(lobby.decision.state, "LOBBY_READY_OTHER")
+
+        graduated_panel = self._detector(
+            {
+                "modePanelWelcomeCard": ("未上榜", 0.999),
+                "modePanelTargetCard": ("机器人", 0.999),
+            }
+        ).analyze(np.zeros((4, 4, 3), np.uint8))
+        self.assertEqual(graduated_panel.decision.state, "MODE_PANEL_TARGET_VISIBLE")
+
+        bots_only = self._detector(
+            {"modePanelTargetCard": ("进化版机器人大逃杀", 0.999)}
+        ).analyze(np.zeros((4, 4, 3), np.uint8))
+        self.assertEqual(bots_only.decision.state, "MODE_PANEL_TARGET_VISIBLE")
 
     def test_queueing_outranks_the_mode_it_queued_into(self) -> None:
         # Whichever mode is on the card, and whether matchmaking is still

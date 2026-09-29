@@ -419,7 +419,11 @@ class EnterGameCapabilityTest(unittest.TestCase):
         # showing, so pressing it is only safe where the rule also pins the
         # mode. Everything allowed to click that box is listed here, and a
         # new entry has to justify itself against the label.
-        safe_to_click = {"LOBBY_SELECT_REQUIRED": "选择", "LOBBY_READY_TARGET": "准备"}
+        safe_to_click = {
+            "LOBBY_SELECT_REQUIRED": "选择",
+            "LOBBY_READY_TARGET": "准备",
+            "LOBBY_READY_WELCOME": "准备",
+        }
         primary_button = self.payload["actions"]["startMatchClick"]
         for capability in self.capabilities.capabilities:
             if self.payload["actions"].get(capability.action) != primary_button:
@@ -453,6 +457,39 @@ class EnterGameCapabilityTest(unittest.TestCase):
         # The card the runner picks and the lobby it then presses 准备 on have
         # to name the same mode, or it selects one thing and queues another.
         self.assertEqual(set(mode_terms), set(panel_terms))
+
+        welcome_lobby = next(r for r in states["rules"] if r["state"] == "LOBBY_READY_WELCOME")
+        welcome_terms = [
+            term
+            for requirement in welcome_lobby["requirements"]
+            if requirement["region"] == "lobbyModeName"
+            for term in requirement.get("all", ())
+        ]
+        welcome_panel = next(r for r in states["rules"] if r["state"] == "MODE_PANEL_WELCOME_VISIBLE")
+        welcome_panel_terms = [
+            term
+            for requirement in welcome_panel["requirements"]
+            for term in requirement.get("all", ())
+        ]
+        self.assertEqual(set(welcome_terms), {"迎新赛"})
+        self.assertEqual(set(welcome_terms), set(welcome_panel_terms))
+
+    def test_welcome_is_played_directly_and_bots_only_when_that_title_is_gone(self) -> None:
+        welcome = self._dispatcher().decide("LOBBY_READY_WELCOME", 1, 0.0)
+        self.assertEqual(welcome.capability.id, "lobby-start-welcome-match")
+        self.assertEqual(welcome.capability.action, "startMatchClick")
+        self.assertEqual(welcome.capability.action_class, "commit")
+        self.assertEqual(welcome.capability.allowed_next_states, ("LOBBY_QUEUEING",))
+
+        panel = self._dispatcher().decide("MODE_PANEL_WELCOME_VISIBLE", 1, 0.0)
+        self.assertEqual(panel.capability.id, "mode-panel-select-welcome")
+        self.assertEqual(panel.capability.action, "introWelcomeModeClick")
+        self.assertNotEqual(panel.capability.action, "targetCardClick")
+        self.assertIn("LOBBY_READY_WELCOME", panel.capability.allowed_next_states)
+
+        opened = next(c for c in self.capabilities.capabilities if c.id == "lobby-change-mode")
+        self.assertIn("MODE_PANEL_WELCOME_VISIBLE", opened.allowed_next_states)
+        self.assertNotIn("LOBBY_READY_WELCOME", opened.states)
 
     def test_turning_off_fill_squad_is_a_toggle_the_lobby_itself_confirms(self) -> None:
         fill = next(c for c in self.capabilities.capabilities if c.id == "lobby-disable-fill")

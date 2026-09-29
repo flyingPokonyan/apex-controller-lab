@@ -99,6 +99,7 @@
       "maxAttempts": 2,
       "allowedNextStates": [
         "LOBBY_READY_OTHER",
+        "LOBBY_READY_WELCOME",
         "LOBBY_SELECT_REQUIRED",
         "LOBBY_READY_TRAINING",
         "LOBBY_READY_TARGET",
@@ -118,6 +119,7 @@
       "maxAttempts": 2,
       "allowedNextStates": [
         "LOBBY_READY_OTHER",
+        "LOBBY_READY_WELCOME",
         "LOBBY_SELECT_REQUIRED",
         "LOBBY_READY_TRAINING",
         "LOBBY_READY_TARGET",
@@ -137,6 +139,7 @@
       "allowedNextStates": [
         "LEAVE_MATCH_CONFIRM",
         "LOBBY_READY_OTHER",
+        "LOBBY_READY_WELCOME",
         "LOBBY_SELECT_REQUIRED",
         "LOBBY_READY_TRAINING",
         "LOBBY_READY_TARGET",
@@ -181,6 +184,7 @@
         "LOBBY_READY_TARGET_FILL_ON",
         "LOBBY_READY_TRAINING",
         "LOBBY_READY_TARGET",
+        "LOBBY_READY_WELCOME",
         "LOBBY_READY_OTHER"
       ],
       "_note": "进度在关闭前由窄区域 OCR 读取，全屏 PAGE_TEXT 只作识别失败时的兜底；ESC 只收起右侧抽屉，不改变任务进度。"
@@ -372,6 +376,7 @@
         "LOBBY_READY_TARGET",
         "LOBBY_READY_TARGET_FILL_ON",
         "LOBBY_READY_TRAINING",
+        "LOBBY_READY_WELCOME",
         "LOBBY_READY_OTHER",
         "LOBBY_SELECT_REQUIRED",
         "CLIMB_SETTINGS_MODAL",
@@ -432,8 +437,8 @@
       "actionClass": "idempotent",
       "confirmMs": 2500,
       "maxAttempts": 3,
-      "allowedNextStates": ["MODE_PANEL_TARGET_VISIBLE", "MODE_PANEL_TARGET_HOVERED"],
-      "_note": "主按钮写着「选择」时点它，打开模式面板。只留这一个状态：这条原先还挂着 LOBBY_READY_TRAINING，而训练大厅上同一个按钮写的是「准备」——2026-07-28 的日志逐字记着这一点击之后 13 秒进读条、28 秒后到训练场移动教学。同一个坐标在两个画面上是两件完全不同的事，不能共用一条能力。"
+      "allowedNextStates": ["MODE_PANEL_WELCOME_VISIBLE", "MODE_PANEL_TARGET_VISIBLE", "MODE_PANEL_TARGET_HOVERED"],
+      "_note": "主按钮写着「选择」时点它，打开模式面板。只留这一个状态：这条原先还挂着 LOBBY_READY_TRAINING，而训练大厅上同一个按钮写的是「准备」——2026-07-28 的日志逐字记着这一点击之后 13 秒进读条、28 秒后到训练场移动教学。同一个坐标在两个画面上是两件完全不同的事，不能共用一条能力。迎新赛还在时面板先被认成迎新赛，这条后置必须把它算进去，否则点开面板看起来像没打开。"
     },
     {
       "id": "lobby-change-mode",
@@ -444,8 +449,20 @@
       "actionClass": "idempotent",
       "confirmMs": 2500,
       "maxAttempts": 3,
-      "allowedNextStates": ["MODE_PANEL_TARGET_VISIBLE", "MODE_PANEL_TARGET_HOVERED"],
-      "_note": "大厅停在训练或任何其他模式上时，换模式只能点左下角那张模式卡片，绝不能碰主按钮——那上面写的是「准备」，点下去就排进当前这个模式。坐标是 2026-07-29 实时帧上量的卡片中心（卡片占 x 62-555、y 1065-1365）。这一击本身还没有采到证据帧，但失败是良性的：点空了面板不开，后置确认拿不到面板态，重试两次后暂停等人，而不是像原来那样一头扎进训练场。"
+      "allowedNextStates": ["MODE_PANEL_WELCOME_VISIBLE", "MODE_PANEL_TARGET_VISIBLE", "MODE_PANEL_TARGET_HOVERED"],
+      "_note": "大厅停在训练或任何其他模式上时，换模式只能点左下角那张模式卡片，绝不能碰主按钮——那上面写的是「准备」，点下去就排进当前这个模式。坐标是 2026-07-29 实时帧上量的卡片中心（卡片占 x 62-555、y 1065-1365）。迎新赛大厅不走这里，那个标题还在就直接准备。面板上如果迎新赛还在，后置是 MODE_PANEL_WELCOME_VISIBLE，不能只等机器人卡，否则这一击会被当成没打开，1 级新号接着被送进训练场。"
+    },
+    {
+      "id": "mode-panel-select-welcome",
+      "priority": 55,
+      "states": ["MODE_PANEL_WELCOME_VISIBLE"],
+      "action": "introWelcomeModeClick",
+      "kind": "clickText",
+      "actionClass": "commit",
+      "confirmMs": 3000,
+      "maxAttempts": 2,
+      "allowedNextStates": ["LOBBY_READY_WELCOME", "LOBBY_QUEUEING"],
+      "_note": "面板上迎新赛标题还在就点这张卡，不点锁着的机器人。exactMatch 只认整块字是「迎新赛」，锁卡上的「完成迎新赛即可解锁」不会被点到。点中之后面板合上，大厅标题应仍是迎新赛；标题已经换掉时这条规则根本不会命中。"
     },
     {
       "id": "mode-panel-focus-target",
@@ -470,6 +487,18 @@
       "maxAttempts": 2,
       "allowedNextStates": ["LOBBY_READY_TARGET", "LOBBY_READY_TARGET_FILL_ON"],
       "_note": "兜底：单击通常已经完成选择并回到大厅，这条只在还停在面板上时才轮到。它真正改变游戏模式，所以要求正向后置确认且不盲重试。"
+    },
+    {
+      "id": "lobby-start-welcome-match",
+      "priority": 50,
+      "states": ["LOBBY_READY_WELCOME"],
+      "action": "startMatchClick",
+      "kind": "click",
+      "actionClass": "commit",
+      "confirmMs": 3000,
+      "maxAttempts": 2,
+      "allowedNextStates": ["LOBBY_QUEUEING"],
+      "_note": "大厅卡片标题还是迎新赛时直接按准备，不再打开面板去点机器人。没有等级门槛：标题在就排，标题换成普通匹配后这条规则失效，改由机器人卡接手。和 lobby-start-match 一样是 commit，只接受进入排队。"
     },
     {
       "id": "lobby-start-match",

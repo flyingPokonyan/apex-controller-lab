@@ -14,7 +14,6 @@ from apex_automation.intro_unlock import (
     IntroUnlock,
     LEAVE_RANGE_ESC,
     RETURN_LOBBY,
-    START_WELCOME,
 )
 
 
@@ -89,11 +88,11 @@ class IntroUnlockTest(unittest.TestCase):
         assert forced is not None
         self.assertEqual(forced.capability, CONFIRM_LEAVE)
 
-    def test_a_locked_bot_card_closes_the_panel_and_queues_the_current_mode(self) -> None:
+    def test_a_locked_bot_card_tries_the_welcome_title_and_does_not_queue_an_unpinned_lobby(self) -> None:
         self.latch()
         self.intro.observe(level=1, leased=True, state="LOBBY_READY_OTHER", rounds_returned=0)
         self.assertEqual(self.intro.phase, "welcome_match")
-        # The first visit still tries the bot card. 准备 is only the fallback.
+        # No welcome title on screen: the normal dispatcher may try the bot card.
         self.assertIsNone(self.intro.command("LOBBY_READY_OTHER", fire("lobby-change-mode"), 0, None))
 
         exhausted = Decision(
@@ -102,13 +101,29 @@ class IntroUnlockTest(unittest.TestCase):
             attempt=3,
             reason="ATTEMPTS_EXHAUSTED",
         )
-        closed = self.intro.command("MODE_PANEL_TARGET_VISIBLE", exhausted, 5, None)
-        assert closed is not None
-        self.assertEqual(closed.capability.action, "escapeScanCode")
+        clicked = self.intro.command("MODE_PANEL_TARGET_VISIBLE", exhausted, 5, None)
+        assert clicked is not None
+        self.assertEqual(clicked.capability.action, "introWelcomeModeClick")
 
-        queued = self.intro.command("LOBBY_READY_OTHER", fire("lobby-change-mode"), 8, None)
-        assert queued is not None
-        self.assertEqual(queued.capability, START_WELCOME)
+        # OTHER is not pinned to a mode. 准备 would queue whatever the card shows.
+        self.assertIsNone(self.intro.command("LOBBY_READY_OTHER", fire("lobby-change-mode"), 8, None))
+
+    def test_a_recognised_welcome_screen_is_not_overridden(self) -> None:
+        self.latch()
+        self.intro.observe(level=1, leased=True, state="LOBBY_READY_WELCOME", rounds_returned=0)
+        self.assertEqual(self.intro.phase, "welcome_match")
+        self.assertIsNone(
+            self.intro.command("LOBBY_READY_WELCOME", fire("lobby-start-welcome-match"), 1, None)
+        )
+        self.assertIsNone(
+            self.intro.command("MODE_PANEL_WELCOME_VISIBLE", fire("mode-panel-select-welcome"), 2, None)
+        )
+        # Welcome was already on screen, so a later training frame must not
+        # be forced into the firing range.
+        self.assertIsNone(
+            self.intro.command("LOBBY_READY_TRAINING", fire("lobby-change-mode", 2), 3, None)
+        )
+        self.assertEqual(self.intro.phase, "welcome_match")
 
     def test_another_welcome_match_is_allowed_until_bots_are_actually_selected(self) -> None:
         self.latch()
