@@ -7,7 +7,7 @@ import unittest
 REPOSITORY_ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(REPOSITORY_ROOT / "windows"))
 
-from apex_automation.capabilities import Capability, Decision
+from apex_automation.capabilities import Capability, Decision, PendingAction
 from apex_automation.intro_unlock import (
     CONFIRM_LEAVE,
     ENTER_RANGE,
@@ -87,6 +87,31 @@ class IntroUnlockTest(unittest.TestCase):
         forced = self.intro.command("LEAVE_MATCH_CONFIRM", Decision("wait", reason="NO_CAPABILITY"), 30, None)
         assert forced is not None
         self.assertEqual(forced.capability, CONFIRM_LEAVE)
+
+    def test_a_leave_confirmation_is_not_sent_again_while_it_is_still_landing(self) -> None:
+        # 20260929 BrianBuckley: the dispatcher had already clicked 是 and was
+        # waiting out the 8s confirm. Intro treated that wait as "not clicked"
+        # and sent a second 是 3.6s later.
+        self.latch()
+        self.intro.command("LOBBY_READY_TRAINING", fire("lobby-change-mode"), 0, None)
+        self.intro.command("LOBBY_READY_TRAINING", fire("lobby-change-mode", 2), 1, None)
+        pending = PendingAction(
+            capability=CONFIRM_LEAVE,
+            origin_state="LEAVE_MATCH_CONFIRM",
+            origin_observation_version=1,
+            attempt=1,
+            retry_at=38.0,
+        )
+        waiting = Decision(
+            "wait",
+            capability=CONFIRM_LEAVE,
+            reason="AWAITING_POSTCONDITION",
+        )
+
+        self.assertIsNone(self.intro.command("LEAVE_MATCH_CONFIRM", waiting, 34.0, pending))
+        retry = self.intro.command("LEAVE_MATCH_CONFIRM", waiting, 38.0, pending)
+        assert retry is not None
+        self.assertEqual(retry.capability, CONFIRM_LEAVE)
 
     def test_a_locked_bot_card_tries_the_welcome_title_and_does_not_queue_an_unpinned_lobby(self) -> None:
         self.latch()

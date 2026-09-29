@@ -207,6 +207,20 @@ class PlaySessionRunnerTest(unittest.TestCase):
         self.assertEqual(result.error_code, "KNOWN_STATE_STALL_UNRECOVERED")
         self.assertIn("已知页面", result.error)
 
+    def test_a_long_foreground_loss_releases_with_its_own_error_code(self) -> None:
+        identity = SessionIdentity.from_runner_settings(
+            self.settings,
+            self.verification,
+        )
+        FakePilot.outcome = "FOREGROUND_LOST"
+
+        with patch("apex_automation.play_session.CapabilityPilot", FakePilot):
+            result = self.runner.run(identity, ContinuePlayPolicy(), object())
+
+        self.assertEqual(result.status, "PLAYED")
+        self.assertEqual(result.error_code, "FOREGROUND_UNRECOVERED")
+        self.assertIn("前台", result.error)
+
     def test_lease_loss_finishes_with_a_specific_error_for_managed_cleanup(self) -> None:
         identity = SessionIdentity.from_runner_settings(self.settings, self.verification)
         FakePilot.outcome = "LEASE_UNRECOVERED"

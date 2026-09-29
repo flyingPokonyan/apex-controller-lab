@@ -276,6 +276,14 @@ class CapabilityPilot:
         self.known_stall_give_up_s = int(
             stall.get("knownStateGiveUpMs", 120_000)
         ) / 1000
+        # A lost foreground used to wait forever while the lease stayed
+        # RUNNING. 20260929 BrianBuckley sat on the firing-range confirm for
+        # two hours after Apex stopped being the front window. Ten minutes is
+        # long enough to hand the window back; after that the lease is released
+        # and the runner pauses instead of holding the account.
+        self.foreground_give_up_s = int(
+            stall.get("foregroundGiveUpMs", 600_000)
+        ) / 1000
         if self.stall_grace_s <= 0 or self.stall_window_s <= 0:
             raise ValueError("停滞看门狗的宽限和处置窗口必须大于 0")
         if self.stall_queue_grace_s < self.stall_grace_s:
@@ -286,6 +294,8 @@ class CapabilityPilot:
             raise ValueError("停滞看门狗的放弃时限必须长于宽限")
         if self.known_stall_give_up_s <= 0:
             raise ValueError("已知画面动作耗尽后的放弃时限必须大于 0")
+        if self.foreground_give_up_s <= 0:
+            raise ValueError("前台丢失后的放弃时限必须大于 0")
 
         # Legend select is the one screen the runner passes through every match
         # and has never seen: it lives inside the unknown stretch between
@@ -2115,6 +2125,27 @@ class CapabilityPilot:
         )
         self.notify("暂停：Apex 不在前台。")
 
+    def _give_up_foreground_if_needed(
+        self,
+        now: float,
+        executable: str | None,
+    ) -> None:
+        lost_since = self._foreground_lost_since
+        if (
+            lost_since is None
+            or self.session_outcome is not None
+            or now - lost_since < self.foreground_give_up_s
+        ):
+            return
+        self.session_outcome = "FOREGROUND_LOST"
+        self.recorder.log(
+            "FOREGROUND_UNRECOVERED",
+            pausedForMs=round((now - lost_since) * 1000),
+            foregroundExecutable=executable,
+            reason="Apex 长时间不在前台，结束本次会话并释放租约",
+        )
+        self.notify("Apex 长时间不在前台，结束本次会话。")
+
     def _stop_for_resolution_mismatch(
         self,
         frame: np.ndarray,
@@ -2245,6 +2276,7 @@ class CapabilityPilot:
                 now,
                 executable=executable,
             )
+            self._give_up_foreground_if_needed(now, executable)
             record["skipped"] = "NOT_FOREGROUND"
             self._write_status(now, force=True)
             return record

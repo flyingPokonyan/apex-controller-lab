@@ -65,7 +65,14 @@
       "any": ["是"],
       "minConfidence": 0.7,
       "exactMatch": true,
-      "_note": "「是否离开？」下面的「是」。exactMatch 不能点到「是否」里的那个字，也不能按 Esc——这一页的 Esc 是取消。"
+      "_note": "「是否离开？」或「退出比赛？」下面的「是」。exactMatch 不能点到「是否」里的那个字，也不能按 Esc——这一页的 Esc 是取消。"
+    },
+    "quitMatchClick": {
+      "region": "fullFrame",
+      "any": ["退出比赛"],
+      "minConfidence": 0.7,
+      "exactMatch": true,
+      "_note": "对局暂停菜单上的「退出比赛」。exactMatch 只点这个按钮，不点确认框标题「退出比赛？」，也不点「是」。"
     },
     "introWelcomeModeClick": {
       "region": "fullFrame",
@@ -106,7 +113,43 @@
         "LOBBY_READY_TARGET_FILL_ON",
         "POST_MATCH_SUMMARY"
       ],
-      "_note": "「退出比赛？」点「是」。Esc 是取消，停滞恢复以前会按到它，所以这条必须先于任何 Esc 兜底把页面认出来。"
+      "_note": "「退出比赛？」点「是」。Esc 是取消。只在画面上真的有「是」时才会进入这个状态。"
+    },
+    {
+      "id": "leave-in-match-menu",
+      "priority": 131,
+      "states": ["MATCH_LEAVE_MENU"],
+      "action": "quitMatchClick",
+      "kind": "clickText",
+      "actionClass": "idempotent",
+      "confirmMs": 8000,
+      "maxAttempts": 2,
+      "allowedNextStates": [
+        "QUIT_MATCH_CONFIRM",
+        "LOBBY_READY_OTHER",
+        "LOBBY_READY_WELCOME",
+        "LOBBY_SELECT_REQUIRED",
+        "LOBBY_READY_TRAINING",
+        "LOBBY_READY_TARGET",
+        "LOBBY_READY_TARGET_FILL_ON",
+        "POST_MATCH_SUMMARY"
+      ],
+      "_note": "暂停菜单点「退出比赛」，下一步是「退出比赛？」确认框。不要按 Esc，那是「返回」。"
+    },
+    {
+      "id": "open-squad-wipe-menu",
+      "priority": 120,
+      "states": ["SQUAD_WIPE"],
+      "action": "escapeScanCode",
+      "kind": "key",
+      "actionClass": "idempotent",
+      "confirmMs": 8000,
+      "maxAttempts": 2,
+      "allowedNextStates": [
+        "MATCH_LEAVE_MENU",
+        "QUIT_MATCH_CONFIRM"
+      ],
+      "_note": "全军覆没页自己写着「ESC 打开菜单」。按一次 ESC，然后交给离开菜单去点「退出比赛」。"
     },
     {
       "id": "intro-confirm-leave",

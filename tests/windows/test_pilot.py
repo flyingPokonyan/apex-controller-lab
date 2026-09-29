@@ -386,6 +386,20 @@ class PilotTest(unittest.TestCase):
         self.assertNotIn(("click", 1280, 1295), self.sender.calls)
         self.assertIsNone(self.pilot.dispatcher.pending)
 
+    def test_a_long_foreground_loss_ends_the_session_instead_of_holding_the_lease(self) -> None:
+        self.guard.foreground = False
+        self.pilot.step()
+        self.assertIsNone(self.pilot.session_outcome)
+
+        self.now = self.pilot.foreground_give_up_s - 1
+        self.pilot.step()
+        self.assertIsNone(self.pilot.session_outcome)
+
+        self.now = self.pilot.foreground_give_up_s
+        self.pilot.step()
+        self.assertEqual(self.pilot.session_outcome, "FOREGROUND_LOST")
+        self.assertIn("FOREGROUND_UNRECOVERED", self.recorder.names())
+
     @staticmethod
     def _raise_foreground_lost() -> None:
         raise ForegroundLost("前台程序不是 Apex")

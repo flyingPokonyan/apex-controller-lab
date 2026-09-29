@@ -130,9 +130,17 @@
     {
       "id": "quit-match-confirm",
       "state": "QUIT_MATCH_CONFIRM",
-      "_note": "结算页按 TAB 返回大厅时，死亡回放那一页会先弹出「退出比赛？」。按钮是「是」和「ESC 取消」。这个画面以前没有任何规则，两分钟后停滞恢复按 Esc，正好点在取消上，确认框关掉又回到结算，同一轮能重复三四次。必须点「是」。",
+      "_note": "真正的「退出比赛？」确认框，按钮是「是」和「ESC 取消」。必须同时看见「退出比赛」和「是」。只认「退出比赛」会把对局里的暂停菜单（设置 / 退出比赛）认成这张框，然后去点一个不存在的「是」。这条排在菜单规则前面：两样字都在时先点「是」。",
       "requirements": [
-        {"region": "fullFrame", "all": ["退出比赛"], "minConfidence": 0.65}
+        {"region": "fullFrame", "all": ["退出比赛", "是"], "minConfidence": 0.65}
+      ]
+    },
+    {
+      "id": "match-leave-menu",
+      "state": "MATCH_LEAVE_MENU",
+      "_note": "对局里按 Esc 弹出的菜单，上面是「设置」，下面是「退出比赛」，左下角是「ESC 返回」。全军覆没那页的提示是「ESC 打开菜单」，打开之后就是这张。必须点「退出比赛」，再按 Esc 会把菜单关掉。排在 fullscreen-esc-back 前面，也排在只认「退出比赛」的确认框后面。",
+      "requirements": [
+        {"region": "fullFrame", "all": ["退出比赛", "设置"], "minConfidence": 0.65}
       ]
     },
     {
@@ -149,6 +157,14 @@
       "_note": "训练场里按 Esc 弹出的菜单，只有「设置」和「返回大厅」。左下角同时有「ESC 返回」，所以这条必须排在 fullscreen-esc-back 前面，否则会再按一次 Esc 把菜单关掉。",
       "requirements": [
         {"region": "fullFrame", "all": ["返回大厅", "设置"], "minConfidence": 0.65}
+      ]
+    },
+    {
+      "id": "squad-wipe",
+      "state": "SQUAD_WIPE",
+      "_note": "全军覆没的结算卡。右下角是「ESC 打开菜单」，没有「返回大厅」，所以回大厅那条序列够不着。按一次 ESC 打开离开菜单。菜单已经开着时上面的规则先命中，不会再按一次 ESC 把它关掉。",
+      "requirements": [
+        {"region": "fullFrame", "all": ["全军覆没"], "minConfidence": 0.65}
       ]
     },
     {

@@ -255,9 +255,13 @@ class IntroUnlock:
             self._menu_seen = True
             self._esc_not_before = max(self._esc_not_before, now + ESC_RETRY_S)
         if state == LEAVE_CONFIRM:
-            return None if self._already(decision, CONFIRM_LEAVE.id) else self._instead(CONFIRM_LEAVE, decision)
+            if self._click_already_out(decision, pending, CONFIRM_LEAVE.id, now):
+                return None
+            return self._instead(CONFIRM_LEAVE, decision)
         if state == LEAVE_MENU:
-            return None if self._already(decision, RETURN_LOBBY.id) else self._instead(RETURN_LOBBY, decision)
+            if self._click_already_out(decision, pending, RETURN_LOBBY.id, now):
+                return None
+            return self._instead(RETURN_LOBBY, decision)
         if state is not None:
             return None
         if pending is not None and pending.capability.id in {RETURN_LOBBY.id, CONFIRM_LEAVE.id, LEAVE_RANGE_ESC.id} and now < pending.retry_at:
@@ -296,6 +300,29 @@ class IntroUnlock:
             decision.kind == "fire"
             and decision.capability is not None
             and decision.capability.id == capability_id
+        )
+
+    @staticmethod
+    def _click_already_out(
+        decision: Decision,
+        pending: PendingAction | None,
+        capability_id: str,
+        now: float,
+    ) -> bool:
+        """True when this click is in flight and must not be sent again.
+
+        The dispatcher waits out confirmMs before a retry. During that wait
+        its decision is no longer "fire", and treating that as "never clicked"
+        sends a second 是 while the first one is still landing. 20260929
+        BrianBuckley did that 3.6s into an 8s confirm, then Apex left the
+        foreground and the lease sat on the firing range for two hours.
+        """
+        if IntroUnlock._already(decision, capability_id):
+            return True
+        return (
+            pending is not None
+            and pending.capability.id == capability_id
+            and now < pending.retry_at
         )
 
     def _instead(self, capability: Capability, decision: Decision) -> IntroCommand:

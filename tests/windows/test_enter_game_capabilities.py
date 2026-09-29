@@ -215,6 +215,61 @@ class EnterGameCapabilityTest(unittest.TestCase):
         self.assertTrue(self.payload["actions"][action.action]["exactMatch"])
         self.assertNotIn("fallbackScanCode", self.payload["actions"][action.action])
 
+    def test_the_in_match_pause_menu_clicks_leave_and_is_not_the_confirm_dialog(self) -> None:
+        # 20260929 JonathonMoore: 设置 / 退出比赛 was named QUIT_MATCH_CONFIRM
+        # because that rule matched the four characters alone, then looked for
+        # 是 and gave up. The menu has no 是.
+        provider = FakeLayoutProvider(
+            (
+                OcrToken("设置", 0.99, (1100, 620, 1460, 690)),
+                OcrToken("退出比赛", 0.99, (1100, 700, 1460, 770)),
+                OcrToken("ESC 返回", 0.97, (40, 1000, 180, 1040)),
+            )
+        )
+        analysis = OcrStateDetector.from_path(
+            FullFrameOcrProvider(provider), OVERLAYS
+        ).analyze(np.zeros((1440, 2560, 3), dtype=np.uint8))
+
+        self.assertEqual(analysis.decision.state, "MATCH_LEAVE_MENU")
+        action = self.capabilities.for_state("MATCH_LEAVE_MENU")[0]
+        self.assertEqual(action.id, "leave-in-match-menu")
+        self.assertEqual(action.action, "quitMatchClick")
+        self.assertEqual(self.payload["actions"]["quitMatchClick"]["any"], ["退出比赛"])
+        self.assertTrue(self.payload["actions"]["quitMatchClick"]["exactMatch"])
+        self.assertIn("QUIT_MATCH_CONFIRM", action.allowed_next_states)
+
+    def test_a_dialog_that_already_shows_yes_stays_the_confirm(self) -> None:
+        provider = FakeLayoutProvider(
+            (
+                OcrToken("设置", 0.9, (1100, 500, 1460, 560)),
+                OcrToken("退出比赛？", 0.99, (1100, 620, 1460, 690)),
+                OcrToken("是", 0.99, (1080, 760, 1240, 830)),
+                OcrToken("ESC 取消", 0.97, (1280, 760, 1520, 830)),
+            )
+        )
+        analysis = OcrStateDetector.from_path(
+            FullFrameOcrProvider(provider), OVERLAYS
+        ).analyze(np.zeros((1440, 2560, 3), dtype=np.uint8))
+
+        self.assertEqual(analysis.decision.state, "QUIT_MATCH_CONFIRM")
+
+    def test_squad_wipe_opens_the_leave_menu_with_escape(self) -> None:
+        provider = FakeLayoutProvider(
+            (
+                OcrToken("全军覆没", 0.99, (900, 180, 1400, 260)),
+                OcrToken("ESC 打开菜单", 0.95, (2100, 980, 2480, 1030)),
+            )
+        )
+        analysis = OcrStateDetector.from_path(
+            FullFrameOcrProvider(provider), OVERLAYS
+        ).analyze(np.zeros((1440, 2560, 3), dtype=np.uint8))
+
+        self.assertEqual(analysis.decision.state, "SQUAD_WIPE")
+        action = self.capabilities.for_state("SQUAD_WIPE")[0]
+        self.assertEqual(action.id, "open-squad-wipe-menu")
+        self.assertEqual(action.action, "escapeScanCode")
+        self.assertEqual(action.allowed_next_states, ("MATCH_LEAVE_MENU", "QUIT_MATCH_CONFIRM"))
+
     def test_known_overlay_pages_are_all_routed_into_the_capability_set(self) -> None:
         detector = OcrStateDetector.from_path(object(), OVERLAYS)
         overlay_states = detector.states

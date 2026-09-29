@@ -373,6 +373,11 @@ class PlaySessionRunner:
                 error_code = "KNOWN_STATE_STALL_UNRECOVERED"
                 error_message = "已知页面的安全动作全部耗尽且画面仍未变化"
                 finish_detail["reason"] = error_message
+            elif outcome == "FOREGROUND_LOST":
+                error_code = "FOREGROUND_UNRECOVERED"
+                error_message = "Apex 长时间不在前台，已停止游玩并释放租约"
+                finish_detail["reason"] = error_message
+                finish_detail["errorCode"] = error_code
             elif outcome == "ENVIRONMENT_INVALID":
                 # Keep the established PLAYED status vocabulary. The specific
                 # error makes AccountOrchestrator release this lease and enter a
