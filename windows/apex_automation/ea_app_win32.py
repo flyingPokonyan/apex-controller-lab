@@ -136,12 +136,15 @@ APEX_UPDATE_REQUIRED_TERMS = (
 CLOUD_DATA_ERROR_TERMS = (
     "wecouldntloadyourclouddata",
     "unabletoloadyourclouddata",
+    "savingyourprogresstothecloud",
     "无法加载您的云数据",
     "无法加载云数据",
     "ec10600",
+    "ec10609",
 )
 CONTINUE_LOCAL_DATA_TERMS = (
     "continuewithlocaldata",
+    "skipsyncclose",
     "使用本地数据继续",
     "继续使用本地数据",
 )
@@ -1942,8 +1945,33 @@ class WindowsEaHybridDriver:
         hwnd = self._ea_window()
         identity = None
         signed_in_page_seen = False
+        cloud_sync_close_deadline: float | None = None
         for _ in range(8):
-            observation = self._observe(hwnd)
+            try:
+                observation = self._observe(hwnd)
+            except EaAppAutomationError:
+                if cloud_sync_close_deadline is not None:
+                    self._record("signout-cloud-sync-closed")
+                    return True
+                raise
+            local_data = self._continue_local_data_point(observation)
+            if local_data is not None:
+                if cloud_sync_close_deadline is not None:
+                    if time.monotonic() >= cloud_sync_close_deadline:
+                        self._record("signout-cloud-sync-timeout", observation)
+                        return False
+                    self.sleep(1.0)
+                else:
+                    cloud_sync_close_deadline = time.monotonic() + 15.0
+                    self._record("signout-cloud-sync-skip", observation)
+                    self.notify("EA 云同步失败，已选择跳过同步并关闭")
+                    try:
+                        self._click_point(hwnd, *local_data)
+                    except EaAppAutomationError:
+                        self._record("signout-cloud-sync-skip-failed", observation)
+                        return False
+                    self.sleep(1.0)
+                continue
             observation = self._dismiss_library_tour(hwnd, observation)
             try:
                 observation = self._dismiss_account_ban(hwnd, observation)
@@ -1969,6 +1997,8 @@ class WindowsEaHybridDriver:
                 break
             self.sleep(1.0)
         if identity is None and not signed_in_page_seen:
+            if cloud_sync_close_deadline is not None:
+                self._record("signout-cloud-sync-timeout")
             return False
         opened = self._open_account_menu(hwnd, identity)
         if opened is None:
@@ -1981,12 +2011,33 @@ class WindowsEaHybridDriver:
             return False
         deadline = time.monotonic() + 25.0
         confirmed = False
+        cloud_sync_skipped = False
         while time.monotonic() < deadline:
             self.sleep(1.0)
-            observation = self._observe(hwnd)
+            try:
+                observation = self._observe(hwnd)
+            except EaAppAutomationError:
+                if cloud_sync_skipped:
+                    self._record("signout-cloud-sync-closed")
+                    return True
+                raise
             if observation.page in (EaPage.EMAIL, EaPage.PASSWORD):
                 self._record("signed-out", observation)
                 return True
+            local_data = self._continue_local_data_point(observation)
+            if local_data is not None:
+                if cloud_sync_skipped:
+                    self._record("signout-cloud-sync-timeout", observation)
+                    return False
+                cloud_sync_skipped = True
+                self._record("signout-cloud-sync-skip", observation)
+                self.notify("EA 云同步失败，已选择跳过同步并关闭")
+                try:
+                    self._click_point(hwnd, *local_data)
+                except EaAppAutomationError:
+                    self._record("signout-cloud-sync-skip-failed", observation)
+                    return False
+                continue
             if confirmed:
                 continue
             # EA can ask once more before it drops the session.
@@ -1999,5 +2050,12 @@ class WindowsEaHybridDriver:
                     self._record("signout-confirm-failed", observation)
                     return False
                 confirmed = True
-        self._record("signout-timeout", self._observe(hwnd))
+        try:
+            final_observation = self._observe(hwnd)
+        except EaAppAutomationError:
+            if cloud_sync_skipped:
+                self._record("signout-cloud-sync-closed")
+                return True
+            raise
+        self._record("signout-timeout", final_observation)
         return False

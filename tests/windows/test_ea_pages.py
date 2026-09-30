@@ -962,6 +962,45 @@ class EaLaunchRecoveryTest(unittest.TestCase):
         )
         self.assertTrue(any("本地数据" in notice for notice in notices))
 
+    def test_cloud_sync_error_ec10609_skips_sync_before_ea_closes(self) -> None:
+        signed_in = EaObservation(
+            rect=self.WINDOW,
+            frame=np.zeros((1, 1), dtype=np.uint8),
+            tokens=(),
+            page=EaPage.SIGNED_IN,
+        )
+        cloud_error = self.observation(
+            ("Saving your progress to the cloud...", 950, 400),
+            ("Error code: EC:10609", 950, 620),
+            ("SKIP SYNC & CLOSE", 1120, 710),
+        )
+        clicks: list[tuple[int, int]] = []
+        records: list[str] = []
+        notices: list[str] = []
+        driver = object.__new__(WindowsEaHybridDriver)
+        driver._ea_window = lambda: 1
+        observations = [signed_in, cloud_error]
+
+        def observe(_hwnd):
+            if observations:
+                return observations.pop(0)
+            raise EaAppAutomationError("EA App 主窗口已关闭")
+
+        driver._observe = observe
+        driver._click_point = lambda _hwnd, x, y: clicks.append((x, y))
+        driver._record = lambda step, *_args, **_kwargs: records.append(step)
+        driver._dismiss_library_tour = lambda _hwnd, observation: observation
+        driver._dismiss_account_ban = lambda _hwnd, observation: observation
+        driver._identity = lambda _hwnd: object()
+        driver._open_account_menu = lambda _hwnd, _identity: (signed_in, (700, 500))
+        driver.sleep = lambda _seconds: None
+        driver.notify = notices.append
+
+        self.assertTrue(driver.sign_out())
+        self.assertEqual(clicks, [(700, 500), (1120, 710)])
+        self.assertEqual(records, ["signout-cloud-sync-skip", "signout-cloud-sync-closed"])
+        self.assertTrue(any("跳过同步" in notice for notice in notices))
+
     def test_apex_update_is_clicked_once_then_waits_for_play(self) -> None:
         entry = self.observation(("Apex Legends", 120, 460))
         update = self.observation(
