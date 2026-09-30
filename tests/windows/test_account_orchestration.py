@@ -2106,6 +2106,41 @@ class AccountOrchestratorTest(unittest.TestCase):
             self.assertEqual(cycle.outcome, AccountCycleOutcome.PAUSED)
             self.assertEqual(cycle.error_code, "CAPTCHA")
 
+    def test_account_cycle_auto_resumes_a_manual_pause_without_a_lease(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            store = AtomicCheckpointStore(
+                Path(directory) / "account-cycle-status.json"
+            )
+            store.save(
+                OrchestrationCheckpoint(
+                    device_id="device_1",
+                    run_state=OrchestratorRunState.PAUSED_MANUAL,
+                    last_error_code="ORCHESTRATOR_FAILED",
+                )
+            )
+            notices: list[str] = []
+            orchestrator = None
+
+            def sleep(_: float) -> None:
+                orchestrator.stop()
+
+            orchestrator = AccountOrchestrator(
+                provider=FakeAccountProvider(),
+                ea_driver=object(),
+                play_session=object(),
+                checkpoint_store=store,
+                device_id="device_1",
+                capture_source=object(),
+                sleep=sleep,
+                notify=notices.append,
+            )
+
+            self.assertEqual(orchestrator.run_forever(idle_s=1), 0)
+            checkpoint = store.load()
+            self.assertEqual(checkpoint.run_state, OrchestratorRunState.ACTIVE)
+            self.assertIsNone(checkpoint.last_error_code)
+            self.assertTrue(any("本地暂停未持有租约" in item for item in notices))
+
     def test_manual_pause_survives_restart_and_retryable_pause_recovers(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             store = AtomicCheckpointStore(

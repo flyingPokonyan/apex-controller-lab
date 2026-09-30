@@ -1178,11 +1178,33 @@ class AccountOrchestrator:
         self.notify(f"已清除本地暂停状态（原因 {previous or '未记录'}）")
         return True
 
+    def resume_if_safe(self) -> bool:
+        """Clear a pause automatically when no lease remains to protect.
+
+        A pause without a lease cannot hide an in-flight remote task.  It is
+        therefore safe for the continuous account-cycle loop to retry it.  A
+        pause that still owns a lease remains sticky until the existing
+        server-side reconciliation proves that the lease is terminal.
+        """
+
+        if self._checkpoint.run_state is OrchestratorRunState.ACTIVE:
+            return False
+        if self._checkpoint.has_lease:
+            return False
+        return self.resume()
+
     def run_forever(self, *, idle_s: float = 30.0) -> int:
         while not self._stop.is_set():
             result = self.run_once()
             if result.outcome is AccountCycleOutcome.PAUSED:
                 if self._checkpoint.run_state is OrchestratorRunState.PAUSED_MANUAL:
+                    if self.resume_if_safe():
+                        delay = max(1.0, idle_s)
+                        self.notify(
+                            f"本地暂停未持有租约，{delay:g} 秒后自动继续账号编排"
+                        )
+                        self.sleep(delay)
+                        continue
                     self.notify(f"账号编排已暂停：{result.error_code}")
                     if result.error_code not in self.SERVER_RELEASABLE_PAUSES:
                         return 1

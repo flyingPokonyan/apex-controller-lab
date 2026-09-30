@@ -100,9 +100,9 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\install.ps1
 
 | 入口 | 会做什么 | 什么时候使用 |
 | --- | --- | --- |
-| `account-cycle-once.cmd` | 领取一个账号并完整运行一轮，然后退出 | 平时就用它 |
+| `account-cycle-once.cmd` | 领取一个账号并完整运行一轮，然后退出 | 首次验证或单轮调试 |
 | `account-cycle.cmd` | 一个账号收口后继续领取下一个账号 | 单账号跑通后，需要连续挂机时 |
-| `account-cycle-resume.cmd` | 清除其他人工暂停后再运行一轮 | 普通崩溃和旧租约会自动收口，不需要运行它 |
+| `account-cycle-resume.cmd` | `account-cycle.cmd` 的兼容别名，持续运行并自动恢复安全暂停 | 旧快捷方式仍可用，日常直接用 `account-cycle.cmd` |
 
 出问题时再用这些定位，它们都不会进入循环：
 
@@ -117,8 +117,8 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\install.ps1
 `INVALID_PROVIDER_TOKEN`，应在控制台重新创建 Runner 或轮换 Token；若配置里仍是
 `192.168.*`，请重新下载公网配置或把两个 URL 改为上面的 HTTPS 地址。
 
-任何时候都可以按 `F8` 紧急停止。遇到验证码、身份不一致、未知 EA 页面或无法确认退出时，
-Runner 会暂停并保留证据，不应直接切到持续循环反复消耗账号。
+任何时候都可以按 `F8` 紧急停止。没有未决租约的本地异常会由持续循环自动清除并重试；遇到验证码、
+身份不一致、未知 EA 页面或无法确认退出时，Runner 会保留租约、暂停并保留证据，避免反复消耗账号。
 
 准备长时间无人值守之前，先读
 [EA 自动切号进度 · 挂机运行的环境要求](docs/ea-account-cycle-progress-20260801.md#挂机运行的环境要求)：
