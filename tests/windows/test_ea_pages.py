@@ -84,6 +84,12 @@ OTP_METHOD_PAGE = tokens(
     "SEND CODE",
 )
 
+OTP_EMAIL_ONLY_METHOD_PAGE = tokens(
+    "Verify your identity",
+    "We'll send a verification code to jj*****@hotmail.com.",
+    "SEND CODE",
+)
+
 OTP_AUTHENTICATOR_PAGE = tokens(
     "< BACK",
     "Enter your code",
@@ -175,6 +181,12 @@ class PageClassificationTest(unittest.TestCase):
         # a preselected email option and a Send Code button.
         self.assertIs(classify_page(OTP_METHOD_PAGE), EaPage.OTP_METHOD)
         self.assertIs(classify_page(OTP_EMAIL_PAGE), EaPage.OTP)
+
+    def test_email_only_method_chooser_without_email_label_is_recognised(self) -> None:
+        self.assertIs(
+            classify_page(OTP_EMAIL_ONLY_METHOD_PAGE),
+            EaPage.OTP_METHOD,
+        )
 
     def test_the_email_code_page_is_distinguishable(self) -> None:
         # A generated TOTP can never satisfy it, so it has to be told apart
@@ -1197,6 +1209,25 @@ class OtpMethodSelectionTest(unittest.TestCase):
         selected, email_clicks = run((OtpMethod.EMAIL,))
         self.assertIs(selected, OtpMethod.EMAIL)
         self.assertEqual(len(email_clicks), 1)
+
+    def test_email_only_chooser_without_email_label_uses_email(self) -> None:
+        observation = self.observation(*OTP_EMAIL_ONLY_METHOD_PAGE)
+        driver = object.__new__(WindowsEaHybridDriver)
+        driver._anchor = lambda _observation, terms, **_kwargs: (
+            (300, 600) if terms == SEND_CODE_TERMS else None
+        )
+        driver._click_point = lambda _hwnd, *_point: None
+        driver._click = lambda _hwnd, *_point: None
+        driver._observe = lambda _hwnd: observation
+        driver._record = lambda *_args, **_kwargs: None
+        driver._wait_for_page = lambda *_args, **_kwargs: None
+        driver.sleep = lambda _seconds: None
+        driver.notify = lambda _message: None
+
+        selected, _ = driver._choose_otp_method(
+            1, observation, (OtpMethod.EMAIL,)
+        )
+        self.assertIs(selected, OtpMethod.EMAIL)
 
 
 class SharedInputStructureTest(unittest.TestCase):

@@ -60,13 +60,21 @@ OTP_METHOD_TERMS = (
     "verifyyouridentity",
     "usemyappauthenticator",
     "sendcode",
+    # On the email-only chooser EA sometimes omits the "Email" label and
+    # renders only this sentence above the masked mailbox address.
+    "wellsendaverificationcodeto",
     "验证你的身份",
     "使用验证器",
 )
 
 AUTHENTICATOR_TERMS = ("usemyappauthenticator", "appauthenticator", "验证器")
 
-EMAIL_METHOD_TERMS = ("email", "电子邮件", "邮箱")
+EMAIL_METHOD_TERMS = (
+    "email",
+    "电子邮件",
+    "邮箱",
+    "wellsendaverificationcodeto",
+)
 
 SEND_CODE_TERMS = ("sendcode", "continue", "next", "发送验证码", "继续")
 

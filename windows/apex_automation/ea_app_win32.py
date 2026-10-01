@@ -1167,8 +1167,13 @@ class WindowsEaHybridDriver:
             method = OtpMethod.TOTP
             self._record("otp-method-authenticator", chosen)
             self.notify("EA 使用验证器验证码")
-        elif OtpMethod.EMAIL in otp_methods and has_any(
-            compact, EMAIL_METHOD_TERMS
+        elif OtpMethod.EMAIL in otp_methods and (
+            # The email-only layout may show only the explanatory sentence
+            # and a masked address, with no literal "Email" label. If there
+            # is no TOTP source, the chooser itself is sufficient evidence
+            # that its only available action is to send an email code.
+            OtpMethod.TOTP not in otp_methods
+            or has_any(compact, EMAIL_METHOD_TERMS)
         ):
             chosen = observation
             method = OtpMethod.EMAIL
