@@ -129,6 +129,15 @@ EXPIRED_SESSION_TERMS = (
     "登录已过期",
 )
 
+# The button only. The heading "session has expired" is on the same screen
+# and is not a control. OCR often splits "BACK TO SIGN-IN" into several
+# tokens, so the click has to reassemble them.
+BACK_TO_SIGN_IN_PHRASES = (
+    "backtosignin",
+    "返回登录",
+    "回到登录",
+)
+
 # Overlay on the signed-in Library, and the empty-library shell that remains
 # after the overlay is dismissed. Both mean this EA session cannot go online.
 # They must outrank nav words like "Library" or the driver keeps hunting for
@@ -291,6 +300,55 @@ def password_page_blocker(normalized_tokens: Iterable[str]) -> str:
     if password:
         return ""
     return "NO_PASSWORD_FIELD"
+
+
+def phrase_point(
+    tokens: Iterable[object],
+    rect: tuple[int, int, int, int],
+    phrase: str,
+    *,
+    x_range: tuple[float, float] = (0.0, 1.0),
+    y_range: tuple[float, float] = (0.0, 1.0),
+) -> tuple[int, int] | None:
+    """Centre of the on-screen run of tokens that spells `phrase`.
+
+    One button is frequently several OCR tokens. Matching the joined text of
+    a single line, and returning that line's box, is what makes the click
+    land on the control instead of a heading that shares some of its words.
+    """
+
+    left, top, right, bottom = rect
+    width = max(1, right - left)
+    height = max(1, bottom - top)
+    placed = [token for token in tokens if getattr(token, "roi", None) is not None]
+    placed.sort(key=lambda token: (token.roi[1], token.roi[0]))
+    for start, first in enumerate(placed):
+        x1, y1, x2, y2 = first.roi
+        line_y = (y1 + y2) / 2
+        parts = [first.normalized]
+        end = first.roi
+        for token in placed[start : start + 6]:
+            if token is not first:
+                nx1, ny1, nx2, ny2 = token.roi
+                if abs(((ny1 + ny2) / 2) - line_y) > height * 0.06:
+                    break
+                if nx1 + 4 < x1:
+                    break
+                parts.append(token.normalized)
+                end = token.roi
+            compact = "".join(parts)
+            if phrase not in compact:
+                if len(compact) > len(phrase):
+                    break
+                continue
+            cx = (x1 + end[2]) // 2
+            cy = (min(y1, end[1]) + max(y2, end[3])) // 2
+            x_ratio = (cx - left) / width
+            y_ratio = (cy - top) / height
+            if x_range[0] <= x_ratio <= x_range[1] and y_range[0] <= y_ratio <= y_range[1]:
+                return cx, cy
+            return None
+    return None
 
 
 def page_markers(normalized_tokens: Iterable[str]) -> tuple[str, ...]:

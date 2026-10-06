@@ -24,7 +24,11 @@ from apex_automation.ea_app import (
     EaLoginRejected,
     EaOtpUnavailable,
 )
-from apex_automation.ea_app_win32 import EaObservation, WindowsEaHybridDriver
+from apex_automation.ea_app_win32 import (
+    EaObservation,
+    WindowsEaHybridDriver,
+    _LoginRestart,
+)
 from apex_automation.ea_evidence import (
     EaLoginEvidence,
     SecretHints,
@@ -48,6 +52,7 @@ from apex_automation.ea_pages import (
     mask_identity,
     page_markers,
     password_page_blocker,
+    phrase_point,
 )
 from apex_automation.ocr_obstacles import OcrToken, normalize_ocr_text
 
@@ -224,6 +229,23 @@ class PageClassificationTest(unittest.TestCase):
             EaPage.EXPIRED_SESSION,
         )
 
+    def test_back_to_sign_in_is_found_when_ocr_splits_the_button(self) -> None:
+        # The heading shares the screen. The click has to land on the button
+        # even when RapidOCR returns one word per token.
+        tokens_with_boxes = (
+            OcrToken("Your session has expired", 0.99, (700, 240, 1220, 280)),
+            OcrToken("BACK", 0.99, (820, 400, 920, 440)),
+            OcrToken("TO", 0.99, (930, 400, 990, 440)),
+            OcrToken("SIGN-IN", 0.99, (1000, 400, 1160, 440)),
+        )
+        point = phrase_point(
+            tokens_with_boxes,
+            (0, 0, 1920, 1080),
+            "backtosignin",
+            y_range=(0.15, 0.70),
+        )
+        self.assertEqual(point, (990, 420))
+
     def test_login_errors_are_visible_to_the_caller(self) -> None:
         self.assertTrue(
             is_login_error("".join(tokens("Your credentials are incorrect")))
@@ -364,6 +386,32 @@ class IdentityMatchTest(unittest.TestCase):
         self.assertIsNotNone(identity)
         self.assertEqual(identity.ea_account_id, "n44nvjhe80xt")
         self.assertEqual(len(regions), 2)
+
+    def test_sign_out_clicks_back_to_sign_in_then_treats_the_login_page_as_done(self) -> None:
+        expired = EaObservation(
+            rect=(0, 0, 1920, 1080),
+            frame=np.zeros((1, 1), dtype=np.uint8),
+            tokens=(OcrToken("Your session has expired", 0.99),),
+            page=EaPage.EXPIRED_SESSION,
+        )
+        email = EaObservation(
+            rect=(0, 0, 1920, 1080),
+            frame=np.zeros((1, 1), dtype=np.uint8),
+            tokens=(OcrToken("Email or EA ID", 0.99),),
+            page=EaPage.EMAIL,
+        )
+        frames = [expired, email]
+        dismissed: list[int] = []
+        records: list[str] = []
+        driver = object.__new__(WindowsEaHybridDriver)
+        driver._ea_window = lambda: 1
+        driver._observe = lambda _hwnd: frames.pop(0)
+        driver._dismiss_expired_session = lambda hwnd: dismissed.append(hwnd) or True
+        driver._record = lambda step, *_args, **_kwargs: records.append(step)
+
+        self.assertTrue(driver.sign_out())
+        self.assertEqual(dismissed, [1])
+        self.assertEqual(records, ["signout-not-signed-in"])
 
     def test_sign_out_still_tries_the_menu_when_badge_ocr_is_missing(self) -> None:
         observation = EaObservation(
@@ -670,6 +718,76 @@ class EaLaunchRecoveryTest(unittest.TestCase):
         self.assertEqual(clicks, [])
         self.assertIn("account-banned", records)
         self.assertIn("account-banned-close-failed", records)
+
+    def test_expired_session_clicks_the_split_back_to_sign_in_button(self) -> None:
+        expired = self.observation(
+            ("Your session has expired", 960, 260),
+            ("BACK", 860, 420),
+            ("TO", 960, 420),
+            ("SIGN-IN", 1080, 420),
+        )
+        email = self.observation(("Email or EA ID", 960, 500))
+        clicks: list[tuple[int, int]] = []
+        records: list[str] = []
+        driver = object.__new__(WindowsEaHybridDriver)
+        frames = [expired, email]
+        driver._live = lambda hwnd: hwnd
+        driver._observe = lambda _hwnd: frames.pop(0)
+        driver._click_point = lambda _hwnd, x, y: clicks.append((x, y))
+        driver._click = lambda _hwnd, x, y: clicks.append((x, y))
+        driver._record = lambda step, *_args, **_kwargs: records.append(step)
+        driver.sleep = lambda _seconds: None
+        driver.notify = lambda _message: None
+
+        self.assertTrue(driver._dismiss_expired_session(1))
+        self.assertEqual(clicks, [(970, 420)])
+        self.assertEqual(records, ["expired-session"])
+
+    def test_expired_session_uses_the_measured_button_when_ocr_has_no_box(self) -> None:
+        expired = EaObservation(
+            rect=self.WINDOW,
+            frame=np.zeros((1, 1), dtype=np.uint8),
+            tokens=(OcrToken("Your session has expired", 0.99),),
+            page=EaPage.EXPIRED_SESSION,
+        )
+        email = self.observation(("Email or EA ID", 960, 500))
+        clicks: list[object] = []
+        driver = object.__new__(WindowsEaHybridDriver)
+        frames = [expired, email]
+        driver._live = lambda hwnd: hwnd
+        driver._observe = lambda _hwnd: frames.pop(0)
+        driver._click_point = lambda _hwnd, x, y: clicks.append((x, y))
+        driver._click = lambda _hwnd, x, y: clicks.append(("ratio", x, y))
+        driver._record = lambda *_args, **_kwargs: None
+        driver.sleep = lambda _seconds: None
+        driver.notify = lambda _message: None
+
+        self.assertTrue(driver._dismiss_expired_session(1))
+        self.assertEqual(clicks, [("ratio", 0.50, 0.35)])
+
+    def test_sign_in_types_the_login_again_after_the_session_expires(self) -> None:
+        signed_in = self.observation(("Library", 80, 40), ("Store", 180, 40))
+        clicks: list[tuple[int, int]] = []
+        records: list[str] = []
+        driver = self.driver([signed_in, signed_in], clicks, records)
+        identity = EaIdentityFact("player", "ea-window-ocr:0.990", True)
+        calls = {"n": 0}
+
+        def await_identity(*_args, **_kwargs):
+            calls["n"] += 1
+            if calls["n"] == 1:
+                raise _LoginRestart()
+            return identity
+
+        driver._await_identity = await_identity
+        credentials = SecretCredentials("login@example.test", "password")
+
+        self.assertIs(
+            driver.sign_in(credentials, lambda _challenge: None),
+            identity,
+        )
+        self.assertEqual(calls["n"], 2)
+        self.assertEqual(records, ["signin-start", "signin-start"])
 
     def test_sign_in_ban_overlay_before_credentials_is_the_signed_in_session(self) -> None:
         # If identity was unreadable, sign-in still sees the overlay of the

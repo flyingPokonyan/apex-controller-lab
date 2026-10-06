@@ -48,8 +48,10 @@ from .ea_pages import (
     SEND_CODE_TERMS,
     SIGN_OUT_CONFIRM_TERMS,
     SIGN_OUT_TERMS,
+    BACK_TO_SIGN_IN_PHRASES,
     SUBMIT_TERMS,
     EaPage,
+    phrase_point,
     classify_page,
     has_any,
     identity_candidates,
@@ -98,6 +100,10 @@ PASSWORD_SUBMIT_RATIO = (0.50, 0.58)
 OTP_FIELD_RATIO = (0.50, 0.49)
 OTP_SUBMIT_RATIO = (0.50, 0.64)
 SEND_CODE_RATIO = (0.50, 0.68)
+# Measured on the session-expired window: the blue button sits a third of
+# the way down the tall login frame. OCR is preferred; this is the fallback
+# when the button text is not boxed.
+EXPIRED_SESSION_BUTTON_RATIO = (0.50, 0.35)
 # EA currently renders the badge in either of two vertical positions. Keep
 # the old tight band first so an expanded friends list cannot win over the
 # account name, then try the lower band used by the newer home layout.
@@ -195,6 +201,10 @@ class EaObservation:
         return is_login_error("".join(self.normalized))
 
 
+class _LoginRestart(Exception):
+    """BACK TO SIGN-IN was used; the caller must type the login again."""
+
+
 class WindowsEaHybridDriver:
     """Win32/OCR fallback for the EA CEF surface that exposes no inner UIA tree."""
 
@@ -260,6 +270,21 @@ class WindowsEaHybridDriver:
         self.user32.IsWindow.restype = wintypes.BOOL
         self.user32.IsWindowVisible.argtypes = [wintypes.HWND]
         self.user32.IsWindowVisible.restype = wintypes.BOOL
+        # Default ctypes integer arguments are c_int. A 64-bit HWND does not
+        # fit, and GetWindowRect then raises OverflowError inside the
+        # EnumWindows callback. That aborts the scan, so the visible EA
+        # window — including the expired-session button — is never clicked.
+        self.user32.GetWindowRect.argtypes = [
+            wintypes.HWND,
+            ctypes.POINTER(wintypes.RECT),
+        ]
+        self.user32.GetWindowRect.restype = wintypes.BOOL
+        self.user32.ShowWindow.argtypes = [wintypes.HWND, ctypes.c_int]
+        self.user32.ShowWindow.restype = wintypes.BOOL
+        self.user32.SetForegroundWindow.argtypes = [wintypes.HWND]
+        self.user32.SetForegroundWindow.restype = wintypes.BOOL
+        self.user32.SetCursorPos.argtypes = [ctypes.c_int, ctypes.c_int]
+        self.user32.SetCursorPos.restype = wintypes.BOOL
         self._hwnd: int | None = None
         self.apex_install_dir = APEX_INSTALL_DIR
         try:
@@ -290,17 +315,24 @@ class WindowsEaHybridDriver:
 
             @callback_type
             def collect(hwnd, _lparam):
-                if not self.user32.IsWindowVisible(hwnd):
+                # An exception here is swallowed by ctypes and returned as
+                # FALSE, which stops EnumWindows before the EA window is seen.
+                try:
+                    if not self.user32.IsWindowVisible(hwnd):
+                        return True
+                    process_id = wintypes.DWORD()
+                    self.user32.GetWindowThreadProcessId(
+                        hwnd, ctypes.byref(process_id)
+                    )
+                    if self._process_name(process_id.value) == EA_EXECUTABLE:
+                        rect = wintypes.RECT()
+                        if self.user32.GetWindowRect(hwnd, ctypes.byref(rect)):
+                            width = rect.right - rect.left
+                            height = rect.bottom - rect.top
+                            if width >= 480 and height >= 640:
+                                matches.append((width * height, int(hwnd)))
+                except Exception:
                     return True
-                process_id = wintypes.DWORD()
-                self.user32.GetWindowThreadProcessId(hwnd, ctypes.byref(process_id))
-                if self._process_name(process_id.value) == EA_EXECUTABLE:
-                    rect = wintypes.RECT()
-                    if self.user32.GetWindowRect(hwnd, ctypes.byref(rect)):
-                        width = rect.right - rect.left
-                        height = rect.bottom - rect.top
-                        if width >= 480 and height >= 640:
-                            matches.append((width * height, int(hwnd)))
                 return True
 
             self.user32.EnumWindows(collect, 0)
@@ -899,14 +931,45 @@ class WindowsEaHybridDriver:
             return EaUiState.SIGNED_IN
         return EaUiState.UNKNOWN
 
+    def _expired_session_point(
+        self, observation: EaObservation
+    ) -> tuple[int, int] | None:
+        for phrase in BACK_TO_SIGN_IN_PHRASES:
+            point = phrase_point(
+                observation.tokens,
+                observation.rect,
+                phrase,
+                x_range=(0.15, 0.85),
+                y_range=(0.15, 0.70),
+            )
+            if point is not None:
+                return point
+        return None
+
     def _dismiss_expired_session(self, hwnd: int) -> bool:
-        observation = self._observe(hwnd)
-        if observation.page is not EaPage.EXPIRED_SESSION:
-            return False
-        self._record("expired-session", observation)
-        self._click(hwnd, 0.50, 0.35)
-        self.sleep(2.0)
-        return True
+        """Click BACK TO SIGN-IN until the login form is back, or give up.
+
+        EA raises this full-window gate after the app sits idle. Leaving it
+        up blocks every later login step, and a single miss used to be
+        treated as success.
+        """
+
+        dismissed = False
+        for _ in range(3):
+            hwnd = self._live(hwnd)
+            observation = self._observe(hwnd)
+            if observation.page is not EaPage.EXPIRED_SESSION:
+                return dismissed
+            self._record("expired-session", observation)
+            self.notify("EA 会话已过期，点击返回登录")
+            point = self._expired_session_point(observation)
+            if point is None:
+                self._click(hwnd, *EXPIRED_SESSION_BUTTON_RATIO)
+            else:
+                self._click_point(hwnd, *point)
+            dismissed = True
+            self.sleep(2.0)
+        return dismissed
 
     def _wait_for_page(
         self,
@@ -1119,36 +1182,43 @@ class WindowsEaHybridDriver:
         if self.evidence is not None:
             self.notify(f"EA 登录证据目录：{self.evidence.rotate()}")
             self.evidence.protect(credentials.login_identifier)
-        hwnd = self._ea_window()
-        self._dismiss_expired_session(hwnd)
-        observation = self._observe(hwnd)
-        self._record("signin-start", observation)
-        if observation.page is EaPage.CAPTCHA:
-            raise EaCaptchaRequired("EA App 出现 Captcha，已暂停")
-        if observation.page is EaPage.BANNED:
-            observation = self._dismiss_account_ban(hwnd, observation)
-        if observation.page is EaPage.BANNED:
-            self._raise_if_account_banned(hwnd, observation)
-        if observation.page is EaPage.EMAIL:
-            observation = self._submit_login_identifier(hwnd, observation, credentials)
-        challenge_started_at = datetime.now(timezone.utc)
-        if observation.page is EaPage.PASSWORD:
-            # Only a page that shows a password field and no account field
-            # gets the password typed into it. Guessing here once meant typing
-            # the password into the account box.
-            submit = self._submit_password(hwnd, observation, credentials)
-            self.notify(f"EA 密码已提交（{submit}）")
-        elif observation.page not in (EaPage.OTP, EaPage.SIGNED_IN):
-            self._record("signin-wrong-page", observation)
-            raise EaAppAutomationError(
-                f"EA App 当前不是可登录页面（{observation.page.value}）"
-            )
-        return self._await_identity(
-            hwnd,
-            otp_supplier,
-            otp_methods=credentials.otp_methods,
-            initial_challenge_started_at=challenge_started_at,
-        )
+        for _attempt in range(2):
+            hwnd = self._ea_window()
+            self._dismiss_expired_session(hwnd)
+            observation = self._observe(hwnd)
+            self._record("signin-start", observation)
+            if observation.page is EaPage.CAPTCHA:
+                raise EaCaptchaRequired("EA App 出现 Captcha，已暂停")
+            if observation.page is EaPage.BANNED:
+                observation = self._dismiss_account_ban(hwnd, observation)
+            if observation.page is EaPage.BANNED:
+                self._raise_if_account_banned(hwnd, observation)
+            if observation.page is EaPage.EMAIL:
+                observation = self._submit_login_identifier(
+                    hwnd, observation, credentials
+                )
+            challenge_started_at = datetime.now(timezone.utc)
+            if observation.page is EaPage.PASSWORD:
+                # Only a page that shows a password field and no account field
+                # gets the password typed into it. Guessing here once meant typing
+                # the password into the account box.
+                submit = self._submit_password(hwnd, observation, credentials)
+                self.notify(f"EA 密码已提交（{submit}）")
+            elif observation.page not in (EaPage.OTP, EaPage.SIGNED_IN):
+                self._record("signin-wrong-page", observation)
+                raise EaAppAutomationError(
+                    f"EA App 当前不是可登录页面（{observation.page.value}）"
+                )
+            try:
+                return self._await_identity(
+                    hwnd,
+                    otp_supplier,
+                    otp_methods=credentials.otp_methods,
+                    initial_challenge_started_at=challenge_started_at,
+                )
+            except _LoginRestart:
+                self.notify("EA 会话已过期，已返回登录页，重新登录")
+        raise EaAppAutomationError("EA 会话过期后重新登录仍未完成")
 
     def _choose_otp_method(
         self,
@@ -1326,6 +1396,9 @@ class WindowsEaHybridDriver:
             if observation.has_login_error():
                 self._record("login-rejected", observation)
                 raise EaLoginRejected("EA App 报告登录信息有误")
+            if observation.page is EaPage.EXPIRED_SESSION:
+                self._dismiss_expired_session(hwnd)
+                raise _LoginRestart()
             if observation.page is EaPage.OTP_METHOD:
                 selected_method, challenge_started_at = self._choose_otp_method(
                     hwnd,
@@ -1959,6 +2032,12 @@ class WindowsEaHybridDriver:
                     self._record("signout-cloud-sync-closed")
                     return True
                 raise
+            # Sign-out is where a finished run sits after Apex closes. The
+            # expired gate is not a session to log out of, but leaving the
+            # button unclicked keeps the next login from starting.
+            if observation.page is EaPage.EXPIRED_SESSION:
+                self._dismiss_expired_session(hwnd)
+                continue
             local_data = self._continue_local_data_point(observation)
             if local_data is not None:
                 if cloud_sync_close_deadline is not None:
