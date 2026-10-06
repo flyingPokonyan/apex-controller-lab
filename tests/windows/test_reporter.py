@@ -216,6 +216,33 @@ def settings(account_id: str = "acct_current") -> RunnerSettings:
 
 
 class ReporterTest(unittest.TestCase):
+    def test_inventory_and_timings_share_existing_outbox_and_reach_forge(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            run_dir = write_run(root, "inventory", account_id="acct_current", events=[
+                ("APEX_PACKS", {"count": 23, "confidence": .99, "readStatus": "OK", "samples": 2}),
+                ("PERFORMANCE_SUMMARY", {"windowMs": 30000, "metrics": {"capture": {
+                    "count": 2, "meanMs": 10, "totalMs": 20, "maxMs": 10, "recentP95Ms": 10}}}),
+                ("STATE_UNKNOWN", {"previousState": "LOBBY_QUEUEING", "previousStateDurationMs": 45000}),
+                ("ACTION_STARTED", {"capability": "ready", "action": "click", "attempt": 1}),
+                ("ACTION_SENT", {"capability": "ready", "action": "click", "attempt": 1, "durationMs": 450}),
+            ])
+            transport = FakeTransport()
+            reporter = RemoteReporter(settings(), root, run_dir, transport=transport, heartbeat_interval_s=9999)
+            reporter.process_once()
+            events = [event for request in transport.requests for event in request["events"]]
+            packs = next(e for e in events if e["type"] == "APEX_PACKS")
+            self.assertEqual(packs["payload"]["count"], 23)
+            self.assertTrue(any(e["type"] == "PERFORMANCE_SUMMARY" for e in events))
+            unknown = next(e for e in events if e["type"] == "STATE_CHANGED")
+            self.assertIsNone(unknown["payload"]["to"])
+            self.assertEqual(unknown["payload"]["previousStateDurationMs"], 45000)
+            action = next(e for e in events if e["type"] == "ACTION_RESULT" and e["payload"]["status"] == "SENT")
+            self.assertEqual(action["payload"]["durationMs"], 450)
+            timing = json.loads((run_dir / "report-timings.jsonl").read_text().splitlines()[0])
+            self.assertEqual(timing["status"], 200)
+            self.assertNotIn("token", timing)
+
     def test_lease_recovery_incidents_reach_forge_with_the_failure_reason(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)

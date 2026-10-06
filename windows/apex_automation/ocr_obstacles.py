@@ -4,6 +4,7 @@ from dataclasses import dataclass
 import json
 from pathlib import Path
 import threading
+import time
 from typing import Any, Protocol
 import unicodedata
 
@@ -84,6 +85,15 @@ class RapidOcrProvider:
     def __init__(self) -> None:
         self._engine: Any | None = None
         self._lock = threading.Lock()
+        self.metrics = None
+
+    def _run(self, frame, metric, **options):
+        start = time.monotonic()
+        try:
+            return self._get_engine()(frame, **options)
+        finally:
+            if self.metrics:
+                self.metrics.add(metric, (time.monotonic() - start) * 1000)
 
     def _get_engine(self) -> Any:
         with self._lock:
@@ -103,13 +113,13 @@ class RapidOcrProvider:
             # on the input size, so cropping alone saves little. Reading a
             # tight single-line region directly measured 4.7ms against 234ms
             # for the same crop with detection enabled.
-            result = self._get_engine()(crop, use_det=False, use_cls=False, use_rec=True)
+            result = self._run(crop, "ocr:" + region.name, use_det=False, use_cls=False, use_rec=True)
         else:
             # RapidOCR call options can persist on the shared engine in some
             # releases. State OCR uses recognition-only calls immediately
             # before overlay OCR, so every detected-text call must explicitly
             # turn detection back on rather than inherit use_det=False.
-            result = self._get_engine()(crop, use_det=True, use_cls=True, use_rec=True)
+            result = self._run(crop, "ocr:" + region.name, use_det=True, use_cls=True, use_rec=True)
         texts = tuple(getattr(result, "txts", ()) or ())
         scores = tuple(getattr(result, "scores", ()) or ())
         return tuple(
@@ -119,7 +129,7 @@ class RapidOcrProvider:
 
     def read_with_boxes(self, frame: np.ndarray) -> tuple[OcrToken, ...]:
         """Read a complete frame and retain each text block's coordinates."""
-        result = self._get_engine()(frame, use_det=True, use_cls=True, use_rec=True)
+        result = self._run(frame, "ocr:positioned", use_det=True, use_cls=True, use_rec=True)
         texts = tuple(getattr(result, "txts", ()) or ())
         scores = tuple(getattr(result, "scores", ()) or ())
         raw_boxes = getattr(result, "boxes", None)

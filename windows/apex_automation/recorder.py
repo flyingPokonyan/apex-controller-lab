@@ -77,7 +77,7 @@ class RunRecorder:
         self._seq = 0
         self._screenshot_index = 0
         self._evidence_index = 0
-        self._evidence_queue: queue.Queue[tuple[Path, str, str, Any]] = queue.Queue()
+        self._evidence_queue: queue.Queue[tuple[Path, str, str, Any, float]] = queue.Queue()
         self._evidence_pending = 0
         self._evidence_condition = threading.Condition(self._lock)
         self._evidence_worker: threading.Thread | None = None
@@ -230,11 +230,13 @@ class RunRecorder:
                 self.screenshot_dir
                 / f"{self._screenshot_index:03d}-{stage.lower()}.png"
             )
+        start = time.monotonic()
         _save_frame(path, frame)
         self.log(
             "SCREENSHOT_SAVED",
             stage=stage,
             path=path.relative_to(self.run_dir).as_posix(),
+            encodeMs=round((time.monotonic() - start) * 1000),
         )
         return path
 
@@ -252,12 +254,13 @@ class RunRecorder:
     def _run_evidence_worker(self) -> None:
         while not self._evidence_stop.is_set() or self._evidence_pending:
             try:
-                path, stage, category, frame = self._evidence_queue.get(timeout=0.25)
+                path, stage, category, frame, queued_at = self._evidence_queue.get(timeout=0.25)
             except queue.Empty:
                 continue
             try:
                 if self._evidence_stop.is_set():
                     continue
+                encoding_started = time.monotonic()
                 width, height = _save_evidence_frame(path, frame)
                 if self._evidence_stop.is_set():
                     try:
@@ -275,6 +278,8 @@ class RunRecorder:
                     height=height,
                     sizeBytes=len(data),
                     sha256=hashlib.sha256(data).hexdigest(),
+                    queueWaitMs=round((encoding_started - queued_at) * 1000),
+                    encodeMs=round((time.monotonic() - encoding_started) * 1000),
                 )
             except Exception as error:
                 self.log(
@@ -313,7 +318,7 @@ class RunRecorder:
         try:
             owned_frame = frame.copy() if hasattr(frame, "copy") else frame
             self._ensure_evidence_worker()
-            self._evidence_queue.put_nowait((path, stage, category, owned_frame))
+            self._evidence_queue.put_nowait((path, stage, category, owned_frame, time.monotonic()))
         except Exception:
             with self._evidence_condition:
                 self._evidence_pending -= 1

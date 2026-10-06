@@ -841,6 +841,7 @@ def run_account_cycle(
                 capture_source=source,
                 recover_report_drain=play_session.recover_report_drain,
                 notify=print,
+                diagnostic=getattr(getattr(ea_driver, "evidence", None), "timing", None),
             )
             if resume:
                 orchestrator.resume()

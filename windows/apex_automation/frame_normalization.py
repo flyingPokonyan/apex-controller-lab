@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from typing import Any, Callable, Mapping, Protocol
+import time
 
 import numpy as np
 
@@ -90,6 +91,7 @@ class ReferenceCanvasFrameSource:
         reference_size: Resolution,
         *,
         resize: ResizeFrame = _resize_lanczos,
+        metrics=None,
     ) -> None:
         if capture_size[0] * reference_size[1] != reference_size[0] * capture_size[1]:
             raise ValueError("物理捕获与参考画布必须使用相同宽高比")
@@ -97,6 +99,7 @@ class ReferenceCanvasFrameSource:
         self.capture_size = capture_size
         self.reference_size = reference_size
         self.resize = resize
+        self.metrics = metrics
         self.last_source_resolution: Resolution | None = None
 
     @classmethod
@@ -115,7 +118,23 @@ class ReferenceCanvasFrameSource:
         )
 
     def grab(self) -> np.ndarray:
+        start = time.monotonic()
         frame = self.source.grab()
+        if self.metrics:
+            self.metrics.add("capture", (time.monotonic() - start) * 1000)
+        return self._normalize(frame)
+
+    def grab_fresh(self) -> np.ndarray | None:
+        grab = getattr(self.source, "grab_fresh", None)
+        if not callable(grab):
+            return None
+        start = time.monotonic()
+        frame = grab()
+        if self.metrics:
+            self.metrics.add("freshCapture", (time.monotonic() - start) * 1000)
+        return None if frame is None else self._normalize(frame)
+
+    def _normalize(self, frame: np.ndarray) -> np.ndarray:
         if not isinstance(frame, np.ndarray) or frame.ndim < 2:
             raise RuntimeError("截图源返回了无效画面")
         height, width = frame.shape[:2]
@@ -132,7 +151,10 @@ class ReferenceCanvasFrameSource:
             )
         if got == self.reference_size:
             return frame
+        start = time.monotonic()
         normalized = self.resize(frame, self.reference_size)
+        if self.metrics:
+            self.metrics.add("resize", (time.monotonic() - start) * 1000)
         normalized_height, normalized_width = normalized.shape[:2]
         if (normalized_width, normalized_height) != self.reference_size:
             raise RuntimeError(

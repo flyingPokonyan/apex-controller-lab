@@ -14,6 +14,7 @@ import numpy as np
 from .capabilities import Capability, CapabilityDispatcher, Decision
 from .frame_normalization import CaptureResolutionMismatch
 from .config import RunnerConfig
+from .diagnostics import PerformanceMetrics
 from .intro_unlock import CONFIRM_LEAVE, IntroUnlock, LEAVE_RANGE_ESC, RETURN_LOBBY
 from .ocr_obstacles import SAFE_KEY_ACTIONS, normalize_ocr_text
 from .ocr_states import OcrStateDetector
@@ -189,6 +190,8 @@ class CapabilityPilot:
         status_interval_ms: int = 1000,
         live_evidence_interval_ms: int = 60_000,
         transition_evidence_interval_ms: int = 10_000,
+        metrics: PerformanceMetrics | None = None,
+        pack_probe=None,
     ) -> None:
         self.config = config
         self.source = source
@@ -202,6 +205,9 @@ class CapabilityPilot:
         self.sleep = sleep
         self.monotonic = monotonic
         self.notify = notify
+        self.metrics = metrics or PerformanceMetrics(recorder.log, clock=monotonic)
+        self.pack_probe = pack_probe
+        self._action_finished_at = {}
         self.poll_ms = int(config.timing.get("pollMs", 300) if poll_ms is None else poll_ms)
         self.key_tap_ms = int(config.timing.get("keyTapMs", 80) if key_tap_ms is None else key_tap_ms)
         self.max_screenshots = max_screenshots
@@ -915,6 +921,8 @@ class CapabilityPilot:
             "originState": settled.origin_state,
             "evidenceState": state,
             "attempt": settled.attempt,
+            "confirmationMs": round((self.monotonic() - self._action_finished_at.get(
+                (settled.capability.id, settled.attempt), self.monotonic())) * 1000),
         }
         if confirmed:
             self.counters["confirmed"] += 1
@@ -1210,11 +1218,15 @@ class CapabilityPilot:
             return state
 
         previous = self.observed_state
+        now = self.monotonic()
+        previous_duration = round((now - getattr(self, "_state_started_at", self.started)) * 1000)
+        self._state_started_at = now
         self.observed_state = state
         self.state_version += 1
         if state is None:
             self.recorder.log(
-                "STATE_UNKNOWN", previousState=previous, observationVersion=self.state_version
+                "STATE_UNKNOWN", previousState=previous, observationVersion=self.state_version,
+                previousStateDurationMs=previous_duration,
             )
         else:
             self.recorder.log(
@@ -1225,6 +1237,7 @@ class CapabilityPilot:
                 ruleId=observation.rule_id,
                 confidence=round(observation.confidence, 4),
                 observationVersion=self.state_version,
+                previousStateDurationMs=previous_duration,
             )
             self.notify(f"[状态] {state}")
             self._snapshot(state, frame)
@@ -1248,6 +1261,8 @@ class CapabilityPilot:
                     self.rounds_returned_to_lobby += 1
                     self._round_active = False
                 self.progression_stabilizer.reset()
+                if self.pack_probe:
+                    self.pack_probe.reset()
                 self._progression_done = self.progression_reader is None
                 self._progression_attempts = 0
                 self._last_progression_attempt = None
@@ -1315,7 +1330,8 @@ class CapabilityPilot:
             return False
 
         self._progression_attempts += 1
-        reading = self.progression_reader.read(frame)
+        with self.metrics.measure("progressionOcr"):
+            reading = self.progression_reader.read(frame)
         self._last_progression_attempt = reading
         stable = self.progression_stabilizer.observe(reading)
         if stable is not None:
@@ -2051,7 +2067,19 @@ class CapabilityPilot:
         self.guard.ensure_not_aborted()
         if not self._check_lease(self.monotonic()):
             return
-        detail = self._execute(capability, frame)
+        action_started = self.monotonic()
+        if capability.trigger != "periodic":
+            self.recorder.log("ACTION_STARTED", capability=capability.id, action=capability.action,
+                              state=state, attempt=decision.attempt)
+        with self.metrics.measure("action:" + capability.id):
+            detail = self._execute(capability, frame)
+        action_finished = self.monotonic()
+        self._action_finished_at[(capability.id, decision.attempt)] = action_finished
+        # Only the pending action needs a confirmation timer.
+        if len(self._action_finished_at) > 32:
+            self._action_finished_at = {(capability.id, decision.attempt): action_finished}
+        detail.update(startedElapsedMs=round((action_started - self.started) * 1000),
+                      durationMs=round((action_finished - action_started) * 1000))
         if detail.get("skipped"):
             # A text-driven action that found no text sent nothing, and the
             # counters exist to answer "did this runner press anything".
@@ -2257,6 +2285,14 @@ class CapabilityPilot:
         return False
 
     def step(self) -> dict[str, Any]:
+        try:
+            with self.metrics.measure("loopWork"):
+                return self._step()
+        finally:
+            self.metrics.flush(observedState=self.observed_state, frames=self.frames,
+                               actionsSent=self.actions_sent)
+
+    def _step(self) -> dict[str, Any]:
         now = self.monotonic()
         self.guard.ensure_not_aborted()
         record: dict[str, Any] = {"elapsedMs": round((now - self.started) * 1000)}
@@ -2326,7 +2362,8 @@ class CapabilityPilot:
                 expected=expected,
             )
 
-        state, base_state = self._observe(frame, now)
+        with self.metrics.measure("stateObservation"):
+            state, base_state = self._observe(frame, now)
         # Overlay OCR can take seconds. Retry windows and periodic actions must
         # use the time after that work, not the stale timestamp from frame grab.
         now = self.monotonic()
@@ -2342,6 +2379,8 @@ class CapabilityPilot:
         self._settle_pending(state)
         self.dispatcher.note_state(state, now)
         self._prepare_progression_retry(now)
+        if self.pack_probe and state in LOBBY_PROGRESS_STATES:
+            self.pack_probe.observe()
         if self._read_lobby_progress(state, frame):
             record["decision"] = {"kind": "wait", "reason": "LOBBY_PROGRESS"}
             self.counters["wait:LOBBY_PROGRESS"] += 1
@@ -2440,11 +2479,14 @@ class CapabilityPilot:
                 and (deadline is None or self.monotonic() < deadline)
             ):
                 self.step()
-                self.sleep(self.poll_ms / 1000)
+                with self.metrics.measure("pollSleep"):
+                    self.sleep(self.poll_ms / 1000)
         finally:
             # Whatever ends the run — the deadline, F8, Ctrl+C, an exception —
             # must not leave a key held down in a live match.
             self._release_all("RUN_ENDED")
+            self.metrics.flush(force=True, observedState=self.observed_state,
+                               frames=self.frames, actionsSent=self.actions_sent)
         return self.session_outcome or "COMPLETED"
 
     def write_summary(self) -> Path:

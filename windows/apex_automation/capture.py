@@ -468,11 +468,18 @@ class DxcamFrameSource:
             raise RuntimeError("DXcam 没有返回画面帧")
         return frame.copy()
 
-    def _safe_grab(self) -> np.ndarray | None:
+    def grab_fresh(self) -> np.ndarray | None:
+        """Optional inventory probe: never confirm twice from a cached frame."""
+        if not self._started:
+            return None
+        frame = self._safe_grab(new_frame_only=True)
+        return None if frame is None else frame.copy()
+
+    def _safe_grab(self, *, new_frame_only: bool = False) -> np.ndarray | None:
         if self._camera is None:
             return None
         try:
-            return self._camera.grab(new_frame_only=False)
+            return self._camera.grab(new_frame_only=new_frame_only)
         except CaptureRecoveryTimeout as error:
             self._camera_lost = True
             self._recovery_gave_up = True

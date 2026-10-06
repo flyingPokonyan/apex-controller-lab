@@ -19,6 +19,7 @@ from .account_provider import (
     OtpMethod,
     SecretCredentials,
 )
+from .diagnostics import PerformanceMetrics
 from .ea_app import (
     ApexExitEvidence,
     EaAccountBanned,
@@ -223,6 +224,7 @@ class WindowsEaHybridDriver:
         self.ocr = ocr or RapidOcrProvider()
         self.sleep = sleep
         self.evidence = evidence
+        self.metrics = PerformanceMetrics(evidence.timing) if evidence is not None else None
         self.notify = notify
         self.user32 = ctypes.windll.user32
         self.kernel32 = ctypes.windll.kernel32
@@ -688,6 +690,7 @@ class WindowsEaHybridDriver:
         observation: EaObservation | None = None
         for attempt in range(max(1, retries)):
             hwnd = self._live(hwnd)
+            capture_started = time.monotonic()
             try:
                 frame = self._frame()
                 left, top, right, bottom = self._clip_rect(hwnd, frame)
@@ -700,6 +703,10 @@ class WindowsEaHybridDriver:
                 self.sleep(1.0)
                 continue
             crop = np.ascontiguousarray(frame[top:bottom, left:right])
+            metrics = getattr(self, "metrics", None)
+            if metrics:
+                metrics.add("eaCapture", (time.monotonic() - capture_started) * 1000)
+            ocr_started = time.monotonic()
             try:
                 tokens = tuple(
                     OcrToken(
@@ -721,6 +728,9 @@ class WindowsEaHybridDriver:
                     frame,
                     Region("eaWindow", (left, top, right, bottom)),
                 )
+            if metrics:
+                metrics.add("eaOcr", (time.monotonic() - ocr_started) * 1000)
+                metrics.flush(page=classify_page(token.normalized for token in tokens).value)
             observation = EaObservation(
                 rect=(left, top, right, bottom),
                 frame=frame,
@@ -747,6 +757,9 @@ class WindowsEaHybridDriver:
         if self.evidence is None:
             return
         try:
+            metrics = getattr(self, "metrics", None)
+            if metrics:
+                metrics.flush(force=True, step=step)
             if observation is None:
                 self.evidence.step(step, page="NONE", **detail)
             else:

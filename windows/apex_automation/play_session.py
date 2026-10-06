@@ -4,6 +4,7 @@ from dataclasses import dataclass, field, replace
 import json
 from pathlib import Path
 import time
+import sys
 from typing import Any, Callable
 
 from .capabilities import CapabilityDispatcher, CapabilitySet
@@ -19,6 +20,9 @@ from .pilot import CapabilityPilot, PilotFrameSource, PilotGuard, PilotSender
 from .progression import LobbyProgressionReader, LobbyProgressionReading
 from .progression_policy import ProgressionPolicy
 from .recorder import RunRecorder
+from .diagnostics import PerformanceMetrics
+from .apex_packs import ApexPackReader, PackInventoryProbe
+from .notifications import NotificationCloser, Win32NotificationBackend
 from .reporter import RemoteReporter
 from .runner_identity import IdentityVerification, RunnerSettings
 
@@ -314,10 +318,31 @@ class PlaySessionRunner:
                 self.notify(f"{remaining}...")
                 self.sleep(1)
 
+            metrics = PerformanceMetrics(recorder.log)
+            if hasattr(self.ocr_provider, "metrics"):
+                self.ocr_provider.metrics = metrics
             apex_source = ReferenceCanvasFrameSource(
                 capture_source,
                 capture_size,
                 reference_size,
+                metrics=metrics,
+            )
+            close_notification = None
+            if sys.platform == "win32":
+                try:
+                    notification_backend = Win32NotificationBackend()
+                    if notification_backend.supports_capture(capture_size):
+                        close_notification = NotificationCloser(notification_backend, self.guard, recorder.log)
+                    else:
+                        recorder.log("NOTIFICATION_CLOSE_DISABLED", reason="capture-coordinate-mapping")
+                except Exception as error:
+                    recorder.log("NOTIFICATION_CLOSE_DISABLED", errorType=type(error).__name__)
+            pack_probe = (
+                PackInventoryProbe(ApexPackReader(self.ocr_provider), apex_source,
+                                   self.guard, recorder.log, close_notification=close_notification,
+                                   metrics=metrics, sleep=self.sleep, is_current=lease_is_current)
+                if progression_reader is not None and callable(getattr(self.ocr_provider, "read_with_boxes", None))
+                else None
             )
             recorder.log(
                 "CAPTURE_CANVAS_CONFIGURED",
@@ -347,10 +372,17 @@ class PlaySessionRunner:
                 lease_is_current=lease_is_current,
                 lease_diagnostics=lease_diagnostics,
                 notify=self.notify,
+                metrics=metrics,
+                pack_probe=pack_probe,
             )
             outcome = pilot.run(duration_s=duration_s)
             if outcome == "TARGET_REACHED":
                 finish_status = "TARGET_REACHED"
+                if pack_probe:
+                    # Inventory is optional; failures never change the target
+                    # result or prevent lease cleanup/report draining.
+                    pack_probe.finish(is_current=lease_is_current)
+                    metrics.flush(force=True, observedState=pilot.observed_state)
             elif outcome == "LEASE_UNRECOVERED":
                 error_code = "LEASE_UNRECOVERED"
                 error_message = "租约续租未恢复，已停止游玩并进入清理流程"
@@ -409,6 +441,8 @@ class PlaySessionRunner:
             exit_code = 1
             self.notify(f"自动游玩中断：{error_message}")
         finally:
+            if hasattr(self.ocr_provider, "metrics"):
+                self.ocr_provider.metrics = None
             cleanup_errors: list[str] = []
             try:
                 self.sender.release_all()

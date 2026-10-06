@@ -121,6 +121,7 @@ class AccountOrchestrator:
         sleep: Callable[[float], None] = time.sleep,
         completion_poll_s: float = 2.0,
         notify: Callable[[str], None] = print,
+        diagnostic: Callable[..., None] | None = None,
     ) -> None:
         self.provider = provider
         self.ea_driver = ea_driver
@@ -135,6 +136,8 @@ class AccountOrchestrator:
         self.sleep = sleep
         self.completion_poll_s = max(0.1, completion_poll_s)
         self.notify = notify
+        self.diagnostic = diagnostic
+        self._phase_started_at = time.monotonic()
         self._checkpoint_lock = threading.Lock()
         self._provider_operation_lock = threading.RLock()
         self._checkpoint = self._load_checkpoint()
@@ -155,9 +158,20 @@ class AccountOrchestrator:
 
     def _update_checkpoint(self, **changes: object) -> OrchestrationCheckpoint:
         with self._checkpoint_lock:
+            previous = self._checkpoint
             self._checkpoint = self.checkpoint_store.save(
                 self._checkpoint.evolve(**changes)
             )
+            if self.diagnostic and previous.workflow_phase != self._checkpoint.workflow_phase:
+                now = time.monotonic()
+                try:
+                    self.diagnostic("WORKFLOW_PHASE", previousPhase=previous.workflow_phase.value,
+                                    phase=self._checkpoint.workflow_phase.value,
+                                    durationMs=round((now - self._phase_started_at) * 1000),
+                                    leaseId=self._checkpoint.lease_id or previous.lease_id)
+                except Exception:
+                    pass
+                self._phase_started_at = now
             return self._checkpoint
 
     def _phase(self) -> str:

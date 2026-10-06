@@ -13,12 +13,14 @@ screenshots have every sensitive-looking text block painted over.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timedelta
 import json
 from pathlib import Path
 import re
 import secrets
 import shutil
+import threading
+import time
 from typing import TYPE_CHECKING, Any, Sequence
 
 if TYPE_CHECKING:
@@ -82,6 +84,34 @@ class EaLoginEvidence:
         self.steps_path = self.dir / "steps.jsonl"
         self._seq = 0
         self._hints: SecretHints | None = None
+        self._timing_lock = threading.Lock()
+        self._last_step_at = time.monotonic()
+        self._previous_step = None
+        self._timing_lease_id = None
+
+    def timing(self, event: str, **payload) -> None:
+        """Compact diagnostics survive screenshot-attempt pruning for 14 days."""
+        lease = payload.pop("leaseId", None)
+        # This is the public opaque lease ID, never an EA login identifier.
+        if lease and re.fullmatch(r"lease_[a-zA-Z0-9_-]{1,128}", str(lease)):
+            self._timing_lease_id = lease
+        self._reject_sensitive_values(payload)
+        with self._timing_lock:
+            root = self.root / "timings"
+            root.mkdir(exist_ok=True)
+            today = datetime.now()
+            path = root / f"{today:%Y-%m-%d}.jsonl"
+            # Two bounded files per day, keeping diagnostic disk use bounded.
+            if path.exists() and path.stat().st_size > 10 * 1024 * 1024:
+                path.replace(path.with_suffix(".previous.jsonl"))
+            record = {"at": _now(), "type": event, "leaseId": self._timing_lease_id,
+                      "attempt": self.dir.name, **payload}
+            with path.open("a", encoding="utf-8") as handle:
+                handle.write(json.dumps(record, ensure_ascii=False) + "\n")
+            cutoff = (today - timedelta(days=14)).strftime("%Y-%m-%d")
+            for old in root.glob("*.jsonl"):
+                if old.name[:10] < cutoff:
+                    old.unlink(missing_ok=True)
 
     def _create_dir(self) -> Path:
         self.root.mkdir(parents=True, exist_ok=True)
@@ -108,6 +138,8 @@ class EaLoginEvidence:
         self.steps_path = self.dir / "steps.jsonl"
         self._seq = 0
         self._hints = None
+        self._last_step_at = time.monotonic()
+        self._previous_step = None
         self.prune()
         return self.dir
 
@@ -121,7 +153,7 @@ class EaLoginEvidence:
 
     def prune(self) -> None:
         attempts = sorted(
-            (path for path in self.root.iterdir() if path.is_dir()),
+            (path for path in self.root.iterdir() if path.is_dir() and path.name != "timings"),
             key=lambda path: path.name,
         )
         for stale in attempts[: max(0, len(attempts) - self.keep_attempts)]:
@@ -156,6 +188,13 @@ class EaLoginEvidence:
             )
         record.update({key: value for key, value in detail.items() if value is not None})
         self._reject_sensitive_values(record)
+        now = time.monotonic()
+        try:
+            self.timing("EA_STEP", step=name, page=page, previousStep=self._previous_step,
+                        previousStepElapsedMs=round((now - self._last_step_at) * 1000))
+        except OSError:
+            pass
+        self._last_step_at, self._previous_step = now, name
         with self.steps_path.open("a", encoding="utf-8", newline="\n") as handle:
             handle.write(json.dumps(record, ensure_ascii=False, separators=(",", ":")))
             handle.write("\n")

@@ -467,8 +467,8 @@ class ReportSession:
             result.append(("RUN_STARTED", start_payload))
         elif name == "RUN_FINISHED":
             result.append(("RUN_FINISHED", payload))
-        elif name == "LOBBY_PROGRESS":
-            result.append(("LOBBY_PROGRESS", payload))
+        elif name in {"LOBBY_PROGRESS", "APEX_PACKS", "PERFORMANCE_SUMMARY"}:
+            result.append((name, payload))
         elif name == "RING_PROGRESS":
             result.append(
                 (
@@ -494,13 +494,22 @@ class ReportSession:
                         "ruleId": payload.get("ruleId"),
                         "confidence": payload.get("confidence", 0.0),
                         "observationVersion": payload.get("observationVersion"),
+                        "previousStateDurationMs": payload.get("previousStateDurationMs"),
                     },
                 )
             )
             phase_event = self._phase_event(state)
             if phase_event is not None:
                 result.append(phase_event)
+        elif name == "STATE_UNKNOWN":
+            result.append(("STATE_CHANGED", {
+                "from": payload.get("previousState"), "to": None,
+                "source": "unknown", "confidence": 0,
+                "observationVersion": payload.get("observationVersion"),
+                "previousStateDurationMs": payload.get("previousStateDurationMs"),
+            }))
         elif name in {
+            "ACTION_STARTED",
             "ACTION_SENT",
             "ACTION_CONFIRMED",
             "ACTION_POSTCONDITION_REJECTED",
@@ -512,6 +521,7 @@ class ReportSession:
             ):
                 return []
             status = {
+                "ACTION_STARTED": "STARTED",
                 "ACTION_SENT": "SENT",
                 "ACTION_CONFIRMED": "CONFIRMED",
                 "ACTION_POSTCONDITION_REJECTED": "REJECTED",
@@ -532,7 +542,7 @@ class ReportSession:
             # and from the server every one looked the same as pressing ESC
             # into the void. Only added when the local event carries them, so
             # ordinary clicks and keys report exactly what they did before.
-            for key in ("matchedText", "hold", "fallback"):
+            for key in ("matchedText", "hold", "fallback", "durationMs", "startedElapsedMs", "confirmationMs"):
                 if payload.get(key) is not None:
                     reported[key] = payload[key]
             result.append(("ACTION_RESULT", reported))
@@ -963,6 +973,30 @@ class RemoteReporter:
         ):
             raise ValueError("服务端截图响应缺少 evidenceId/url")
 
+    def _timed_send(self, session, kind, url, token, payload, timeout_s):
+        started = time.monotonic()
+        status = None
+        try:
+            result = self.transport.send(url, token, payload, timeout_s)
+            status = result[0]
+            return result
+        finally:
+            # Background-only local log. Never enqueue another report event
+            # for its own upload, and never log URLs/tokens/response bodies.
+            try:
+                path = session.run_dir / "report-timings.jsonl"
+                if path.exists() and path.stat().st_size > 2 * 1024 * 1024:
+                    path.replace(path.with_suffix(".previous.jsonl"))
+                record = {"at": _now_rfc3339(), "kind": kind, "status": status,
+                          "durationMs": round((time.monotonic() - started) * 1000),
+                          "pendingEvents": session.pending_count(),
+                          "eventCount": len(payload.get("events", [])),
+                          "imageBytesApprox": len(payload.get("imageBase64", "")) * 3 // 4}
+                with path.open("a", encoding="utf-8") as handle:
+                    handle.write(json.dumps(record) + "\n")
+            except Exception:
+                pass
+
     def _send_evidence_session(self, session: ReportSession) -> SendOutcome:
         pending = session.pending_evidence()
         if not pending:
@@ -985,7 +1019,7 @@ class RemoteReporter:
 
         assert self.settings.report_token is not None
         try:
-            status, response, headers = self.transport.send(
+            status, response, headers = self._timed_send(session, "evidence",
                 self._evidence_url,
                 self.settings.report_token,
                 payload,
@@ -1040,7 +1074,7 @@ class RemoteReporter:
         assert self.settings.report_url is not None
         assert self.settings.report_token is not None
         try:
-            status, response, headers = self.transport.send(
+            status, response, headers = self._timed_send(session, "events",
                 self.settings.report_url,
                 self.settings.report_token,
                 session.request_payload(events),
