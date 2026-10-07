@@ -1,8 +1,10 @@
 from pathlib import Path
+from datetime import datetime
 import sys
 import json
 import tempfile
 import unittest
+from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "windows"))
 from apex_automation.diagnostics import PerformanceMetrics
@@ -10,6 +12,25 @@ from apex_automation.ea_evidence import EaLoginEvidence
 
 
 class DiagnosticsTest(unittest.TestCase):
+    def test_same_second_directory_suffix_does_not_exceed_retention(self):
+        with tempfile.TemporaryDirectory() as directory, \
+                patch("apex_automation.ea_evidence.datetime") as clock, \
+                patch("apex_automation.ea_evidence.secrets.token_hex", return_value="00000000"):
+            clock.now.return_value = datetime(2026, 10, 7, 22, 30, 0)
+            root = Path(directory)
+            evidence = EaLoginEvidence(root, keep_attempts=1, save_screenshots=False)
+            (root / (evidence.dir.name + "-ffffffff")).mkdir()
+            timings = root / "timings"
+            timings.mkdir()
+            daily_log = timings / "2026-10-07.jsonl"
+            daily_log.write_text("retained timing record\n")
+
+            current = evidence.rotate()
+
+            self.assertEqual([p for p in root.iterdir() if p.name != "timings"], [current])
+            self.assertTrue(current.is_dir())
+            self.assertEqual(daily_log.read_text(), "retained timing record\n")
+
     def test_metrics_aggregate_without_writing_each_frame(self):
         now = [0.0]
         events = []

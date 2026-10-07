@@ -153,12 +153,13 @@ class EaLoginEvidence:
 
     def prune(self) -> None:
         attempts = sorted(
-            (path for path in self.root.iterdir() if path.is_dir() and path.name != "timings"),
-            key=lambda path: path.name,
+            (path for path in self.root.iterdir()
+             if path.is_dir() and path.name != "timings" and path != self.dir),
+            key=lambda path: (path.stat().st_mtime_ns, path.name),
         )
-        for stale in attempts[: max(0, len(attempts) - self.keep_attempts)]:
-            if stale == self.dir:
-                continue
+        # The active directory always occupies one slot. Same-second random
+        # suffixes do not sort by age and must not make pruning skip a slot.
+        for stale in attempts[: max(0, len(attempts) - (self.keep_attempts - 1))]:
             shutil.rmtree(stale, ignore_errors=True)
 
     def step(
