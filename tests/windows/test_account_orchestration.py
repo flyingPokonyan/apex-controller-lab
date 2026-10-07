@@ -36,6 +36,7 @@ from apex_automation.ea_app import (
     EaAppAutomationError,
     EaApexDownloadRequired,
     EaApexStartFailed,
+    EaCredentialsRejected,
     EaIdentityFact,
     EaUiState,
     OtpChallenge,
@@ -2296,6 +2297,40 @@ class AccountOrchestratorTest(unittest.TestCase):
                     "45 秒后再次尝试领号"
                 ],
             )
+
+    def test_verified_credentials_failure_closes_safely_and_quickly_continues(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            lease = replace(FakeAccountProvider.lease("acct_1"), expected_ea_account_id="ea_1")
+            provider = FakeAccountProvider([lease], credentials={
+                "acct_1": SecretCredentials("login@example.test", "password"),
+            })
+            log, sleeps = [], []
+
+            class LoginFailureDriver(FakeEaDriver):
+                def sign_in(self, credentials, otp_supplier):
+                    self.log.append("ea.sign_in")
+                    raise EaCredentialsRejected("fresh credentials rejected")
+
+            store = AtomicCheckpointStore(Path(directory) / "account-cycle-status.json")
+            orchestrator = None
+
+            def sleep(delay):
+                sleeps.append(delay)
+                orchestrator.stop()
+
+            orchestrator = AccountOrchestrator(
+                provider=provider, ea_driver=LoginFailureDriver(log, "ea_1"),
+                play_session=object(), checkpoint_store=store, device_id="device_1",
+                capture_source=object(), sleep=sleep, notify=lambda _: None,
+                operation_id_factory=iter(["claim_1", "renew_1", "credentials_1", "close_1"]).__next__,
+            )
+            self.assertEqual(orchestrator.run_forever(idle_s=30), 0)
+            close_call = [item for item in provider.calls if item[0] == "close"][-1]
+            self.assertEqual(close_call[1][3], "FAILED")
+            self.assertEqual(close_call[1][6], "EA_CREDENTIALS_INVALID")
+            self.assertFalse(store.load().has_lease)
+            self.assertLess(log.index("apex.stop"), log.index("ea.sign_out"))
+            self.assertEqual(sleeps, [1.0])
 
 
 if __name__ == "__main__":

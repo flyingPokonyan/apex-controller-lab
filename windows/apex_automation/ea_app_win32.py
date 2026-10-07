@@ -28,6 +28,7 @@ from .ea_app import (
     EaApexStartFailed,
     EaCaptchaRequired,
     EaCaptureUnavailable,
+    EaCredentialsRejected,
     EaIdentityFact,
     EaIdentityMismatch,
     EaLoginRejected,
@@ -105,6 +106,11 @@ SEND_CODE_RATIO = (0.50, 0.68)
 # the way down the tall login frame. OCR is preferred; this is the fallback
 # when the button text is not boxed.
 EXPIRED_SESSION_BUTTON_RATIO = (0.50, 0.35)
+LOGIN_BACK_TERMS = ("back", "返回", "上一步")
+CREDENTIAL_REJECTION_TERMS = (
+    "yourcredentialsareincorrectorhaveexpired", "invalidcredentials",
+    "您的凭据不正确或已过期", "密码不正确", "密码错误", "账号或密码错误",
+)
 # EA currently renders the badge in either of two vertical positions. Keep
 # the old tight band first so an expanded friends list cannot win over the
 # account name, then try the lower band used by the newer home layout.
@@ -1173,11 +1179,15 @@ class WindowsEaHybridDriver:
         # click missed the input" from "the submit never fired". Only the fact
         # is kept; the identifier itself never reaches disk.
         echoed = self._identifier_echoed(typed, credentials.login_identifier)
+        self._login_identifier_verified = self._verified_identifier_echo(
+            typed, credentials.login_identifier
+        )
         self._record(
             "account-typed",
             typed,
             fieldTarget=target,
             identifierEchoed=echoed,
+            identifierVerified=self._login_identifier_verified,
         )
         submit = self._submit(hwnd, typed, ACCOUNT_SUBMIT_RATIO)
         transitioned = self._wait_for_page(
@@ -1190,6 +1200,9 @@ class WindowsEaHybridDriver:
             and not transitioned.has_login_error()
             and self._identifier_echoed(transitioned, credentials.login_identifier)
         ):
+            self._login_identifier_verified = self._verified_identifier_echo(
+                transitioned, credentials.login_identifier
+            )
             retry_submit = self._submit(hwnd, transitioned, ACCOUNT_SUBMIT_RATIO)
             transitioned = self._wait_for_page(
                 hwnd,
@@ -1208,6 +1221,7 @@ class WindowsEaHybridDriver:
             transitioned,
             submitTarget=submit,
             identifierEchoed=echoed,
+            identifierVerified=self._login_identifier_verified,
         )
         if transitioned.page is EaPage.CAPTCHA:
             raise EaCaptchaRequired("EA App 出现 Captcha，已暂停")
@@ -1228,6 +1242,16 @@ class WindowsEaHybridDriver:
         if not expected:
             return False
         return any(expected in token.normalized for token in observation.tokens)
+
+    @classmethod
+    def _verified_identifier_echo(cls, observation: EaObservation, identifier: str) -> bool:
+        placed = replace(observation, tokens=tuple(
+            token for token in observation.tokens if token.confidence >= 0.85
+        ))
+        return cls._anchor(
+            placed, (normalize_ocr_text(identifier),), exact=True,
+            x_range=(0.02, 0.98), y_range=(0.20, 0.80),
+        ) is not None
 
     def _submit_password(
         self,
@@ -1251,6 +1275,57 @@ class WindowsEaHybridDriver:
         self._record("password-typed", self._observe(hwnd), fieldTarget=target)
         return self._submit(hwnd, observation, PASSWORD_SUBMIT_RATIO)
 
+    @classmethod
+    def _login_back_point(
+        cls, observation: EaObservation,
+    ) -> tuple[int, int] | None:
+        placed = replace(observation, tokens=tuple(
+            token for token in observation.tokens if token.confidence >= 0.80
+        ))
+        return cls._anchor(placed, LOGIN_BACK_TERMS, exact=True,
+                           x_range=(0.02, 0.40), y_range=(0.04, 0.35))
+
+    def _return_to_account_page(
+        self, hwnd: int, observation: EaObservation,
+    ) -> EaObservation:
+        # A password/OTP page belongs to the identifier submitted earlier,
+        # potentially by another lease. Masked email copy cannot bind it to
+        # these credentials. Start each new login with its own identifier.
+        intermediate = (EaPage.PASSWORD, EaPage.OTP_METHOD, EaPage.OTP)
+        if observation.page not in intermediate:
+            return observation
+        self._record("signin-reset-start", observation)
+        for attempt in range(1, 5):
+            if observation.page not in intermediate:
+                break
+            back = self._login_back_point(observation)
+            if back is None:
+                self._record("signin-back-missing", observation)
+                raise EaAppAutomationError("EA 登录流程未找到可信 BACK 按钮，未输入新密码")
+            self._record("signin-back-to-account", observation, attempt=attempt)
+            self._click_point(hwnd, *back)
+            previous_page = observation.page
+            for _ in range(4):
+                self.sleep(1.0)
+                observation = self._observe(hwnd)
+                if (
+                    observation.page is EaPage.EMAIL
+                    and password_page_blocker(observation.normalized) == "STILL_ON_ACCOUNT_PAGE"
+                ):
+                    self._record("signin-account-page-ready", observation)
+                    return observation
+                if observation.page is EaPage.CAPTCHA:
+                    self._record("captcha", observation)
+                    raise EaCaptchaRequired("EA App 出现 Captcha，已暂停")
+                if observation.page is EaPage.EXPIRED_SESSION:
+                    self._dismiss_expired_session(hwnd)
+                    observation = self._observe(hwnd)
+                    continue
+                if observation.page in intermediate and observation.page is not previous_page:
+                    break
+        self._record("signin-account-reset-failed", observation)
+        raise EaAppAutomationError("EA 未能返回清晰账号输入页，已停止输入新密码")
+
     def sign_in(
         self,
         credentials: SecretCredentials,
@@ -1260,6 +1335,7 @@ class WindowsEaHybridDriver:
             self.notify(f"EA 登录证据目录：{self.evidence.rotate()}")
             self.evidence.protect(credentials.login_identifier)
         for _attempt in range(2):
+            self._login_identifier_verified = False
             hwnd = self._ea_window()
             self._dismiss_expired_session(hwnd)
             observation = self._observe(hwnd)
@@ -1270,6 +1346,7 @@ class WindowsEaHybridDriver:
                 observation = self._dismiss_account_ban(hwnd, observation)
             if observation.page is EaPage.BANNED:
                 self._raise_if_account_banned(hwnd, observation)
+            observation = self._return_to_account_page(hwnd, observation)
             if observation.page is EaPage.EMAIL:
                 observation = self._submit_login_identifier(
                     hwnd, observation, credentials
@@ -1472,6 +1549,12 @@ class WindowsEaHybridDriver:
                 raise EaCaptchaRequired("EA App 出现 Captcha，已暂停")
             if observation.has_login_error():
                 self._record("login-rejected", observation)
+                if (
+                    observation.page is EaPage.PASSWORD
+                    and getattr(self, "_login_identifier_verified", False)
+                    and has_any("".join(observation.normalized), CREDENTIAL_REJECTION_TERMS)
+                ):
+                    raise EaCredentialsRejected("EA 拒绝了本次已核对账号的登录凭据")
                 raise EaLoginRejected("EA App 报告登录信息有误")
             if observation.page is EaPage.EXPIRED_SESSION:
                 self._dismiss_expired_session(hwnd)

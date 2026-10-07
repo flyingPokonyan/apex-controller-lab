@@ -41,3 +41,13 @@ RUN_PACK_OCR_TESTS=1 windows/.venv/bin/python -m unittest discover -s tests/wind
 退出账号过程中关闭提示后，如果仍在已登录页面，会再打开一次账号菜单执行退出，随后以登录页作为退出成功的证据。确认 `OK` 和窗口失去响应均不能作为退出成功的证据。保留原租约完成条件和暂停规则。
 
 本地 `windows/runs/ea-login/<attempt>/steps.jsonl` 和每日耗时文件可查看 `cloud-upload-error-ack`、`cloud-upload-error-dismissed`、`cloud-upload-error-action-missing`、`cloud-upload-error-stuck` 与 `signout-cloud-upload-retry`。更新 Controller 并重新启动账号循环后生效；已有暂停由原 checkpoint 恢复流程处理，不要删除 `windows/runs`。
+
+## 登录失败后的换号
+
+`Your credentials are incorrect or have expired` 表示 EA 拒绝了该次登录，不能单凭提示确认某个新租约的密码错误。密码页及验证码页可能仍属于上一账号；脱敏邮箱不足以验证完整账号。
+
+每次新的 `sign_in` 如果开始于密码或验证码页，会先点击左上角已识别的 `BACK`，确认回到只有账号输入框的页面，再填写本次租约的登录标识和密码。最多四次返回操作；缺少可信按钮、过渡画面未结束或无法返回时，不输入新密码。当前调用中刚提交账号后正常到达的密码/验证码页继续原流程。
+
+本次填写的完整登录标识在账号输入区域回显、OCR 置信度至少 0.85，提交后在密码页看到明确凭据错误或过期时，返回 `EA_CREDENTIALS_INVALID`。Forge 在安全清理并关闭失败租约后，用现有 `automation_hold` 暂停账号并记录“EA 登录凭据待核对”，连续 Runner 等待 1 秒后继续领取其他账号。账号、密码、等级和组合包资料均保留；修正密码后在 Forge 恢复自动取号即可。旧客户端的 `LOGIN_INVALID`、未核实标识的拒绝、限流及验证码问题维持原冷却处理，避免把错配或暂时失败直接当成凭据坏号。
+
+可在上述 EA 日志中查看 `signin-reset-start`、`signin-back-to-account`、`signin-account-page-ready`、`signin-back-missing` 和 `signin-account-reset-failed`，结合 `account-typed.identifierEchoed` / `identifierVerified` 判断是否完成返回和账号重填。只记录核对结果，不保存明文登录标识。

@@ -44,6 +44,12 @@ class EaLoginRejected(EaAppAutomationError):
     reason_code = "LOGIN_INVALID"
 
 
+class EaCredentialsRejected(EaLoginRejected):
+    """Password rejected after this login's identifier was freshly verified."""
+
+    reason_code = "EA_CREDENTIALS_INVALID"
+
+
 class EaApexStartFailed(EaAppAutomationError):
     reason_code = "APEX_START_FAILED"
 

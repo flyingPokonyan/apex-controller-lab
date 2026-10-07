@@ -27,6 +27,7 @@ from .ea_app import (
     EaApexDownloadRequired,
     EaApexStartFailed,
     EaAppDriver,
+    EaCredentialsRejected,
     EaIdentityFact,
     OtpChallenge,
     is_account_ban_reason,
@@ -1260,7 +1261,8 @@ class AccountOrchestrator:
             ):
                 delay = (
                     1.0
-                    if is_account_ban_reason(result.error_code)
+                    if (is_account_ban_reason(result.error_code)
+                        or result.error_code == EaCredentialsRejected.reason_code)
                     else max(1.0, idle_s)
                 )
                 self.notify(

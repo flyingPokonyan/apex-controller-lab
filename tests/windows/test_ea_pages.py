@@ -810,13 +810,15 @@ class EaLaunchRecoveryTest(unittest.TestCase):
         self.assertIn("account-banned", records)
 
     def test_sign_in_ban_overlay_after_password_fails_as_banned(self) -> None:
+        email = self.observation(("Email or EA ID", 400, 500))
         password = self.observation(
             ("Password", 400, 500),
             ("Sign in", 400, 650),
         )
         clicks: list[tuple[int, int]] = []
         records: list[str] = []
-        driver = self.driver([password, self.banned_overlay()], clicks, records)
+        driver = self.driver([email, self.banned_overlay()], clicks, records)
+        driver._submit_login_identifier = lambda *_args, **_kwargs: password
         driver._submit_password = lambda *_args, **_kwargs: "enter"
         driver._identity = lambda _hwnd: EaIdentityFact(
             "BlazeCobra_670", "ea-window-ocr:0.990", True
