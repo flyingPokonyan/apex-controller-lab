@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import ctypes
 from ctypes import wintypes
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from pathlib import Path
 import subprocess
@@ -154,6 +154,15 @@ CONTINUE_LOCAL_DATA_TERMS = (
     "skipsyncclose",
     "使用本地数据继续",
     "继续使用本地数据",
+)
+CLOUD_UPLOAD_ERROR_TERMS = (
+    "failedtouploadgamedatatothecloud",
+    "无法将游戏数据上传到云端",
+    "无法将游戏数据上传至云端",
+)
+CLOUD_UPLOAD_LOCAL_SAVE_TERMS = (
+    "gameisstillsavedlocally",
+    "游戏仍保存在本地",
 )
 
 # Pages that prove no session exists yet.
@@ -560,6 +569,60 @@ class WindowsEaHybridDriver:
             x_range=(0.35, 0.80),
             y_range=(0.45, 0.90),
         )
+
+    @classmethod
+    def _cloud_upload_error_point(
+        cls, observation: EaObservation,
+    ) -> tuple[int, int] | None:
+        # The upload notice has only OK. It acknowledges the error; it does
+        # not skip sync, close EA, or prove the session has been signed out.
+        placed = replace(observation, tokens=tuple(
+            token for token in observation.tokens if token.confidence >= 0.80
+        ))
+        title = next((
+            point for term in CLOUD_UPLOAD_ERROR_TERMS
+            if (point := phrase_point(placed.tokens, placed.rect, term,
+                                      x_range=(0.25, 0.80), y_range=(0.25, 0.70))) is not None
+        ), None)
+        if title is None or not cls._contains_any(placed, CLOUD_UPLOAD_LOCAL_SAVE_TERMS):
+            return None
+        button = cls._anchor(placed, ("ok", "确定"), exact=True,
+                             x_range=(0.40, 0.85), y_range=(0.40, 0.90))
+        if button is None or button[1] <= title[1]:
+            return None
+        return button
+
+    def _dismiss_cloud_upload_error(
+        self, hwnd: int, observation: EaObservation,
+    ) -> EaObservation:
+        if not self._contains_any(observation, CLOUD_UPLOAD_ERROR_TERMS):
+            return observation
+        clear_samples = 0
+        for attempt in range(1, 3):
+            point = self._cloud_upload_error_point(observation)
+            if point is None:
+                self._record("cloud-upload-error-action-missing", observation)
+                raise EaAppAutomationError("EA 云端上传失败提示未找到可信 OK 按钮")
+            self._record("cloud-upload-error-ack", observation, attempt=attempt)
+            self._click_point(hwnd, *point)
+            self.notify("EA 云端数据上传失败，已确认提示，正在核对弹窗是否关闭")
+            for _ in range(4):
+                self.sleep(1.0)
+                observation = self._observe(hwnd)
+                visible = self._contains_any(observation, CLOUD_UPLOAD_ERROR_TERMS)
+                clear = not visible and observation.page in (
+                    EaPage.SIGNED_IN, EaPage.BANNED, *PRE_LOGIN_PAGES,
+                )
+                clear_samples = clear_samples + 1 if clear else 0
+                if clear_samples >= 2:
+                    self._record("cloud-upload-error-dismissed", observation)
+                    return observation
+            # Retry only if the same known dialog is still visible. An empty
+            # capture or a different page is never permission to click again.
+            if not self._contains_any(observation, CLOUD_UPLOAD_ERROR_TERMS):
+                break
+        self._record("cloud-upload-error-stuck", observation)
+        raise EaAppAutomationError("EA 云端上传失败提示未能确认关闭，已停止点击")
 
     @classmethod
     def _apex_update_point(
@@ -1009,6 +1072,7 @@ class WindowsEaHybridDriver:
         observation: EaObservation | None = None
         for _ in range(8):
             observation = self._observe(hwnd)
+            observation = self._dismiss_cloud_upload_error(hwnd, observation)
             observation = self._dismiss_library_tour(hwnd, observation)
             state = self._state(hwnd, observation)
             if state is not EaUiState.UNKNOWN:
@@ -1794,6 +1858,7 @@ class WindowsEaHybridDriver:
         # interactive.  Wait for the actual launch control instead.
         for _ in range(15):
             observation = self._observe(hwnd)
+            observation = self._dismiss_cloud_upload_error(hwnd, observation)
             observation = self._dismiss_library_tour(hwnd, observation)
             self._raise_if_account_banned(hwnd, observation)
             point = self._anchor(
@@ -1847,6 +1912,7 @@ class WindowsEaHybridDriver:
                 self.sleep(2.0)
                 continue
 
+            observation = self._dismiss_cloud_upload_error(hwnd, observation)
             observation = self._dismiss_library_tour(hwnd, observation)
             self._raise_if_account_banned(hwnd, observation)
             local_data = self._continue_local_data_point(observation)
@@ -2051,6 +2117,7 @@ class WindowsEaHybridDriver:
             if observation.page is EaPage.EXPIRED_SESSION:
                 self._dismiss_expired_session(hwnd)
                 continue
+            observation = self._dismiss_cloud_upload_error(hwnd, observation)
             local_data = self._continue_local_data_point(observation)
             if local_data is not None:
                 if cloud_sync_close_deadline is not None:
@@ -2109,6 +2176,7 @@ class WindowsEaHybridDriver:
         deadline = time.monotonic() + 25.0
         confirmed = False
         cloud_sync_skipped = False
+        upload_signout_retries = 0
         while time.monotonic() < deadline:
             self.sleep(1.0)
             try:
@@ -2118,9 +2186,24 @@ class WindowsEaHybridDriver:
                     self._record("signout-cloud-sync-closed")
                     return True
                 raise
+            upload_notice = self._contains_any(observation, CLOUD_UPLOAD_ERROR_TERMS)
+            observation = self._dismiss_cloud_upload_error(hwnd, observation)
             if observation.page in (EaPage.EMAIL, EaPage.PASSWORD):
                 self._record("signed-out", observation)
                 return True
+            if upload_notice and observation.page is EaPage.SIGNED_IN:
+                if upload_signout_retries >= 1:
+                    self._record("signout-cloud-upload-retry-exhausted", observation)
+                    return False
+                upload_signout_retries += 1
+                self._record("signout-cloud-upload-retry", observation)
+                opened = self._open_account_menu(hwnd, self._identity(hwnd))
+                if opened is None:
+                    return False
+                _, item = opened
+                self._click_point(hwnd, *item)
+                confirmed = False
+                continue
             local_data = self._continue_local_data_point(observation)
             if local_data is not None:
                 if cloud_sync_skipped:

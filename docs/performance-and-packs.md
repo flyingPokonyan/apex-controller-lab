@@ -33,3 +33,11 @@ RUN_PACK_OCR_TESTS=1 windows/.venv/bin/python -m unittest discover -s tests/wind
 更新后先检查两台机器各一个大厅访问的 `APEX_PACKS`、`NOTIFICATION_CANDIDATE` 和 `NOTIFICATION_CLOSED`，确认真实 HWND/进程与截图证据一致。累计 1–2 天日志后，按开荒/升级、Runner、leaseId 分组比较 EA 登录、动作执行、后置确认、状态等待、截图/OCR和上报耗时，再决定压缩哪一段。
 
 当前自动关闭只启用于单显示器且捕获尺寸与主屏一致的环境；其他显示器拓扑只读取并记录遮挡，避免坐标映射错误。
+
+## EA 云端上传失败提示
+
+`Failed to upload game data to the cloud` 提示只有 `OK`，确认提示后 EA 仍可能保持登录。预检、启动游戏和退出账号会识别这类提示：同时要求上传失败标题、本地已保存的说明，以及高置信度且位于弹窗下方的 `OK` 位置。每次恢复最多点击两次，连续两次读到清晰的登录或游戏库画面才确认弹窗已关闭；空截图、未知提示或找不到按钮时停止恢复。
+
+退出账号过程中关闭提示后，如果仍在已登录页面，会再打开一次账号菜单执行退出，随后以登录页作为退出成功的证据。确认 `OK` 和窗口失去响应均不能作为退出成功的证据。保留原租约完成条件和暂停规则。
+
+本地 `windows/runs/ea-login/<attempt>/steps.jsonl` 和每日耗时文件可查看 `cloud-upload-error-ack`、`cloud-upload-error-dismissed`、`cloud-upload-error-action-missing`、`cloud-upload-error-stuck` 与 `signout-cloud-upload-retry`。更新 Controller 并重新启动账号循环后生效；已有暂停由原 checkpoint 恢复流程处理，不要删除 `windows/runs`。

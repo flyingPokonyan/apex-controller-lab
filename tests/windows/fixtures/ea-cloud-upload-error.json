@@ -1,0 +1,71 @@
+{
+  "rect": [
+    242,
+    211,
+    2178,
+    1260
+  ],
+  "tokens": [
+    {
+      "text": "Failed to upload game data to the cloud",
+      "confidence": 0.9856,
+      "roi": [
+        866,
+        634,
+        1479,
+        673
+      ]
+    },
+    {
+      "text": "Don't worry, your game is still saved locally. However, if you use",
+      "confidence": 0.98927,
+      "roi": [
+        866,
+        689,
+        1550,
+        720
+      ]
+    },
+    {
+      "text": "your account on multiple devices, it may result in the loss of",
+      "confidence": 0.99966,
+      "roi": [
+        865,
+        718,
+        1527,
+        748
+      ]
+    },
+    {
+      "text": "saved data. Launching the game again from this machine",
+      "confidence": 0.98957,
+      "roi": [
+        867,
+        749,
+        1490,
+        778
+      ]
+    },
+    {
+      "text": "should resolve the issue.",
+      "confidence": 0.99998,
+      "roi": [
+        868,
+        779,
+        1140,
+        805
+      ]
+    },
+    {
+      "text": "OK",
+      "confidence": 0.99734,
+      "roi": [
+        1497,
+        855,
+        1534,
+        879
+      ]
+    }
+  ],
+  "source": "User-supplied 2026-10-07 cloud-upload notice; dialog OCR only, no account identifiers."
+}
