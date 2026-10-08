@@ -1,11 +1,27 @@
 name: Notify Forge controller release
 on:
   push:
+    branches: [main, 'codex/**']
+  pull_request:
     branches: [main]
 permissions:
   contents: read
 jobs:
+  runtime-check:
+    runs-on: windows-latest
+    timeout-minutes: 5
+    env:
+      PYTHONUTF8: '1'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Verify real virtual-environment worker heartbeats and update handoff
+        run: python -m unittest discover -s tests/windows -p test_managed_launcher_process.py -v
   notify:
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    needs: runtime-check
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:

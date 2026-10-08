@@ -335,7 +335,7 @@ class Launcher:
             raise
         self.save("WORKER_STARTING", running=commit, pid=self.worker.pid, session=self.session,
                   workerStartedAt=self.started, workerConfirmedAt=None, workerHeartbeatAt=None,
-                  workerPhase=None, workerBlocked=False, workerReason=None, completed=0, error=None)
+                  workerPid=None, workerPhase=None, workerBlocked=False, workerReason=None, completed=0, error=None)
 
     def request(self, mode):
         if self.request_mode in {"recover", "stop"} and mode == "boundary":
@@ -354,7 +354,12 @@ class Launcher:
             status = read_json(self.root / "worker.json")
         except (OSError, ValueError):
             return {}
-        if status.get("session") != self.session or status.get("pid") != self.worker.pid:
+        # Windows venv's python.exe redirects to a child interpreter. Popen.pid
+        # belongs to that wrapper, while os.getpid() in worker.json belongs to
+        # the interpreter. The per-launch UUID binds the heartbeat to this run;
+        # requiring equal PIDs discards every valid Windows venv heartbeat.
+        if (status.get("session") != self.session
+                or type(status.get("pid")) is not int or status["pid"] <= 0):
             return {}
         return status
 
@@ -381,7 +386,7 @@ class Launcher:
         now = time.time()
         fresh = status and 0 <= now - float(status.get("at", 0)) <= 30
         if fresh:
-            self.state.update(workerHeartbeatAt=status["at"], workerPhase=status.get("phase"),
+            self.state.update(workerHeartbeatAt=status["at"], workerPid=status["pid"], workerPhase=status.get("phase"),
                               workerBlocked=bool(status.get("blocked")), workerReason=status.get("reason"),
                               completed=int(status.get("completed", 0)))
             if not self.state.get("workerConfirmedAt"):
@@ -439,7 +444,7 @@ class Launcher:
         checked = False
         executor = ThreadPoolExecutor(max_workers=1)
         self.save("STARTING", error=None, pid=None, workerConfirmedAt=None, workerHeartbeatAt=None,
-                  workerPhase=None, workerBlocked=False, workerReason=None)
+                  workerPid=None, workerPhase=None, workerBlocked=False, workerReason=None)
         if self.publisher:
             try:
                 self.publisher.start()
