@@ -25,6 +25,10 @@ if CV2_AVAILABLE:
 
 @unittest.skipUnless(CV2_AVAILABLE, "account-cycle CLI requires the Windows OpenCV runtime")
 class AccountCycleCliTest(unittest.TestCase):
+    def setUp(self):
+        # CLI tests must never start a real network worker or touch run outboxes.
+        self.diagnostics = self.enterContext(patch.object(cli, "DiagnosticReporter")).return_value
+
     @staticmethod
     def config():
         return SimpleNamespace(
@@ -104,6 +108,8 @@ class AccountCycleCliTest(unittest.TestCase):
         driver.preflight.assert_called_once_with()
         provider.claim.assert_not_called()
         provider.current.assert_not_called()
+        self.diagnostics.start.assert_called_once_with()
+        self.diagnostics.stop.assert_called_once_with()
 
     def test_once_runs_a_single_cycle_and_never_loops(self) -> None:
         settings = RunnerSettings(

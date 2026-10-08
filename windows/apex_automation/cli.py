@@ -36,6 +36,7 @@ from .control_server import LocalControlServer
 from .ea_app import EaAppAutomationError, EaAppDriver, EaUiState, OtpChallenge
 from .ea_app_win32 import WindowsEaHybridDriver
 from .ea_evidence import EaLoginEvidence, default_evidence_root
+from .diagnostic_reporter import DiagnosticReporter
 from .ea_pages import mask_identity
 from .frame_normalization import (
     ReferenceCanvasFrameSource,
@@ -810,7 +811,15 @@ def run_account_cycle(
         return 2
 
     orchestrator: AccountOrchestrator | None = None
+    diagnostics: DiagnosticReporter | None = None
     try:
+        # Dedicated audit channel also captures failures before a game run exists.
+        # A diagnostic I/O/auth failure cannot stop the account workflow.
+        try:
+            diagnostics = DiagnosticReporter(settings, runs_root, notify=print)
+            diagnostics.start()
+        except Exception:
+            print("诊断上报器未启动；账号运行继续，本机日志仍保留")
         with DxcamFrameSource(
             backend=str(config.environment["captureBackend"]),
             output_index=int(config.environment["outputIndex"]),
@@ -878,6 +887,11 @@ def run_account_cycle(
                 orchestrator.stop()
             except Exception as error:
                 print(f"账号编排停止失败：{error}", file=sys.stderr)
+        if diagnostics is not None:
+            try:
+                diagnostics.stop()
+            except Exception:
+                print("诊断上报器停止异常；待上传摘要保留在本机")
         try:
             lock.release()
         except Exception as error:
