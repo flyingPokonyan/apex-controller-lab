@@ -5,6 +5,17 @@ from pathlib import Path
 from typing import IO
 
 
+_entry_lock = None
+
+
+def acquire_entry_lock(path: Path) -> None:
+    """Hold the execution lock before importing the optional vision stack."""
+    global _entry_lock
+    lock = SingleInstanceLock(path)
+    lock.acquire()
+    _entry_lock = lock
+
+
 class AlreadyRunningError(RuntimeError):
     pass
 
@@ -17,6 +28,10 @@ class SingleInstanceLock:
         self._handle: IO[bytes] | None = None
 
     def acquire(self) -> None:
+        if _entry_lock is not None and _entry_lock is not self and _entry_lock.path.resolve() == self.path.resolve():
+            # __main__ owns this lock until process exit, including import and
+            # shutdown. The CLI's finally must not release that outer lock.
+            return
         self.path.parent.mkdir(parents=True, exist_ok=True)
         handle = self.path.open("a+b")
         try:

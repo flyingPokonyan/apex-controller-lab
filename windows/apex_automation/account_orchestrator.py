@@ -123,6 +123,7 @@ class AccountOrchestrator:
         completion_poll_s: float = 2.0,
         notify: Callable[[str], None] = print,
         diagnostic: Callable[..., None] | None = None,
+        maintenance=None,
     ) -> None:
         self.provider = provider
         self.ea_driver = ea_driver
@@ -138,6 +139,7 @@ class AccountOrchestrator:
         self.completion_poll_s = max(0.1, completion_poll_s)
         self.notify = notify
         self.diagnostic = diagnostic
+        self.maintenance = maintenance
         self._phase_started_at = time.monotonic()
         self._checkpoint_lock = threading.Lock()
         self._provider_operation_lock = threading.RLock()
@@ -163,6 +165,8 @@ class AccountOrchestrator:
             self._checkpoint = self.checkpoint_store.save(
                 self._checkpoint.evolve(**changes)
             )
+            if self.maintenance is not None:
+                self.maintenance.pulse(self._checkpoint.workflow_phase.value)
             if self.diagnostic and previous.workflow_phase != self._checkpoint.workflow_phase:
                 now = time.monotonic()
                 try:
@@ -218,6 +222,8 @@ class AccountOrchestrator:
             resume_phase=self._checkpoint.workflow_phase,
             last_error_code=error_code,
         )
+        if self.maintenance is not None:
+            self.maintenance.pulse(blocked=manual, reason=error_code, boundary=manual)
         return AccountCycleResult(
             outcome=AccountCycleOutcome.PAUSED,
             lease_id=checkpoint.lease_id,
@@ -350,6 +356,11 @@ class AccountOrchestrator:
                 in {LeaseState.COMPLETION_PENDING, LeaseState.EXPIRED_UNCONFIRMED}
                 and checkpoint.workflow_phase not in terminal_phases
             ):
+                if (self.maintenance is not None and self._restart_recovery_pending
+                        and remote.state is LeaseState.EXPIRED_UNCONFIRMED):
+                    # Startup recovery cleans up; it does not resume gameplay
+                    # or renew an expired lease as though it were still valid.
+                    return self.provider.recover(remote.lease_id, remote.lease_fence)
                 raise RemoteLeaseRecoveryRequired(
                     f"REMOTE_{remote.state.value}_RECOVERY_REQUIRED"
                 )
@@ -358,6 +369,9 @@ class AccountOrchestrator:
         if remote is not None:
             lease = self.provider.recover(remote.lease_id, remote.lease_fence)
             self._lease_checkpoint(lease)
+            if self.maintenance is not None and remote.state is LeaseState.EXPIRED_UNCONFIRMED:
+                self._restart_recovery_pending = True
+                return lease
             if remote.state in {
                 LeaseState.COMPLETION_PENDING,
                 LeaseState.EXPIRED_UNCONFIRMED,
@@ -372,6 +386,10 @@ class AccountOrchestrator:
             self._restart_recovery_pending = True
             return lease
 
+        if self.maintenance is not None:
+            # Stop here, not just after a successful run: idle startup and a
+            # recovered terminal lease must obey the same no-new-claim gate.
+            self.maintenance.boundary()
         claim_request_id = (
             checkpoint.claim_request_id or self.operation_id_factory()
         )
@@ -986,6 +1004,8 @@ class AccountOrchestrator:
         return self._pause("OPERATOR_STOPPED", manual=False)
 
     def run_once(self) -> AccountCycleResult:
+        if self.maintenance is not None:
+            self.maintenance.pulse(self._checkpoint.workflow_phase.value)
         if self._stop.is_set():
             return AccountCycleResult(AccountCycleOutcome.STOPPED)
         if self._reconcile_server_release():
@@ -1213,6 +1233,10 @@ class AccountOrchestrator:
             result = self.run_once()
             if result.outcome is AccountCycleOutcome.PAUSED:
                 if self._checkpoint.run_state is OrchestratorRunState.PAUSED_MANUAL:
+                    if self.maintenance is not None and result.error_code not in self.SERVER_RELEASABLE_PAUSES and result.error_code != "RUNNER_PAUSED":
+                        # Let the independent launcher bound failures by commit;
+                        # do not erase a UI failure and burn the next account.
+                        return 1
                     if self.resume_if_safe():
                         delay = max(1.0, idle_s)
                         self.notify(
@@ -1243,7 +1267,21 @@ class AccountOrchestrator:
                 self.notify(f"账号编排开始自动重试：{result.error_code}")
                 continue
             if result.outcome is AccountCycleOutcome.STOPPED:
+                if self.maintenance is not None and result.error_code == "UPDATE_REQUESTED":
+                    if self.maintenance.requested:
+                        from .managed_runtime import UPDATE_EXIT
+                        return UPDATE_EXIT
+                    # The new process just finished an old update's cleanup.
+                    # This was never an operator request to remain stopped.
+                    continue
                 return 0
+            if self.maintenance is not None and result.outcome is AccountCycleOutcome.COMPLETED:
+                if result.error_code is None:
+                    self.maintenance.success()
+                elif not (is_account_ban_reason(result.error_code) or result.error_code in {
+                    EaCredentialsRejected.reason_code, "RESTART_RECOVERY", "LEASE_UNRECOVERED"
+                }):
+                    return 1
             if result.outcome is AccountCycleOutcome.NO_ACCOUNT:
                 delay = max(1.0, idle_s)
                 retry_after = getattr(self.provider, "claim_retry_after_s", None)

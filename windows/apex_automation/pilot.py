@@ -176,6 +176,7 @@ class CapabilityPilot:
         key_tap_ms: int | None = None,
         max_screenshots: int = 400,
         unknown_grace_ms: int = 8000,
+        maintenance=None,
         unknown_sample_ms: int = 20_000,
         unknown_static_epsilon: float = 0.02,
         progression_reader: LobbyProgressionReader | None = None,
@@ -223,6 +224,7 @@ class CapabilityPilot:
         # exactly the screens nobody knew to collect. Loading screens get
         # captured too; one shot per episode is cheap and they are the reason
         # the grace is this long.
+        self.maintenance = maintenance
         self.unknown_grace_s = unknown_grace_ms / 1000
         # One shot per episode turned out to be far too coarse. In
         # `20260730-232551` a single unknown stretch ran 142 seconds and
@@ -2478,6 +2480,10 @@ class CapabilityPilot:
                 self.session_outcome is None
                 and (deadline is None or self.monotonic() < deadline)
             ):
+                if self.maintenance is not None:
+                    blocked = self._stall_since is not None or self._known_stall_since is not None
+                    self.maintenance.pulse("APEX_PLAYING", blocked=blocked,
+                                           reason="UI_STALLED" if blocked else None)
                 self.step()
                 with self.metrics.measure("pollSleep"):
                     self.sleep(self.poll_ms / 1000)

@@ -45,6 +45,7 @@ from .frame_normalization import (
 )
 from .input_win32 import EmergencyStop, Win32InputSender, Win32SafetyGuard
 from .instance_lock import AlreadyRunningError, SingleInstanceLock
+from .managed_runtime import ManagedRuntime, ManagedUpdateRequested, UPDATE_EXIT
 from .lease_keeper import LeaseKeeper
 from .observer import ObservationSession
 from .ocr_obstacles import (
@@ -769,6 +770,9 @@ def run_account_cycle(
         print("account-cycle 模式只能在 Windows 上运行。", file=sys.stderr)
         return 2
 
+    maintenance = ManagedRuntime.from_environment()
+    if maintenance is not None:
+        maintenance.pulse("STARTING")
     if config_path.expanduser().resolve() == DEFAULT_CONFIG_PATH.resolve():
         config_path = PLAY_CONFIG_PATH
     try:
@@ -799,12 +803,16 @@ def run_account_cycle(
                 settings,
                 runs_root,
             )
+        if maintenance is not None:
+            play_session.maintenance = maintenance
     except (OSError, ValueError, RunnerConfigurationError, LeaseProviderError) as error:
         print(f"account-cycle 配置错误：{error}", file=sys.stderr)
         return 2
 
     lock = SingleInstanceLock(runs_root / "play.lock")
     try:
+        if maintenance is not None:
+            maintenance.pulse("EA_PREFLIGHT", blocked=False)
         lock.acquire()
     except AlreadyRunningError as error:
         print(str(error), file=sys.stderr)
@@ -834,9 +842,25 @@ def run_account_cycle(
                     capture_source=source,
                     evidence=evidence,
                     notify=print,
+                    **({"sleep": maintenance.sleep} if maintenance is not None else {}),
                 )
             preflight = getattr(ea_driver, "preflight", None)
-            if callable(preflight):
+            checkpoint = AtomicCheckpointStore(runs_root / "account-cycle-status.json").load()
+            # A broken EA page must not prevent cleanup of an interrupted
+            # account. Remote occupancy also matters if the local claim reply
+            # was lost. No credentials are logged by this check.
+            recovering = checkpoint is not None and (checkpoint.has_lease or checkpoint.pending_operation is not None)
+            if maintenance is not None and not recovering:
+                while True:
+                    try:
+                        recovering = provider.current() is not None
+                        break
+                    except LeaseProviderError as error:
+                        if not error.retryable:
+                            raise
+                        maintenance.pulse("PROVIDER_RETRY", blocked=False, reason=error.code)
+                        maintenance.sleep(30)
+            if callable(preflight) and not recovering:
                 state = preflight()
                 print(f"EA 领号前预检通过：{state.value}")
             orchestrator = AccountOrchestrator(
@@ -851,6 +875,7 @@ def run_account_cycle(
                 recover_report_drain=play_session.recover_report_drain,
                 notify=print,
                 diagnostic=getattr(getattr(ea_driver, "evidence", None), "timing", None),
+                **({"maintenance": maintenance, "sleep": maintenance.sleep} if maintenance is not None else {}),
             )
             if resume:
                 orchestrator.resume()
@@ -875,7 +900,11 @@ def run_account_cycle(
                     )
                     return 1
                 return 0
-            return orchestrator.run_forever(idle_s=max(1.0, idle_s))
+            code = orchestrator.run_forever(idle_s=max(1.0, idle_s))
+            return UPDATE_EXIT if maintenance is not None and maintenance.requested else code
+    except ManagedUpdateRequested:
+        print("旧进程退出以应用更新；保留当前租约、checkpoint 和待上传报告。")
+        return UPDATE_EXIT
     except (EmergencyStop, KeyboardInterrupt):
         return 0
     except Exception as error:

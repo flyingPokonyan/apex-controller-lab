@@ -1,0 +1,17 @@
+name: Notify Forge controller release
+on:
+  push:
+    branches: [main]
+permissions:
+  contents: read
+jobs:
+  notify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - name: Register pushed version in Forge
+        env:
+          FORGE_RELEASE_URL: ${{ vars.FORGE_RELEASE_URL }}
+          FORGE_RELEASE_TOKEN: ${{ secrets.FORGE_RELEASE_TOKEN }}
+        run: python3 scripts/notify-forge-release.py

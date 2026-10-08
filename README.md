@@ -20,7 +20,9 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\install.ps1 -RepoUrl "<仓
 
 安装到默认目录后，双击
 `%LOCALAPPDATA%\ApexController\apex-controller-lab\windows\account-cycle.cmd` 即可运行。
-以后双击 `windows\update.cmd` 更新；它会自动使用安装脚本下载的 PortableGit。
+此入口会启动独立更新器：后台检查 `origin/main`，正常账号结束后自动更新并继续；
+确认卡住时可提前更新，由新版先恢复遗留任务。首次手工启动会登记当前用户登录后自动启动。
+`windows\update.cmd` 可立即请求检查更新；已有 Runner 运行时不会原地覆盖它的代码。
 
 ## GitHub 与 Windows 更新
 
@@ -31,9 +33,10 @@ SSH 的机器也可以继续使用：
 git clone git@github.com:flyingPokonyan/apex-controller-lab.git
 ```
 
-Windows 第一次克隆后，进入 `windows` 目录运行 `setup.ps1`。以后双击
-`windows\update.cmd` 即可执行安全的 `git pull --ff-only` 并同步 Python
-依赖。完整录像、原始全屏标定图、`.venv`、运行日志和发布压缩包不会上传；
+Windows 第一次克隆后，进入 `windows` 目录运行 `setup.ps1`。以后通过
+`windows\account-cycle.cmd` 运行即可自动更新；依赖文件变化时自动同步依赖。
+启动器只做 fast-forward，不覆盖已跟踪文件的本地修改或重置本地提交。
+完整录像、原始全屏标定图、`.venv`、运行日志和发布压缩包不会上传；
 运行所需的裁剪模板和配置会随仓库更新。
 
 ## Windows 托管运行：新机器从零开始
@@ -101,8 +104,8 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\install.ps1
 | 入口 | 会做什么 | 什么时候使用 |
 | --- | --- | --- |
 | `account-cycle-once.cmd` | 领取一个账号并完整运行一轮，然后退出 | 首次验证或单轮调试 |
-| `account-cycle.cmd` | 一个账号收口后继续领取下一个账号 | 单账号跑通后，需要连续挂机时 |
-| `account-cycle-resume.cmd` | `account-cycle.cmd` 的兼容别名，持续运行并自动恢复安全暂停 | 旧快捷方式仍可用，日常直接用 `account-cycle.cmd` |
+| `account-cycle.cmd` | 启动/继续托管运行，后台自动更新并恢复可恢复故障 | 日常连续挂机；手工双击表示要求继续运行 |
+| `account-cycle-resume.cmd` | `account-cycle.cmd` 的兼容别名 | 旧快捷方式仍可用 |
 
 出问题时再用这些定位，它们都不会进入循环：
 
@@ -117,8 +120,10 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\install.ps1
 `INVALID_PROVIDER_TOKEN`，应在控制台重新创建 Runner 或轮换 Token；若配置里仍是
 `192.168.*`，请重新下载公网配置或把两个 URL 改为上面的 HTTPS 地址。
 
-任何时候都可以按 `F8` 紧急停止。没有未决租约的本地异常会由持续循环自动清除并重试；遇到验证码、
-身份不一致、未知 EA 页面或无法确认退出时，Runner 会保留租约、暂停并保留证据，避免反复消耗账号。
+任何时候都可以按 `F8` 紧急停止。启动器保留人工停止意图，不会因发现新版而自动开始账号；
+再次双击 `account-cycle.cmd` 表示继续。程序故障会有限重试，同一提交连续失败三次后等待修复，
+但仍检查后续提交。新提交自动带来恢复机会。验证码、身份不一致、未覆盖页面、EA/Apex 更新等
+需要人工判断的问题，仍需修代码或修环境；更新器不会假装这些问题已经解决。
 
 准备长时间无人值守之前，先读
 [EA 自动切号进度 · 挂机运行的环境要求](docs/ea-account-cycle-progress-20260801.md#挂机运行的环境要求)：
@@ -128,11 +133,19 @@ DisplayPort 关显示器会直接让桌面复制 `ACCESS_LOST`，RDP 断开会�
 
 ### 5. 更新、重装与测试产物
 
-- 日常更新双击 `windows\update.cmd`；它更新代码和依赖，不会覆盖私有配置或运行记录。
+- 日常通过 `account-cycle.cmd` 自动更新；`update.cmd` 只用于立即检查或在未运行时单独更新。
+- **旧机器首次接入**：等待旧任务收口后退出旧程序，手工获取本次代码，再启动新的
+  `account-cycle.cmd`。没有启动器的旧进程不能自行安装此能力。接入后的后续更新不需要逐台操作。
+- 状态见 `windows\runs\managed\launcher.json`：`running` 是当前进程启动时的提交，
+  `target` 是发现的远端提交，`installed` 是安装验证通过的提交；不要用 Forge 的 `0.5.1`
+  或 `configRevision` 判断 Git 版本。`WAITING_ACCOUNT_END` 表示等待账号结束，`WAITING_FIX`
+  表示该提交已达到失败次数上限，`UPDATE_FAILED` 表示安装未完成且将自动重试。
+- 登录启动快捷方式是当前用户 Startup 目录里的 `Apex Controller.lnk`，删除该快捷方式即可
+  取消登录启动。登录启动会保留上次的人工停止状态；手工启动会解除停止和失败次数限制。
 - 想全新 clone 时，先把 `account-cycle.private.json` 单独备份；也可以不保留它，改为在
   ApexForge 控制台创建新 Runner 并下载新配置。
-- **删掉旧 Runner 配置之前，先在控制台确认这台设备没有活动租约**，有就先安全释放。本地
-  配置一旦删除，那个账号只能等租约自然过期才会回到池子里。
+- **删掉旧 Runner 配置之前，先在控制台确认这台设备没有活动租约**，有就先安全释放。
+  租约自然过期仍可能处于 `EXPIRED_UNCONFIRMED`，不会因此自动确认安全释放。
 - `windows\runs\` 包含截图、状态、事件和断网待补传 outbox。确认真实运行已经上报前不要
   删除。判据是每个 run 目录里 `report-outbox.jsonl` 的最大 `seq` 是否已经被
   `report-state.json` 的 `acceptedThrough` 覆盖：
@@ -151,6 +164,34 @@ DisplayPort 关显示器会直接让桌面复制 `ACCESS_LOST`，RDP 断开会�
 
   没有输出就说明全部已确认送达，可以整个删掉。
 - 新 clone 后需要重新运行 `setup.ps1`，但不需要修改运行代码。
+
+### 6. 怎样确认自动更新成功
+
+正常机器不需要制造故障来测试。推送后，启动窗口先出现 `WAITING_ACCOUNT_END`，
+等当前账号结束后依次进入 `INSTALLING`、`INSTALLED`、`WORKER_STARTING`、`RUNNING`。
+`WORKER_STARTING` 只表示创建了新进程；收到该进程本次会话的新鲜主循环心跳后才显示 `RUNNING`。
+
+每条更新状态都会列出 `running`、`installed`、`target` 的短提交号。
+当三个提交号都等于这次推送的提交，并出现“已收到当前版本的主循环心跳”，说明新版已安装并开始响应。
+`INSTALLED` 单独只代表安装及导入检查通过；业务是否恢复仍结合当前阶段与 Forge 的持续上报判断。
+
+需要回查时，在项目根目录打开 PowerShell：
+
+```powershell
+Get-Content .\windows\runs\managed\launcher.json -Raw | ConvertFrom-Json | Format-List stage,running,installed,target,workerPhase,workerHeartbeatAt,lastCheckedAt,checkError,error
+```
+
+`workerHeartbeatAt`、`lastCheckedAt` 是 Unix 秒时间戳，应持续推进；停止的旧日志不能证明当前在线。
+`WAITING_ACCOUNT_END` 是正在等账号结束，`UPDATE_FAILED` 是安装未完成，`WAITING_FIX` 是业务重试达到上限。
+旧字段 `0.5.1` 不区分每次 Git 提交。配套 Forge 版本上线后，在 Apex 顶部“最新版本”卡片
+查看发布提交和设备更新进度，点击查看每台设备的实际运行版本及最后上报时间。
+
+启动器通过后台线程独立上报版本；即使业务程序卡住、启动失败或正在安装依赖，版本上报仍继续。
+上报失败不阻塞业务或更新，结果见 `windows/runs/managed/version-report.json`。
+首次需要在 Forge 配置 `APEX_CONTROLLER_RELEASE_TOKEN`，并在本仓库 Actions 设置同值的
+secret `FORGE_RELEASE_TOKEN` 和 variable `FORGE_RELEASE_URL`（Forge 的
+`/v1/runner/controller-releases` HTTPS 地址）。此后推送到 `main` 自动登记版本，失败可重跑通知工作流。
+发布序号使用该工作流的递增运行编号，不要随意重建/更名发布工作流；版本通知失败不影响机器直接从 Git 更新。
 
 ## 菜单流程实验（首页）
 
@@ -177,6 +218,7 @@ DisplayPort 关显示器会直接让桌面复制 `ACCESS_LOST`，RDP 断开会�
 
 ## 技术方案
 
+- [托管 Runner 自动更新与故障恢复](docs/safe-managed-update-design.md)
 - [**现状汇总**：有哪些采集数据、闭环做到哪一步](docs/current-status.md)
 - [升级速度与停滞：8 月 3 日两段跑的复盘（含每分钟经验实测）](docs/xp-rate-and-idle-stall-20260804.md)
 - [能力证据矩阵：每条能力靠什么帧成立、还缺什么](docs/capability-evidence.md)

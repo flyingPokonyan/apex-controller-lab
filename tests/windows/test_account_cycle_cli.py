@@ -3,6 +3,7 @@ from __future__ import annotations
 import importlib.util
 from pathlib import Path
 import sys
+import tempfile
 from types import SimpleNamespace
 import unittest
 from unittest.mock import Mock, patch
@@ -28,6 +29,9 @@ class AccountCycleCliTest(unittest.TestCase):
     def setUp(self):
         # CLI tests must never start a real network worker or touch run outboxes.
         self.diagnostics = self.enterContext(patch.object(cli, "DiagnosticReporter")).return_value
+        root = Path(self.enterContext(tempfile.TemporaryDirectory()))
+        self.enterContext(patch.object(cli, "REPOSITORY_ROOT", root))
+        self.enterContext(patch.object(cli.ManagedRuntime, "from_environment", return_value=None))
 
     @staticmethod
     def config():
@@ -150,6 +154,56 @@ class AccountCycleCliTest(unittest.TestCase):
         self.assertEqual(exit_code, 0)
         orchestrator.run_once.assert_called_once_with()
         orchestrator.run_forever.assert_not_called()
+
+    def test_managed_recovery_is_not_blocked_by_ea_preflight(self):
+        from apex_automation.orchestration_state import OrchestrationCheckpoint
+        from apex_automation.managed_runtime import ManagedRuntime
+        settings = RunnerSettings(enabled=True, device_id="device_1", lease_url="https://test.invalid/v1/runner/account-leases",
+                                  provider_token="test", report_url="https://test.invalid/v1/runner/reports", report_token="test")
+        store = cli.AtomicCheckpointStore(cli.REPOSITORY_ROOT / "windows/runs/account-cycle-status.json")
+        store.save(OrchestrationCheckpoint(device_id="device_1", lease_id="existing", lease_fence=1, account_id="acct"))
+        capture = Mock(__enter__=Mock(return_value=Mock()), __exit__=Mock(return_value=False))
+        driver = Mock()
+        driver.preflight.side_effect = AssertionError("Recovery must happen before preflight")
+        orchestrator = Mock()
+        orchestrator.run_forever.return_value = 0
+        runtime = ManagedRuntime(cli.REPOSITORY_ROOT / "managed", "session")
+        with (
+            patch.object(cli.sys, "platform", "win32"),
+            patch.object(cli, "load_config", return_value=self.config()),
+            patch.object(cli, "load_runner_settings", return_value=settings),
+            patch.object(cli.ManagedRuntime, "from_environment", return_value=runtime),
+            patch.object(cli, "DxcamFrameSource", return_value=capture),
+            patch.object(cli, "AccountOrchestrator", return_value=orchestrator),
+        ):
+            self.assertEqual(cli.run_account_cycle(Path("managed.json"), provider=Mock(),
+                                                 ea_driver=driver, play_session=Mock()), 0)
+        driver.preflight.assert_not_called()
+        orchestrator.run_forever.assert_called_once()
+
+    def test_network_outage_at_startup_retries_instead_of_using_failure_budget(self):
+        from apex_automation.account_provider import LeaseProviderError
+        from apex_automation.managed_runtime import ManagedUpdateRequested, UPDATE_EXIT
+        settings = RunnerSettings(enabled=True, device_id="device_1")
+        provider = Mock()
+        provider.current.side_effect = LeaseProviderError("offline", retryable=True)
+        runtime = Mock()
+        runtime.sleep.side_effect = ManagedUpdateRequested()
+        driver = Mock()
+        capture = Mock(__enter__=Mock(return_value=Mock()), __exit__=Mock(return_value=False))
+        with (
+            patch.object(cli.sys, "platform", "win32"),
+            patch.object(cli, "load_config", return_value=self.config()),
+            patch.object(cli, "load_runner_settings", return_value=settings),
+            patch.object(cli.ManagedRuntime, "from_environment", return_value=runtime),
+            patch.object(cli, "DxcamFrameSource", return_value=capture),
+        ):
+            code = cli.run_account_cycle(Path("managed.json"), provider=provider,
+                                         ea_driver=driver, play_session=Mock())
+        self.assertEqual(code, UPDATE_EXIT)
+        runtime.sleep.assert_called_once_with(30)
+        driver.preflight.assert_not_called()
+        provider.claim.assert_not_called()
 
 
 if __name__ == "__main__":

@@ -16,6 +16,7 @@ from apex_automation.config import RunnerConfig
 from apex_automation.play_session import PlaySessionRunner, SessionIdentity
 from apex_automation.progression_policy import ContinuePlayPolicy
 from apex_automation.runner_identity import IdentityVerification, RunnerSettings
+from apex_automation.managed_runtime import ManagedUpdateRequested
 
 
 class FakeSender:
@@ -206,6 +207,20 @@ class PlaySessionRunnerTest(unittest.TestCase):
         self.assertEqual(result.status, "PLAYED")
         self.assertEqual(result.error_code, "KNOWN_STATE_STALL_UNRECOVERED")
         self.assertIn("已知页面", result.error)
+
+    def test_update_interruption_releases_input_and_persists_unfinished_run(self):
+        identity = SessionIdentity.from_runner_settings(self.settings, self.verification)
+        with (
+            patch("apex_automation.play_session.CapabilityPilot", FakePilot),
+            patch.object(FakePilot, "run", side_effect=ManagedUpdateRequested()),
+        ):
+            result = self.runner.run(identity, ContinuePlayPolicy(), object())
+        self.assertEqual(result.status, "STOPPED")
+        self.assertEqual(result.error_code, "UPDATE_REQUESTED")
+        self.assertGreater(self.runner.sender.releases, 0)
+        saved = json.loads((result.run_dir / "result.json").read_text())
+        self.assertEqual(saved["status"], "STOPPED")
+        self.assertNotEqual(saved["status"], "TARGET_REACHED")
 
     def test_a_long_foreground_loss_releases_with_its_own_error_code(self) -> None:
         identity = SessionIdentity.from_runner_settings(

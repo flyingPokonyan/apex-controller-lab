@@ -23,6 +23,7 @@ from .recorder import RunRecorder
 from .diagnostics import PerformanceMetrics
 from .apex_packs import ApexPackReader, PackInventoryProbe
 from .notifications import NotificationCloser, Win32NotificationBackend
+from .managed_runtime import ManagedUpdateRequested
 from .reporter import RemoteReporter
 from .runner_identity import IdentityVerification, RunnerSettings
 
@@ -182,6 +183,7 @@ class PlaySessionRunner:
         self.config_revision = config_revision
         self.notify = notify
         self.sleep = sleep
+        self.maintenance = None
 
     def recover_report_drain(self, run_id: str) -> ReportDrainHandle | None:
         """Reopen a finished immutable run without re-enabling event writes."""
@@ -374,6 +376,7 @@ class PlaySessionRunner:
                 notify=self.notify,
                 metrics=metrics,
                 pack_probe=pack_probe,
+                maintenance=self.maintenance,
             )
             outcome = pilot.run(duration_s=duration_s)
             if outcome == "TARGET_REACHED":
@@ -420,7 +423,15 @@ class PlaySessionRunner:
                 finish_detail["reason"] = error_message
                 finish_detail["errorCode"] = error_code
                 exit_code = 1
+        except ManagedUpdateRequested:
+            # Finish and persist the interrupted run locally. The orchestrator
+            # receives its evidence below and can attempt cleanup before exit.
+            finish_status = "STOPPED"
+            error_code = "UPDATE_REQUESTED"
+            finish_detail["reason"] = "更新请求：停止输入并保存当前运行"
         except (EmergencyStop, KeyboardInterrupt) as error:
+            if self.maintenance is not None:
+                self.maintenance.stop_by_operator()
             finish_status = "STOPPED"
             error_message = str(error) or "用户停止"
             error_code = "OPERATOR_STOPPED"
