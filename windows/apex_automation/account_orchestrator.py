@@ -1181,6 +1181,20 @@ class AccountOrchestrator:
             self.notify(
                 f"EA 自动化失败：{error.reason_code} @ {self._phase()}：{error}"
             )
+            if self._checkpoint.workflow_phase in {
+                WorkflowPhase.APEX_STOPPING,
+                WorkflowPhase.EA_SIGNING_OUT,
+                WorkflowPhase.LEASE_COMPLETING,
+            }:
+                # Preserve the finished game's result and evidence. Login
+                # failure cleanup could otherwise close a verified target
+                # as FAILED when sign-out succeeds on its second attempt.
+                reason = (
+                    "EA_SIGNOUT_FAILED"
+                    if self._checkpoint.workflow_phase is WorkflowPhase.EA_SIGNING_OUT
+                    else error.reason_code
+                )
+                return self._pause(reason, manual=True)
             if "lease" in locals() and lease is not None:
                 return self._cleanup_and_close_preplay_failure(
                     lease,

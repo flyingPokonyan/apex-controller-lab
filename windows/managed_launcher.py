@@ -259,6 +259,7 @@ class Launcher:
         self.started = 0.0
         self.phase_started = 0.0
         self.phase = None
+        self.last_worker_status = {}
         self.requested_at = None
         self.request_mode = None
         self.completed = 0
@@ -315,6 +316,7 @@ class Launcher:
         self.session = uuid.uuid4().hex
         self.started = self.phase_started = time.time()
         self.phase = None
+        self.last_worker_status = {}
         self.completed = 0
         self.requested_at = self.request_mode = None
         env = dict(os.environ, PYTHONPATH=str(self.repo.root / "windows"),
@@ -383,6 +385,12 @@ class Launcher:
                 self.save("WAITING_RETRY", pid=None, error=f"WORKER_EXIT_{code}")
             return
         status = self.worker_status()
+        if status:
+            self.last_worker_status = status
+        else:
+            # A failed read is not a main-loop hang. Retain the current
+            # session's last status and its original timeout timestamp.
+            status = self.last_worker_status
         now = time.time()
         fresh = status and 0 <= now - float(status.get("at", 0)) <= 30
         if fresh:

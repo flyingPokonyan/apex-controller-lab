@@ -133,6 +133,10 @@ RESTART_APP_TERMS = (
     "重新启动应用",
 )
 DOWNLOAD_OPTIONS_TERMS = ("downloadoptions", "下载选项")
+EA_UPDATE_RESTART_TERMS = (
+    "theeaapprequiresanupdate", "restartrequired", "eaapp需要更新",
+    "ea应用需要更新", "需要重启", "需要重新启动",
+)
 INSTALL_LOCATION_TERMS = ("installlocation", "安装位置")
 TERMS_OF_PLAY_TERMS = ("termsofplay", "游戏条款")
 INSTALL_COMPLETE_TERMS = ("installationcomplete", "安装完成")
@@ -287,6 +291,8 @@ class WindowsEaHybridDriver:
         self.user32.IsWindow.restype = wintypes.BOOL
         self.user32.IsWindowVisible.argtypes = [wintypes.HWND]
         self.user32.IsWindowVisible.restype = wintypes.BOOL
+        self.user32.IsIconic.argtypes = [wintypes.HWND]
+        self.user32.IsIconic.restype = wintypes.BOOL
         # Default ctypes integer arguments are c_int. A 64-bit HWND does not
         # fit, and GetWindowRect then raises OverflowError inside the
         # EnumWindows callback. That aborts the scan, so the visible EA
@@ -326,17 +332,17 @@ class WindowsEaHybridDriver:
 
     def _ea_window(self) -> int:
         deadline = time.monotonic() + 10.0
+        restored: set[int] = set()
         callback_type = ctypes.WINFUNCTYPE(wintypes.BOOL, wintypes.HWND, wintypes.LPARAM)
         while True:
             matches: list[tuple[int, int]] = []
+            recoverable: list[tuple[int, int]] = []
 
             @callback_type
             def collect(hwnd, _lparam):
                 # An exception here is swallowed by ctypes and returned as
                 # FALSE, which stops EnumWindows before the EA window is seen.
                 try:
-                    if not self.user32.IsWindowVisible(hwnd):
-                        return True
                     process_id = wintypes.DWORD()
                     self.user32.GetWindowThreadProcessId(
                         hwnd, ctypes.byref(process_id)
@@ -346,8 +352,16 @@ class WindowsEaHybridDriver:
                         if self.user32.GetWindowRect(hwnd, ctypes.byref(rect)):
                             width = rect.right - rect.left
                             height = rect.bottom - rect.top
-                            if width >= 480 and height >= 640:
+                            visible = bool(self.user32.IsWindowVisible(hwnd))
+                            iconic = bool(self.user32.IsIconic(hwnd))
+                            main_sized = width >= 480 and height >= 640
+                            if visible and not iconic and main_sized:
                                 matches.append((width * height, int(hwnd)))
+                            elif int(hwnd) not in restored and (iconic or main_sized):
+                                # Minimized windows have icon-sized rectangles;
+                                # hidden tray windows retain their full size.
+                                # Restore before applying the main-window gate.
+                                recoverable.append((width * height, int(hwnd)))
                 except Exception:
                     return True
                 return True
@@ -356,8 +370,14 @@ class WindowsEaHybridDriver:
             if matches:
                 self._hwnd = max(matches)[1]
                 return self._hwnd
+            if recoverable:
+                hwnd = max(recoverable)[1]
+                restored.add(hwnd)
+                self.user32.ShowWindow(hwnd, SW_RESTORE)
+                self.sleep(0.5)
+                continue
             if time.monotonic() >= deadline:
-                raise EaAppAutomationError("没有发现可见的 EA App 主窗口")
+                raise EaAppAutomationError("恢复窗口后仍没有发现可见的 EA App 主窗口")
             self.sleep(0.5)
 
     def _alive(self, hwnd: int | None) -> bool:
@@ -1078,6 +1098,7 @@ class WindowsEaHybridDriver:
         observation: EaObservation | None = None
         for _ in range(8):
             observation = self._observe(hwnd)
+            hwnd, observation = self._handle_app_update(hwnd, observation)
             observation = self._dismiss_cloud_upload_error(hwnd, observation)
             observation = self._dismiss_library_tour(hwnd, observation)
             state = self._state(hwnd, observation)
@@ -1844,10 +1865,59 @@ class WindowsEaHybridDriver:
         self._record("apex-install-complete", completed)
         self.notify("EA App 已显示 Installation complete，无需 Restart app")
 
+    @staticmethod
+    def _app_restart_required(observation: EaObservation) -> bool:
+        _, top, _, bottom = observation.rect
+        header = "".join(
+            token.normalized for token in observation.tokens
+            if token.roi is not None and token.confidence >= 0.70
+            and top <= (token.roi[1] + token.roi[3]) / 2 <= top + (bottom - top) * 0.20
+        )
+        return has_any(header, EA_UPDATE_RESTART_TERMS)
+
+    @staticmethod
+    def _app_restart_point(observation: EaObservation) -> tuple[int, int] | None:
+        if not WindowsEaHybridDriver._app_restart_required(observation):
+            return None
+        # A whole-banner OCR box cannot locate the underlined link. Require
+        # the exact label, including split tokens, or use the Help menu.
+        placed = tuple(t for t in observation.tokens if t.confidence >= 0.70)
+        for term in RESTART_APP_TERMS:
+            for start in range(len(placed)):
+                for size in range(1, 4):
+                    group = placed[start:start + size]
+                    if "".join(t.normalized for t in group) == term:
+                        point = phrase_point(group, observation.rect, term, y_range=(0.0, 0.20))
+                        if point is not None:
+                            return point
+        return None
+
+    def _handle_app_update(self, hwnd: int, observation: EaObservation) -> tuple[int, EaObservation]:
+        if (not self._app_restart_required(observation)
+                or getattr(self, "_update_restart_in_progress", False)
+                or any(self._process_running(name) for name in APEX_EXECUTABLES)):
+            return hwnd, observation
+        self.notify("EA App 需要更新，Apex 已退出，正在重启 EA 后继续当前流程")
+        self._update_restart_in_progress = True
+        try:
+            self.restart_app()
+            hwnd = self._ea_window()
+            updated = self._observe(hwnd)
+            if self._app_restart_required(updated):
+                raise EaAppAutomationError("EA App 重启后仍显示需要更新，保留租约等待处理")
+            return hwnd, updated
+        finally:
+            self._update_restart_in_progress = False
+
     def _request_restart_app(self, hwnd: int) -> None:
         """Select the exact Help -> Restart app action from EA's main menu."""
 
         observation = self._observe(hwnd)
+        restart_point = self._app_restart_point(observation)
+        if restart_point is not None:
+            self._record("restart-requested", observation)
+            self._click_point(hwnd, *restart_point)
+            return
         left, top, right, bottom = observation.rect
         width = max(1, right - left)
         height = max(1, bottom - top)
@@ -2194,6 +2264,7 @@ class WindowsEaHybridDriver:
                     self._record("signout-cloud-sync-closed")
                     return True
                 raise
+            hwnd, observation = self._handle_app_update(hwnd, observation)
             # Sign-out is where a finished run sits after Apex closes. The
             # expired gate is not a session to log out of, but leaving the
             # button unclicked keeps the next login from starting.

@@ -549,6 +549,68 @@ class FakeManagedSession:
 
 
 class AccountOrchestratorTest(unittest.TestCase):
+    def test_target_result_survives_signout_error_and_restart_closes_original_lease(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            lease = FakeAccountProvider.lease("acct_1")
+            provider = FakeAccountProvider([lease])
+            provider.claim("original", "LEVEL_TO_TARGET")
+            store = AtomicCheckpointStore(Path(directory) / "account-cycle-status.json")
+            store.save(OrchestrationCheckpoint(
+                device_id="device_1", workflow_phase=WorkflowPhase.EA_SIGNING_OUT,
+                lease_id=lease.lease_id, lease_fence=lease.lease_fence,
+                account_id=lease.account_id, target_level=20, active_play_run_id="run_1",
+                result_status="TARGET_REACHED",
+                target_reading={"level": 20, "xpCurrentApprox": 100, "xpRequiredApprox": 1000, "localSeq": 8},
+                report_evidence={"runId": "run_1", "lobbyProgressSeq": 10, "runFinishedSeq": 12},
+            ))
+            log = []
+
+            class RecoveringEa(FakeEaDriver):
+                attempts = 0
+
+                def sign_out(self):
+                    self.attempts += 1
+                    if self.attempts == 1:
+                        raise EaAppAutomationError("minimized window")
+                    return super().sign_out()
+
+            driver = RecoveringEa(log, "ea_1")
+            drain = FakeDrain(accepted_through=12)
+
+            def build():
+                return AccountOrchestrator(
+                    provider=provider, ea_driver=driver, play_session=object(),
+                    checkpoint_store=store, device_id="device_1", capture_source=object(),
+                    recover_report_drain=lambda _run: drain,
+                    lease_keeper_factory=lambda _provider, lease, **_kwargs: ScriptedLeaseKeeper(lease),
+                    sleep=lambda _seconds: None, notify=lambda _message: None,
+                )
+
+            first = build()
+            result = first.run_once()
+            self.assertEqual(result.outcome, AccountCycleOutcome.PAUSED)
+            self.assertEqual(result.error_code, "EA_SIGNOUT_FAILED")
+            self.assertEqual(driver.attempts, 1)
+            checkpoint = store.load()
+            self.assertEqual(checkpoint.result_status, "TARGET_REACHED")
+            self.assertEqual(checkpoint.target_reading["level"], 20)
+            self.assertEqual(checkpoint.lease_id, lease.lease_id)
+            self.assertFalse(any(name == "close" for name, _ in provider.calls))
+            first.stop()
+            # Match the overnight outage: the original lease expires while
+            # the app is waiting for a fix, but its target evidence survives.
+            provider._statuses[lease.lease_id] = replace(
+                provider.status(lease.lease_id, lease.lease_fence),
+                state=LeaseState.EXPIRED_UNCONFIRMED,
+            )
+            second = build()
+            second.resume()
+            result = second.run_once()
+            self.assertEqual(result.outcome, AccountCycleOutcome.COMPLETED)
+            self.assertEqual(provider.status(lease.lease_id, lease.lease_fence).state, LeaseState.COMPLETED)
+            self.assertEqual(sum(name == "claim" for name, _ in provider.calls), 1)
+            self.assertFalse(store.load().has_lease)
+
     def test_expired_cleanup_retries_after_network_loss_and_restart_before_claiming(self) -> None:
         for response_lost_after_commit in (False, True):
             with self.subTest(after_commit=response_lost_after_commit), tempfile.TemporaryDirectory() as directory:

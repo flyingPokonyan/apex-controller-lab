@@ -56,6 +56,24 @@ class RuntimeTest(unittest.TestCase):
         thread.join()
         self.assertFalse((self.root / "worker.json").exists())
 
+    def test_recovery_request_does_not_interrupt_cleanup_again(self):
+        self.request("recover")
+        with self.assertRaises(ManagedUpdateRequested):
+            self.runtime.pulse("APEX_PLAYING")
+        self.runtime.pulse("APEX_STOPPING", boundary=True)
+        self.runtime.pulse("EA_SIGNING_OUT", boundary=True)
+        self.runtime.pulse("LEASE_COMPLETING", boundary=True)
+        self.assertEqual(launcher.read_json(self.root / "worker.json")["phase"], "LEASE_COMPLETING")
+        self.assertTrue(self.runtime.requested)
+
+    def test_operator_stop_still_interrupts_recovery_cleanup(self):
+        self.request("recover")
+        with self.assertRaises(ManagedUpdateRequested):
+            self.runtime.pulse("APEX_PLAYING")
+        self.request("stop")
+        with self.assertRaises(KeyboardInterrupt):
+            self.runtime.pulse("EA_SIGNING_OUT", boundary=True)
+
     def test_operator_stop_takes_precedence_over_pending_update(self):
         self.request("recover")
         self.runtime.stop_by_operator()
@@ -186,6 +204,30 @@ class LauncherTest(unittest.TestCase):
     def test_background_lease_activity_does_not_prevent_hang_detection(self):
         self.assertEqual(launcher.update_mode({"phase": "APEX_PLAYING", "at": 1},
                          now=400, started=0, phase_started=0), ("recover", "WORKER_UNRESPONSIVE"))
+
+    def test_failed_status_read_does_not_discard_recent_main_loop_heartbeat(self):
+        self.worker()
+        self.app.started -= 600
+        now = time.time()
+        launcher.write_json(self.app.root / "worker.json", {
+            "session": "current", "pid": 456, "at": now, "phase": "APEX_PLAYING"})
+        self.app.monitor("old")
+        with patch.object(launcher, "read_json", side_effect=PermissionError("temporarily locked")):
+            self.app.monitor("old")
+        self.assertIsNone(self.app.request_mode)
+        self.assertEqual(self.app.state["stage"], "RUNNING")
+        self.assertEqual(self.app.state["workerHeartbeatAt"], now)
+
+    def test_persistent_status_read_failure_still_times_out_last_real_heartbeat(self):
+        self.worker()
+        now = time.time()
+        launcher.write_json(self.app.root / "worker.json", {
+            "session": "current", "pid": 456, "at": now, "phase": "APEX_PLAYING"})
+        self.app.monitor("old")
+        with patch.object(self.app, "worker_status", return_value={}), patch.object(launcher.time, "time", return_value=now + 301):
+            self.app.monitor("old")
+        self.assertEqual(self.app.request_mode, "recover")
+        self.assertEqual(self.app.state["error"], "WORKER_UNRESPONSIVE")
 
     def test_successful_start_without_completed_account_does_not_reset_budget(self):
         self.worker()

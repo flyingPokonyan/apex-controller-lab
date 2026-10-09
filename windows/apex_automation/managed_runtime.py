@@ -79,6 +79,10 @@ class ManagedRuntime:
             return
         if request.get("mode") == "stop":
             raise KeyboardInterrupt("启动器请求停止")
+        if self.requested:
+            # Play already unwound. Keep heartbeats alive during cleanup;
+            # repeating recover here would interrupt the original lease close.
+            return
         if request.get("mode") == "recover" or (boundary and request.get("mode") == "boundary"):
             self.requested = True
             raise ManagedUpdateRequested()
