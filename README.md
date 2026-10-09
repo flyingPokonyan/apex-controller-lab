@@ -21,7 +21,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\install.ps1 -RepoUrl "<仓
 安装到默认目录后，双击
 `%LOCALAPPDATA%\ApexController\apex-controller-lab\windows\account-cycle.cmd` 即可运行。
 此入口会启动独立更新器：后台检查 `origin/main`，正常账号结束后自动更新并继续；
-确认卡住时可提前更新，由新版先恢复遗留任务。首次手工启动会登记当前用户登录后自动启动。
+游戏主循环有响应时等待其恢复或安全收口；EA 故障暂停可提前更新，由新版先恢复遗留任务。首次手工启动会登记当前用户登录后自动启动。
 `windows\update.cmd` 可立即请求检查更新；已有 Runner 运行时不会原地覆盖它的代码。
 
 ## GitHub 与 Windows 更新
@@ -121,9 +121,9 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\install.ps1
 `192.168.*`，请重新下载公网配置或把两个 URL 改为上面的 HTTPS 地址。
 
 任何时候都可以按 `F8` 紧急停止。启动器保留人工停止意图，不会因发现新版而自动开始账号；
-再次双击 `account-cycle.cmd` 表示继续。程序故障会有限重试，同一提交连续失败三次后等待修复，
-但仍检查后续提交。新提交自动带来恢复机会。验证码、身份不一致、未覆盖页面、EA/Apex 更新等
-需要人工判断的问题，仍需修代码或修环境；更新器不会假装这些问题已经解决。
+再次双击 `account-cycle.cmd` 表示继续。可恢复的 EA 环境错误会在安全清理后退避重试，最长间隔五分钟，
+不会因三次账号错误停机。未知程序崩溃同一提交最多重试三次，随后等待修复并继续检查后续提交。
+验证码、人工停止、未确认的租约或报告仍保留保护；身份无法确认时不会开始游戏。
 
 准备长时间无人值守之前，先读
 [EA 自动切号进度 · 挂机运行的环境要求](docs/ea-account-cycle-progress-20260801.md#挂机运行的环境要求)：

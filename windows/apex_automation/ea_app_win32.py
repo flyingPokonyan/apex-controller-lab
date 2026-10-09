@@ -31,6 +31,7 @@ from .ea_app import (
     EaCredentialsRejected,
     EaIdentityFact,
     EaIdentityMismatch,
+    EaIdentityUnconfirmed,
     EaLoginRejected,
     EaOtpUnavailable,
     EaUiState,
@@ -1320,6 +1321,21 @@ class WindowsEaHybridDriver:
             if observation.page not in intermediate:
                 break
             back = self._login_back_point(observation)
+            # A transition frame can identify OTP before its BACK control is
+            # painted. Re-observe briefly; never guess where to click or type.
+            for _ in range(3):
+                if back is not None:
+                    break
+                self.sleep(1.0)
+                observation = self._observe(hwnd)
+                if (observation.page is EaPage.EMAIL
+                        and password_page_blocker(observation.normalized) == "STILL_ON_ACCOUNT_PAGE"):
+                    self._record("signin-account-page-ready", observation)
+                    return observation
+                if observation.page is EaPage.CAPTCHA:
+                    raise EaCaptchaRequired("EA App 出现 Captcha，已暂停")
+                if observation.page in intermediate:
+                    back = self._login_back_point(observation)
             if back is None:
                 self._record("signin-back-missing", observation)
                 raise EaAppAutomationError("EA 登录流程未找到可信 BACK 按钮，未输入新密码")
@@ -1548,6 +1564,7 @@ class WindowsEaHybridDriver:
         seen_pages: set[EaPage] = set()
         otp_attempts = 0
         selected_method: OtpMethod | None = None
+        pending_identity = None
         challenge_started_at = initial_challenge_started_at
         while time.monotonic() < deadline:
             self.sleep(2.0)
@@ -1610,9 +1627,16 @@ class WindowsEaHybridDriver:
             # A login page still on screen is not a badge to read, whatever a
             # corner crop makes of the text sitting there.
             if observation.page in (EaPage.EMAIL, EaPage.PASSWORD):
+                pending_identity = None
                 continue
             identity = self._identity(hwnd)
-            if identity is not None:
+            if identity is not None and identity.verified:
+                # Unknown/loading pages can contain account-shaped UI text.
+                # Require a signed-in surface or a second consistent reading.
+                if (observation.page is not EaPage.SIGNED_IN
+                        and pending_identity != identity.ea_account_id):
+                    pending_identity = identity.ea_account_id
+                    continue
                 self._record(
                     "signed-in",
                     observation,
@@ -1620,6 +1644,7 @@ class WindowsEaHybridDriver:
                     identitySource=identity.source,
                 )
                 return identity
+            pending_identity = None
         self._record("signin-timeout", observation)
         page = "NONE" if observation is None else observation.page.value
         raise EaAppAutomationError(
@@ -1629,12 +1654,20 @@ class WindowsEaHybridDriver:
     def verify_identity(self, expected_ea_account_id: str) -> EaIdentityFact:
         deadline = time.monotonic() + 20.0
         seen: list[str] = []
+        alternate = None
+        alternate_count = 0
         observation: EaObservation | None = None
         while time.monotonic() < deadline:
             hwnd = self._ea_window()
             observation = self._observe(hwnd)
             observation = self._dismiss_library_tour(hwnd, observation)
             self._raise_if_account_banned(hwnd, observation)
+            if observation.page is EaPage.CAPTCHA:
+                raise EaCaptchaRequired("EA App 出现 Captcha，已暂停")
+            if observation.page in PRE_LOGIN_PAGES:
+                alternate, alternate_count = None, 0
+                self.sleep(1.0)
+                continue
             match = self._matching_identity(observation, expected_ea_account_id)
             if match is not None and match.verified:
                 self._record(
@@ -1646,6 +1679,7 @@ class WindowsEaHybridDriver:
             identity = self._identity(hwnd)
             if identity is not None:
                 if identity_matches(expected_ea_account_id, identity.ea_account_id):
+                    alternate, alternate_count = None, 0
                     if identity.verified:
                         self._record(
                             "identity-verified",
@@ -1657,19 +1691,26 @@ class WindowsEaHybridDriver:
                             source=identity.source,
                             verified=True,
                         )
-                elif match is None:
+                elif (match is None and identity.verified
+                      and observation.page is EaPage.SIGNED_IN):
                     seen.append(mask_identity(identity.ea_account_id))
-                    # A badge that reads as a different account is only a
-                    # mismatch once the expected id is nowhere in the window.
-                    if len(seen) >= 3:
+                    alternate_count = alternate_count + 1 if alternate == identity.ea_account_id else 1
+                    alternate = identity.ea_account_id
+                    # Three unrelated or low-confidence OCR guesses do not
+                    # establish a stable alternate identity.
+                    if alternate_count >= 3:
                         self._record("identity-mismatch", observation, observed=seen)
                         raise EaIdentityMismatch(
                             "EA App 当前稳定 EA ID 与租约不一致"
                             f"（观察到 {seen[-1]}）"
                         )
+                else:
+                    alternate, alternate_count = None, 0
+            else:
+                alternate, alternate_count = None, 0
             self.sleep(1.0)
         self._record("identity-timeout", observation, observed=seen or None)
-        raise EaIdentityMismatch(
+        raise EaIdentityUnconfirmed(
             "EA App 页面没有可验证的稳定 EA ID"
             + (f"（观察到 {seen[-1]}）" if seen else "")
         )
@@ -1764,12 +1805,32 @@ class WindowsEaHybridDriver:
                 )
             )
 
+        def installation_in_progress(observation: EaObservation) -> bool:
+            compact = "".join(token.normalized for token in observation.tokens if token.confidence >= 0.8)
+            return ("apexlegends" in compact
+                    and any(term in compact for term in DOWNLOAD_MANAGER_TERMS)
+                    and any(term in compact for term in (
+                        "preparing", "verifying", "repairing", "installing", "downloading",
+                        "正在准备", "正在验证", "正在校验", "正在修复", "正在安装", "正在下载",
+                    )))
+
+        def wait_for_completion() -> None:
+            completed = self._wait_for_observation(
+                hwnd, lambda observation: installation_complete(observation) or apex_play_ready(observation),
+                timeout_s=APEX_INSTALL_REPAIR_TIMEOUT_S,
+                missing_step="apex-install-complete-timeout",
+                error_message="EA App 现有文件登记仍未完成，已保留失败证据",
+            )
+            self._record("apex-install-direct-play" if apex_play_ready(completed) else "apex-install-complete", completed)
+            self.notify("EA App 已显示 Play 或 Installation complete，无需 Restart app")
+
         next_page = self._wait_for_observation(
             hwnd,
             lambda observation: (
                 valid_options(observation)
                 or apex_play_ready(observation)
                 or installation_complete(observation)
+                or installation_in_progress(observation)
             ),
             timeout_s=45.0,
             missing_step="apex-install-first-transition-timeout",
@@ -1788,6 +1849,10 @@ class WindowsEaHybridDriver:
         if installation_complete(next_page):
             self._record("apex-install-complete", next_page)
             self.notify("EA App 已直接完成 D:\\Apex 登记，无需 Restart app")
+            return
+        if installation_in_progress(next_page):
+            self._record("apex-install-progress", next_page)
+            wait_for_completion()
             return
 
         options = next_page
@@ -1813,6 +1878,7 @@ class WindowsEaHybridDriver:
                 self._contains_compact_terms(observation, TERMS_OF_PLAY_TERMS)
                 or apex_play_ready(observation)
                 or installation_complete(observation)
+                or installation_in_progress(observation)
             ),
             timeout_s=45.0,
             missing_step="apex-install-second-transition-timeout",
@@ -1828,6 +1894,10 @@ class WindowsEaHybridDriver:
         if installation_complete(next_page):
             self._record("apex-install-complete", next_page)
             self.notify("EA App 已完成 D:\\Apex 登记，无需 Restart app")
+            return
+        if installation_in_progress(next_page):
+            self._record("apex-install-progress", next_page)
+            wait_for_completion()
             return
 
         terms = next_page
@@ -1845,25 +1915,7 @@ class WindowsEaHybridDriver:
         self._click_point(hwnd, *confirm_download)
         self.notify("EA App 已提交现有文件登记，等待 Installation complete")
 
-        completed = self._wait_for_observation(
-            hwnd,
-            lambda observation: (
-                installation_complete(observation)
-                or apex_play_ready(observation)
-            ),
-            timeout_s=APEX_INSTALL_REPAIR_TIMEOUT_S,
-            missing_step="apex-install-complete-timeout",
-            error_message=(
-                "EA App 在 180 秒内未将 D:\\Apex 登记为已安装，"
-                "已停止自动恢复"
-            ),
-        )
-        if apex_play_ready(completed):
-            self._record("apex-install-direct-play", completed)
-            self.notify("EA App 登记现有文件后已显示 Play，无需 Restart app")
-            return
-        self._record("apex-install-complete", completed)
-        self.notify("EA App 已显示 Installation complete，无需 Restart app")
+        wait_for_completion()
 
     @staticmethod
     def _app_restart_required(observation: EaObservation) -> bool:

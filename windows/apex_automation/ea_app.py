@@ -38,6 +38,18 @@ class EaIdentityMismatch(EaAppAutomationError):
     reason_code = "IDENTITY_MISMATCH"
 
 
+class EaIdentityUnconfirmed(EaAppAutomationError):
+    """OCR could not establish identity; it did not prove a different account."""
+
+    reason_code = "IDENTITY_UNCONFIRMED"
+
+
+RECOVERABLE_EA_FAILURES = frozenset({
+    "EA_UI_UNKNOWN", "IDENTITY_UNCONFIRMED", "IDENTITY_MISMATCH",
+    "APEX_START_FAILED", "OTP_TIMEOUT", "EA_SIGNOUT_FAILED", "CAPTURE_UNAVAILABLE",
+})
+
+
 class EaLoginRejected(EaAppAutomationError):
     """EA answered the credentials with a visible error."""
 

@@ -11,6 +11,7 @@ from .atomic_files import replace_with_retry
 
 
 UPDATE_EXIT = 75
+RETRY_EXIT = 74
 
 
 class ManagedUpdateRequested(BaseException):
@@ -54,17 +55,23 @@ class ManagedRuntime:
         if now < self._next_write and not boundary:
             return
         self._next_write = now + 1.0
-        self.root.mkdir(parents=True, exist_ok=True)
         path = self.root / "worker.json"
         temporary = path.with_suffix(".tmp")
         payload = {"session": self.session, "pid": os.getpid(), "at": time.time(),
                    "phase": self.phase, "blocked": self.blocked, "reason": self.reason,
                    "completed": self.completed, "operatorStopped": self.operator_stopped}
-        with temporary.open("w", encoding="utf-8") as handle:
-            json.dump(payload, handle)
-            handle.flush()
-            os.fsync(handle.fileno())
-        replace_with_retry(temporary, path)
+        try:
+            self.root.mkdir(parents=True, exist_ok=True)
+            with temporary.open("w", encoding="utf-8") as handle:
+                json.dump(payload, handle)
+                handle.flush()
+                os.fsync(handle.fileno())
+            replace_with_retry(temporary, path, attempts=3)
+        except OSError:
+            # This file is liveness telemetry, not a checkpoint. One scanner
+            # collision must not unwind gameplay. Persistent failure still
+            # times out at the launcher using the last real heartbeat.
+            pass
         if self.operator_stopped:
             return
         if self.operator_abort():

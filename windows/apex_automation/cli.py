@@ -33,7 +33,7 @@ from .config import (
 )
 from .control import TaskControl, TaskStopRequested
 from .control_server import LocalControlServer
-from .ea_app import EaAppAutomationError, EaAppDriver, EaUiState, OtpChallenge
+from .ea_app import EaAppAutomationError, EaAppDriver, EaUiState, OtpChallenge, RECOVERABLE_EA_FAILURES
 from .ea_app_win32 import WindowsEaHybridDriver
 from .ea_evidence import EaLoginEvidence, default_evidence_root
 from .diagnostic_reporter import DiagnosticReporter
@@ -45,7 +45,7 @@ from .frame_normalization import (
 )
 from .input_win32 import EmergencyStop, Win32InputSender, Win32SafetyGuard
 from .instance_lock import AlreadyRunningError, SingleInstanceLock
-from .managed_runtime import ManagedRuntime, ManagedUpdateRequested, UPDATE_EXIT
+from .managed_runtime import ManagedRuntime, ManagedUpdateRequested, UPDATE_EXIT, RETRY_EXIT
 from .lease_keeper import LeaseKeeper
 from .observer import ObservationSession
 from .ocr_obstacles import (
@@ -907,6 +907,17 @@ def run_account_cycle(
         return UPDATE_EXIT
     except (EmergencyStop, KeyboardInterrupt):
         return 0
+    except EaAppAutomationError as error:
+        print(f"EA 环境暂不可用：{error.reason_code}：{error}", file=sys.stderr)
+        if maintenance is not None and error.reason_code in RECOVERABLE_EA_FAILURES:
+            try:
+                maintenance.pulse(blocked=True, reason=error.reason_code, boundary=True)
+            except ManagedUpdateRequested:
+                return UPDATE_EXIT
+            except (EmergencyStop, KeyboardInterrupt):
+                return 0
+            return RETRY_EXIT
+        return 1
     except Exception as error:
         print(f"account-cycle 启动失败：{error}", file=sys.stderr)
         return 1

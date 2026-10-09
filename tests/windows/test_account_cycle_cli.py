@@ -205,6 +205,30 @@ class AccountCycleCliTest(unittest.TestCase):
         driver.preflight.assert_not_called()
         provider.claim.assert_not_called()
 
+    def test_managed_ea_preflight_error_cools_down_without_claiming(self):
+        from apex_automation.ea_app import EaAppAutomationError, EaCaptchaRequired
+        from apex_automation.managed_runtime import ManagedRuntime, RETRY_EXIT
+        settings = RunnerSettings(enabled=True, device_id="device_1")
+        provider = Mock()
+        provider.current.return_value = None
+        capture = Mock(__enter__=Mock(return_value=Mock()), __exit__=Mock(return_value=False))
+        for error, expected in ((EaAppAutomationError("not ready"), RETRY_EXIT), (EaCaptchaRequired("captcha"), 1)):
+            with self.subTest(error=type(error).__name__):
+                driver = Mock()
+                driver.preflight.side_effect = error
+                runtime = ManagedRuntime(cli.REPOSITORY_ROOT / "managed", "session")
+                with (
+                    patch.object(cli.sys, "platform", "win32"),
+                    patch.object(cli, "load_config", return_value=self.config()),
+                    patch.object(cli, "load_runner_settings", return_value=settings),
+                    patch.object(cli.ManagedRuntime, "from_environment", return_value=runtime),
+                    patch.object(cli, "DxcamFrameSource", return_value=capture),
+                ):
+                    code = cli.run_account_cycle(Path("managed.json"), provider=provider,
+                                                ea_driver=driver, play_session=Mock())
+                self.assertEqual(code, expected)
+                provider.claim.assert_not_called()
+
 
 if __name__ == "__main__":
     unittest.main()

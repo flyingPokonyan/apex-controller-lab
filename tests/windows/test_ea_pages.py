@@ -974,6 +974,31 @@ class EaLaunchRecoveryTest(unittest.TestCase):
             ],
         )
 
+    def test_file_verification_after_next_is_allowed_to_finish(self) -> None:
+        download = self.observation(("DOWNLOAD", 975, 535))
+        options = self.observation(
+            ("Download options", 900, 350), ("INSTALL LOCATION", 850, 480),
+            (r"D:\Apex", 860, 535), ("NEXT", 1200, 830))
+        progress = self.observation(("Download manager", 850, 300),
+            ("Apex Legends", 750, 620), ("Verifying files", 750, 660))
+        complete = self.observation(("Download manager", 850, 300),
+            ("Apex Legends", 750, 620), ("Completed", 750, 660))
+        clock = [0.0]
+        frames = [download, options, progress]
+        clicks, records = [], []
+        driver = self.driver(frames, clicks, records)
+        driver._observe = lambda _hwnd: frames.pop(0) if frames else (progress if clock[0] < 60 else complete)
+        driver.sleep = lambda seconds: clock.__setitem__(0, clock[0] + seconds)
+        driver.apex_install_dir = Path(r"D:\Apex")
+        driver._installed_apex_copy_exists = lambda: True
+        from unittest.mock import patch
+        with patch("apex_automation.ea_app_win32.time.monotonic", side_effect=lambda: clock[0]):
+            driver.repair_apex_installation()
+        self.assertGreaterEqual(clock[0], 60)
+        self.assertEqual(clicks, [(975, 535), (1200, 830)])
+        self.assertIn("apex-install-progress", records)
+        self.assertEqual(records[-1], "apex-install-complete")
+
     def test_download_flow_accepts_play_after_terms(self) -> None:
         download_page = self.observation(("DOWNLOAD", 975, 535))
         options = self.observation(

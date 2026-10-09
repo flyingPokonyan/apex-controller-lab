@@ -19,6 +19,7 @@ import time
 import uuid
 
 UPDATE_EXIT = 75
+RETRY_EXIT = 74
 RELOAD_EXIT = 76
 BUSY_EXIT = 73
 MAX_FAILURES = 3
@@ -237,11 +238,12 @@ def update_mode(status, *, now, started, phase_started, unresponsive_s=300):
     last = float(status.get("at", started))
     if now - last > unresponsive_s:
         return "recover", "WORKER_UNRESPONSIVE"
+    # The game's own state machine owns stall recovery and safe termination.
+    # An update must not race that recovery while its main loop is responding.
+    if status.get("phase") == "APEX_PLAYING":
+        return "boundary", None
     if status.get("blocked"):
         return "recover", str(status.get("reason") or "WORKER_BLOCKED")
-    phase = status.get("phase", "STARTING")
-    if phase not in {"APEX_PLAYING", "BETWEEN_ACCOUNTS"} and now - phase_started > 600:
-        return "recover", "WORKFLOW_NOT_ADVANCING"
     return "boundary", None
 
 
@@ -253,6 +255,7 @@ class Launcher:
         self.state_path = self.root / "launcher.json"
         self.state = read_json(self.state_path)
         self.state.setdefault("failures", {})
+        self.state.setdefault("recoveryFailures", {})
         self.worker = None
         self.job = None
         self.session = None
@@ -263,7 +266,7 @@ class Launcher:
         self.requested_at = None
         self.request_mode = None
         self.completed = 0
-        self.next_start = 0.0
+        self.next_start = time.monotonic() + max(0, float(self.state.get("retryAfter", 0)) - time.time())
         self._last_notice = None
         self._next_status = 0.0
         self.publisher = publisher
@@ -301,7 +304,8 @@ class Launcher:
             self.save("INSTALLING", installPending=True, target=target, error=None)
             self.repo.fast_forward(target)
             digest = self.repo.install(self.state)
-            self.save("INSTALLED", installed=target, installedAt=time.time(), dependencies=digest, installPending=False, error=None)
+            self.next_start = 0
+            self.save("INSTALLED", installed=target, installedAt=time.time(), dependencies=digest, installPending=False, error=None, retryAfter=0)
 
     def needs_reload(self):
         return self.source_digest() != self.launcher_digest
@@ -369,7 +373,8 @@ class Launcher:
         code = self.worker.poll()
         commit = self.state["running"]
         if code is not None:
-            operator_stopped = self.worker_status().get("operatorStopped")
+            final_status = self.worker_status() or self.last_worker_status
+            operator_stopped = final_status.get("operatorStopped")
             if self.job:
                 self.job.close()
             self.worker = self.job = None
@@ -378,6 +383,14 @@ class Launcher:
             elif code == BUSY_EXIT:
                 self.next_start = time.monotonic() + 30
                 self.save("WAITING_LOCAL_RUNNER", pid=None, error=None)
+            elif code == RETRY_EXIT:
+                attempts = int(self.state["recoveryFailures"].get(commit, 0)) + 1
+                self.state["recoveryFailures"][commit] = attempts
+                self.state["recoveryFailures"] = dict(list(self.state["recoveryFailures"].items())[-32:])
+                delay = min(300, 30 * 2 ** min(attempts - 1, 4))
+                self.next_start = time.monotonic() + delay
+                self.save("WAITING_RETRY", pid=None, retryAfter=time.time() + delay,
+                          error=final_status.get("reason") or "RECOVERABLE_ENVIRONMENT_ERROR")
             elif code == UPDATE_EXIT and self.request_mode is not None and target and target != commit:
                 self.save("UPDATE_READY", pid=None, error=None)
             else:
@@ -411,6 +424,8 @@ class Launcher:
         if completed > self.completed:
             self.completed = completed
             self.state["failures"][commit] = 0
+            self.state["recoveryFailures"][commit] = 0
+            self.state["retryAfter"] = 0
             self.save("RUNNING", error=None)
         mode, reason = update_mode(status, now=time.time(), started=self.started, phase_started=self.phase_started)
         if self.state.get("operatorStopped"):
@@ -422,7 +437,11 @@ class Launcher:
             self.request("recover")
             self.save("RECOVERING_UNRESPONSIVE", error=reason)
         if self.requested_at is not None and time.monotonic() - self.requested_at > 90:
-            terminate_owned(self.worker)
+            cleanup_responding = (self.request_mode == "recover" and fresh
+                and phase in {"APEX_STOPPING", "EA_SIGNING_OUT", "LEASE_COMPLETING"}
+                and time.monotonic() - self.requested_at <= 600)
+            if not cleanup_responding:
+                terminate_owned(self.worker)
             # poll() then records a failed attempt on the next iteration.
         if time.monotonic() >= self._next_status:
             self._next_status = time.monotonic() + 10
@@ -445,6 +464,9 @@ class Launcher:
         if resume:
             self.state["operatorStopped"] = False
             self.state["failures"] = {}
+            self.state["recoveryFailures"] = {}
+            self.state["retryAfter"] = 0
+            self.next_start = 0
         target = None
         next_fetch = 0.0
         next_install = 0.0
@@ -468,6 +490,8 @@ class Launcher:
                     if control.get("resume"):
                         self.state["operatorStopped"] = False
                         self.state["failures"] = {}
+                        self.state["recoveryFailures"] = {}
+                        self.state["retryAfter"] = 0
                         self.next_start = 0
                     check_now.unlink(missing_ok=True)
                     next_fetch = 0
@@ -479,7 +503,9 @@ class Launcher:
                     try:
                         fetched = future.result()
                         if fetched != target:
-                            next_install = self.next_start = 0
+                            next_install = 0
+                            if fetched != self.state.get("installed"):
+                                self.next_start = 0
                         target = fetched
                         self.save(self.state["stage"], target=target, lastCheckedAt=time.time(), checkError=None)
                     except Exception as error:

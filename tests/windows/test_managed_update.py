@@ -189,9 +189,9 @@ class LauncherTest(unittest.TestCase):
                                            now=10000, started=0, phase_started=0)
         self.assertEqual((mode, reason), ("boundary", None))
 
-    def test_confirmed_stall_allows_early_update(self):
+    def test_update_waits_for_responsive_game_to_finish_its_own_stall_recovery(self):
         self.assertEqual(launcher.update_mode({"phase": "APEX_PLAYING", "at": 9, "blocked": True},
-                         now=10, started=0, phase_started=0)[0], "recover")
+                         now=10, started=0, phase_started=0)[0], "boundary")
 
     def test_shutdown_request_is_not_withdrawn_by_a_later_good_frame(self):
         self.app.session = "session"

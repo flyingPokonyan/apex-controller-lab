@@ -127,7 +127,7 @@ class LoginResetTest(unittest.TestCase):
         for confidence, box in ((.40, (967, 347, 1045, 375)), (.99, None)):
             with self.subTest(confidence=confidence, box=box):
                 observation = replace(self.rejected, tokens=(OcrToken("BACK", confidence, box),))
-                driver = self.driver([observation])
+                driver = self.driver([observation], repeat=observation)
                 with self.assertRaises(EaAppAutomationError):
                     self.sign_in(driver)
                 self.assertEqual(self.events, [])
@@ -139,6 +139,12 @@ class LoginResetTest(unittest.TestCase):
             self.sign_in(driver)
         self.assertEqual([e[0] for e in self.events], ["back"] * 4)
         self.assertEqual(self.records[-1], "signin-account-reset-failed")
+
+    def test_transient_otp_frame_without_back_waits_for_account_page(self):
+        otp = replace(self.password, tokens=(), page=EaPage.OTP)
+        driver = self.driver([otp, self.email])
+        self.sign_in(driver)
+        self.assertEqual([e[0] for e in self.events], ["identifier", "password", "await"])
 
     def test_captcha_after_back_stops_without_typing(self):
         captcha = replace(self.password, page=EaPage.CAPTCHA)

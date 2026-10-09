@@ -549,6 +549,134 @@ class FakeManagedSession:
 
 
 class AccountOrchestratorTest(unittest.TestCase):
+    def test_cleanup_retries_past_three_restarts_before_claiming_another_account(self) -> None:
+        from unittest.mock import Mock
+        import managed_launcher
+        from apex_automation.managed_runtime import ManagedRuntime, RETRY_EXIT
+
+        class NextClaimReached(BaseException):
+            pass
+
+        for failure in ("stop-timeout", "stop-error", "signout-error"):
+            with self.subTest(failure=failure), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                old = FakeAccountProvider.lease("old")
+                next_lease = FakeAccountProvider.lease("next")
+                case = self
+
+                class Provider(FakeAccountProvider):
+                    def claim(self, request_id, task_type):
+                        if request_id != "original":
+                            case.assertTrue(self.status(old.lease_id, old.lease_fence).terminal)
+                            claimed = super().claim(request_id, task_type)
+                            case.assertEqual(claimed.lease_id, next_lease.lease_id)
+                            raise NextClaimReached()
+                        return super().claim(request_id, task_type)
+
+                provider = Provider([old, next_lease])
+                provider.claim("original", "LEVEL_TO_TARGET")
+                store = AtomicCheckpointStore(root / "checkpoint.json")
+                store.save(OrchestrationCheckpoint(
+                    device_id="test", workflow_phase=WorkflowPhase.APEX_STARTING,
+                    lease_id=old.lease_id, lease_fence=old.lease_fence,
+                    account_id=old.account_id, target_level=20,
+                ))
+
+                class RecoveringEa(FakeEaDriver):
+                    attempts = 0
+
+                    def stop_apex(self):
+                        if failure != "signout-error":
+                            self.attempts += 1
+                            if self.attempts <= 4:
+                                if failure == "stop-error":
+                                    raise EaAppAutomationError("temporary window failure")
+                                return ApexExitEvidence(True, False)
+                        return super().stop_apex()
+
+                    def sign_out(self):
+                        if failure == "signout-error":
+                            self.attempts += 1
+                            if self.attempts <= 4:
+                                raise EaAppAutomationError("temporary signout failure")
+                        return super().sign_out()
+
+                driver = RecoveringEa([], "old")
+                runtime = ManagedRuntime(root / "managed", "fixture")
+                launcher = managed_launcher.Launcher(Mock(root=root), root=runtime.root)
+                launcher.session = "fixture"
+
+                def build():
+                    return AccountOrchestrator(
+                        provider=provider, ea_driver=driver, play_session=object(),
+                        checkpoint_store=store, device_id="test", capture_source=object(),
+                        lease_keeper_factory=lambda _provider, lease, **_kwargs: ScriptedLeaseKeeper(lease),
+                        sleep=lambda _seconds: None, notify=lambda _message: None, maintenance=runtime,
+                    )
+
+                for _ in range(4):
+                    worker = build()
+                    try:
+                        code = worker.run_forever()
+                    finally:
+                        worker.stop()
+                    self.assertEqual(code, RETRY_EXIT)
+                    self.assertEqual(store.load().lease_id, old.lease_id)
+                    self.assertEqual(sum(name == "claim" for name, _ in provider.calls), 1)
+                    self.assertFalse(any(name == "close" for name, _ in provider.calls))
+                    launcher.worker = Mock(pid=123)
+                    launcher.worker.poll.return_value = code
+                    launcher.state["running"] = "same-commit"
+                    launcher.monitor("same-commit")
+                    self.assertEqual(launcher.state["failures"], {})
+                    self.assertEqual(launcher.state["stage"], "WAITING_RETRY")
+
+                worker = build()
+                try:
+                    with self.assertRaises(NextClaimReached):
+                        worker.run_forever()
+                finally:
+                    worker.stop()
+                self.assertEqual(driver.attempts, 5)
+                self.assertEqual(sum(name == "close" for name, _ in provider.calls), 1)
+                self.assertEqual(sum(name == "claim" for name, _ in provider.calls), 2)
+
+    def test_unconfirmed_input_cleanup_after_play_does_not_take_environment_retry_path(self) -> None:
+        from apex_automation.managed_runtime import ManagedRuntime
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            lease = FakeAccountProvider.lease("old")
+            provider = FakeAccountProvider([lease])
+            provider.claim("original", "LEVEL_TO_TARGET")
+            store = AtomicCheckpointStore(root / "checkpoint.json")
+            store.save(OrchestrationCheckpoint(
+                device_id="test", workflow_phase=WorkflowPhase.APEX_STOPPING,
+                lease_id=lease.lease_id, lease_fence=lease.lease_fence,
+                account_id=lease.account_id, target_level=20, active_play_run_id="run_1",
+                result_status="FAILED", result_error_code="SESSION_CLEANUP_FAILED",
+                report_evidence={"runId": "run_1", "runFinishedSeq": 1},
+            ))
+            # The first pass stops in EA_SIGNING_OUT. A restart must retain
+            # the failed input cleanup instead of manufacturing success.
+            for _ in range(2):
+                worker = AccountOrchestrator(
+                    provider=provider, ea_driver=FakeEaDriver([], "old"), play_session=object(),
+                    checkpoint_store=store, device_id="test", capture_source=object(),
+                    recover_report_drain=lambda _run: FakeDrain(accepted_through=1),
+                    lease_keeper_factory=lambda _provider, lease, **_kwargs: ScriptedLeaseKeeper(lease),
+                    sleep=lambda _seconds: None, notify=lambda _message: None,
+                    maintenance=ManagedRuntime(root / "managed", "fixture"),
+                )
+                try:
+                    self.assertEqual(worker.run_forever(), 1)
+                finally:
+                    worker.stop()
+                self.assertEqual(store.load().last_error_code, "CLEANUP_UNCONFIRMED")
+                self.assertEqual(store.load().lease_id, lease.lease_id)
+                self.assertFalse(any(name == "close" for name, _ in provider.calls))
+                self.assertEqual(sum(name == "claim" for name, _ in provider.calls), 1)
+
     def test_target_result_survives_signout_error_and_restart_closes_original_lease(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             lease = FakeAccountProvider.lease("acct_1")

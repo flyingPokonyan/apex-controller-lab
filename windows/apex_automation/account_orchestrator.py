@@ -31,6 +31,7 @@ from .ea_app import (
     EaIdentityFact,
     OtpChallenge,
     is_account_ban_reason,
+    RECOVERABLE_EA_FAILURES,
 )
 from .ea_pages import identity_matches
 from .lease_keeper import LeaseKeeper, LeaseKeeperSnapshot, LeaseKeeperState
@@ -811,6 +812,10 @@ class AccountOrchestrator:
         evidence: CompletionEvidence | None,
         cleanup: CleanupEvidence,
     ) -> AccountCycleResult:
+        # Restarting the sign-out step must not erase a recorded input-release
+        # failure by rebuilding cleanup evidence with optimistic defaults.
+        if result.error_code == "SESSION_CLEANUP_FAILED" or not cleanup.complete:
+            return self._pause("CLEANUP_UNCONFIRMED", manual=True)
         # The renewal worker must not overwrite the persisted CLOSE operation
         # with its own pending RENEW while network recovery is in progress.
         if self._lease_keeper is not None:
@@ -1243,10 +1248,25 @@ class AccountOrchestrator:
         return self.resume()
 
     def run_forever(self, *, idle_s: float = 30.0) -> int:
+        recovery_failures = 0
         while not self._stop.is_set():
             result = self.run_once()
             if result.outcome is AccountCycleOutcome.PAUSED:
                 if self._checkpoint.run_state is OrchestratorRunState.PAUSED_MANUAL:
+                    cleanup_retryable = self._checkpoint.has_lease and (
+                        result.error_code == "APEX_EXIT_TIMEOUT"
+                        or (result.error_code == "CLEANUP_UNCONFIRMED"
+                            and self._checkpoint.active_play_run_id is None
+                            and self._checkpoint.result_status is None)
+                    )
+                    if self.maintenance is not None and (
+                        result.error_code in RECOVERABLE_EA_FAILURES or cleanup_retryable
+                    ):
+                        # Restart recovery must retain and reconcile this same
+                        # lease before any new claim. This is not a bad build.
+                        from .managed_runtime import RETRY_EXIT
+                        self.maintenance.pulse(blocked=True, reason=result.error_code, boundary=True)
+                        return RETRY_EXIT
                     if self.maintenance is not None and result.error_code not in self.SERVER_RELEASABLE_PAUSES and result.error_code != "RUNNER_PAUSED":
                         # Let the independent launcher bound failures by commit;
                         # do not erase a UI failure and burn the next account.
@@ -1291,7 +1311,22 @@ class AccountOrchestrator:
                 return 0
             if self.maintenance is not None and result.outcome is AccountCycleOutcome.COMPLETED:
                 if result.error_code is None:
+                    recovery_failures = 0
                     self.maintenance.success()
+                elif result.error_code in RECOVERABLE_EA_FAILURES or result.error_code in {
+                    "STALL_UNRECOVERED", "KNOWN_STATE_STALL_UNRECOVERED", "FOREGROUND_UNRECOVERED"
+                }:
+                    # COMPLETED alone is not enough: the local checkpoint must
+                    # also prove that cleanup and remote close have finished.
+                    if self._checkpoint.lease_id is not None or self._checkpoint.pending_operation is not None:
+                        return 1
+                    recovery_failures += 1
+                    delay = min(300.0, max(30.0, idle_s) * 2 ** min(recovery_failures - 1, 4))
+                    self.maintenance.pulse("RECOVERY_WAIT", blocked=True, reason=result.error_code, boundary=True)
+                    self.notify(f"账号已安全收口：{result.error_code}；{delay:g} 秒后自动重试")
+                    self.sleep(delay)
+                    self.maintenance.pulse("BETWEEN_ACCOUNTS", blocked=False, boundary=True)
+                    continue
                 elif not (is_account_ban_reason(result.error_code) or result.error_code in {
                     EaCredentialsRejected.reason_code, "RESTART_RECOVERY", "LEASE_UNRECOVERED"
                 }):
