@@ -29,6 +29,7 @@ from .ea_app import (
     EaAppDriver,
     EaCredentialsRejected,
     EaIdentityFact,
+    EaUiRecoveryExhausted,
     OtpChallenge,
     is_account_ban_reason,
     RECOVERABLE_EA_FAILURES,
@@ -145,10 +146,25 @@ class AccountOrchestrator:
         self._checkpoint_lock = threading.Lock()
         self._provider_operation_lock = threading.RLock()
         self._checkpoint = self._load_checkpoint()
+        self._bind_evidence_lease()
+        configure = getattr(self.ea_driver, "configure_ui_recovery", None)
+        if callable(configure):
+            configure(self._reserve_ui_recovery)
         self._restart_recovery_pending = self._checkpoint.has_lease
         self._stop = threading.Event()
         self._lease_keeper: LeaseKeeper | None = None
         self._report_drain: ReportDrainHandle | None = None
+
+    def _bind_evidence_lease(self):
+        bind = getattr(getattr(self.ea_driver, "evidence", None), "bind_lease", None)
+        if callable(bind):
+            bind(self._checkpoint.lease_id)
+
+    def _reserve_ui_recovery(self, operation):
+        if operation in self._checkpoint.ea_recovery_steps:
+            return False
+        self._update_checkpoint(ea_recovery_steps=(*self._checkpoint.ea_recovery_steps, operation))
+        return True
 
     def _load_checkpoint(self) -> OrchestrationCheckpoint:
         checkpoint = self.checkpoint_store.load()
@@ -178,6 +194,7 @@ class AccountOrchestrator:
                 except Exception:
                     pass
                 self._phase_started_at = now
+            self._bind_evidence_lease()
             return self._checkpoint
 
     def _phase(self) -> str:
@@ -249,12 +266,14 @@ class AccountOrchestrator:
             result_error_code=None,
             cleanup_verified_at=None,
             last_error_code=None,
+            ea_recovery_steps=(),
         )
 
     def _clear_lease_checkpoint(self) -> None:
         completed = self.checkpoint_store.clear_completed_lease(self._checkpoint)
         with self._checkpoint_lock:
             self._checkpoint = completed
+            self._bind_evidence_lease()
 
     def _stop_lease_runtime(self) -> None:
         if self._report_drain is not None:
@@ -607,6 +626,8 @@ class AccountOrchestrator:
             self.notify("EA App 仍停留在上一账号或封禁页，正在退出后换号")
             try:
                 signed_out = self.ea_driver.sign_out()
+            except EaUiRecoveryExhausted:
+                raise
             except EaAppAutomationError:
                 signed_out = False
             if not signed_out:
@@ -785,6 +806,8 @@ class AccountOrchestrator:
             except EaAccountBanned as error:
                 reason_code = error.reason_code
                 signed_out = True
+            except EaUiRecoveryExhausted as error:
+                return self._pause(error.reason_code, manual=True)
             except EaAppAutomationError:
                 return self._pause("EA_SIGNOUT_FAILED", manual=True)
             if is_account_ban_reason(reason_code):
@@ -1048,6 +1071,7 @@ class AccountOrchestrator:
             self._restart_recovery_pending
             and self._checkpoint.has_lease
             and self._checkpoint.run_state is not OrchestratorRunState.ACTIVE
+            and self._checkpoint.last_error_code != "EA_RECOVERY_EXHAUSTED"
         ):
             previous = self._checkpoint.last_error_code
             self._update_checkpoint(
@@ -1215,6 +1239,8 @@ class AccountOrchestrator:
             self.notify(
                 f"EA 自动化失败：{error.reason_code} @ {self._phase()}：{error}"
             )
+            if isinstance(error, EaUiRecoveryExhausted):
+                return self._pause(error.reason_code, manual=True)
             if self._checkpoint.workflow_phase in {
                 WorkflowPhase.APEX_STOPPING,
                 WorkflowPhase.EA_SIGNING_OUT,
@@ -1257,6 +1283,7 @@ class AccountOrchestrator:
             run_state=OrchestratorRunState.ACTIVE,
             resume_phase=None,
             last_error_code=None,
+            ea_recovery_steps=(),
         )
         self.notify(f"已清除本地暂停状态（原因 {previous or '未记录'}）")
         return True
@@ -1272,7 +1299,7 @@ class AccountOrchestrator:
 
         if self._checkpoint.run_state is OrchestratorRunState.ACTIVE:
             return False
-        if self._checkpoint.has_lease:
+        if self._checkpoint.has_lease or self._checkpoint.last_error_code == "EA_RECOVERY_EXHAUSTED":
             return False
         return self.resume()
 

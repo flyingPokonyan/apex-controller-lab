@@ -76,7 +76,7 @@ class AccountCycleCliTest(unittest.TestCase):
         capture.__enter__ = Mock(return_value=Mock())
         capture.__exit__ = Mock(return_value=False)
         driver = Mock()
-        driver.preflight.side_effect = RuntimeError("preflight failed")
+        driver.ensure_started.side_effect = RuntimeError("preflight failed")
 
         with (
             patch.object(cli.sys, "platform", "win32"),
@@ -109,7 +109,7 @@ class AccountCycleCliTest(unittest.TestCase):
             client_version=cli.__version__,
         )
         build_session.assert_called_once()
-        driver.preflight.assert_called_once_with()
+        driver.ensure_started.assert_called_once_with()
         provider.claim.assert_not_called()
         provider.current.assert_not_called()
         self.diagnostics.start.assert_called_once_with()
@@ -164,7 +164,7 @@ class AccountCycleCliTest(unittest.TestCase):
         store.save(OrchestrationCheckpoint(device_id="device_1", lease_id="existing", lease_fence=1, account_id="acct"))
         capture = Mock(__enter__=Mock(return_value=Mock()), __exit__=Mock(return_value=False))
         driver = Mock()
-        driver.preflight.side_effect = AssertionError("Recovery must happen before preflight")
+        driver.ensure_started.side_effect = AssertionError("Recovery must happen before preflight")
         orchestrator = Mock()
         orchestrator.run_forever.return_value = 0
         runtime = ManagedRuntime(cli.REPOSITORY_ROOT / "managed", "session")
@@ -178,7 +178,7 @@ class AccountCycleCliTest(unittest.TestCase):
         ):
             self.assertEqual(cli.run_account_cycle(Path("managed.json"), provider=Mock(),
                                                  ea_driver=driver, play_session=Mock()), 0)
-        driver.preflight.assert_not_called()
+        driver.ensure_started.assert_not_called()
         orchestrator.run_forever.assert_called_once()
 
     def test_network_outage_at_startup_retries_instead_of_using_failure_budget(self):
@@ -202,7 +202,7 @@ class AccountCycleCliTest(unittest.TestCase):
                                          ea_driver=driver, play_session=Mock())
         self.assertEqual(code, UPDATE_EXIT)
         runtime.sleep.assert_called_once_with(30)
-        driver.preflight.assert_not_called()
+        driver.ensure_started.assert_not_called()
         provider.claim.assert_not_called()
 
     def test_managed_ea_preflight_error_cools_down_without_claiming(self):
@@ -215,7 +215,7 @@ class AccountCycleCliTest(unittest.TestCase):
         for error, expected in ((EaAppAutomationError("not ready"), RETRY_EXIT), (EaCaptchaRequired("captcha"), 1)):
             with self.subTest(error=type(error).__name__):
                 driver = Mock()
-                driver.preflight.side_effect = error
+                driver.ensure_started.side_effect = error
                 runtime = ManagedRuntime(cli.REPOSITORY_ROOT / "managed", "session")
                 with (
                     patch.object(cli.sys, "platform", "win32"),

@@ -79,7 +79,7 @@ class LoginResetTest(unittest.TestCase):
         return driver
 
     def sign_in(self, driver):
-        return driver.sign_in(self.credentials, lambda _challenge: None)
+        return driver._sign_in_once(self.credentials, lambda _challenge: None)
 
     def test_actual_rejection_is_a_password_page_with_a_back_button(self):
         self.assertEqual(classify_page(self.rejected.normalized), EaPage.PASSWORD)
@@ -260,16 +260,22 @@ class LoginResetTest(unittest.TestCase):
                     if echoed else ()
                 ))
                 driver._observe = lambda _hwnd: typed
-                driver._click_target = lambda *_args, **_kwargs: "fixture"
+                driver._click_login_field = lambda *_args, **_kwargs: "fixture"
                 driver._clear_focused_field = lambda: None
                 driver._type_secret = lambda _text: None
                 driver._submit = lambda *_args: "anchor"
                 driver._wait_for_page = lambda *_args, **_kwargs: self.password
                 driver._login_identifier_verified = not echoed
-                result = WindowsEaHybridDriver._submit_login_identifier(
-                    driver, 1, self.email, self.credentials,
-                )
-                self.assertIs(result, self.password)
+                if echoed:
+                    result = WindowsEaHybridDriver._submit_login_identifier(
+                        driver, 1, self.email, self.credentials,
+                    )
+                    self.assertIs(result, self.password)
+                else:
+                    with self.assertRaisesRegex(EaAppAutomationError, "未确认账号"):
+                        WindowsEaHybridDriver._submit_login_identifier(
+                            driver, 1, self.email, self.credentials,
+                        )
                 self.assertEqual(driver._login_identifier_verified, echoed)
 
 

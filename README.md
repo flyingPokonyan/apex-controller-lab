@@ -250,8 +250,14 @@ checkpoint、续租、终态恢复和真实 Provider HTTP 已经实现；EA App 
 
 调试登录不要用 `account-cycle.cmd`：它是持续循环，一次失败清理完就会去领下一个真实
 账号。改用 `windows\ea-login-check.cmd`，它只领一个租约、只验证登录、不启动 Apex，
-无论成功失败都会关闭租约并退出，并把每一步的页面判定、点击定位方式和脱敏截图留在
-`windows\runs\ea-login\<时间戳>\`。证据里不含邮箱全文、密码、Token 或 OTP。
+无论成功失败都会关闭租约并退出，并把每一步的页面判定、点击定位方式和完整桌面截图留在
+`windows\runs\ea-login\<时间戳>\`。EA 截图保留原始可见内容，不裁剪、不打码；文字日志仍不记录凭据。
+托管运行会独立上传 EA 登录和恢复画面，不要求先进入游戏。Forge 的 Runner 名称和租约详情
+可查看截图；服务端保留最近 24 小时、每台最多 100 张，本机待上传队列最多 64 张。
+点击返回、退出或会话过期按钮后会检查页面是否真的变化。页面仍卡住时，每份租约的预检、
+登录、退出阶段各允许一次 EA 重启恢复；仍失败则保留租约并暂停，不继续领号。
+恢复次数写入 checkpoint，重启 Worker 不会刷新；处理页面后可通过显式 resume 重置。
+
 需要控件树时，让 EA App 停在登录页后双击 `windows\probe-ea-uia.cmd`，脱敏结果保存到
 `windows\runs\ea-uia-*.txt`。
 
@@ -290,7 +296,7 @@ checkpoint、续租、终态恢复和真实 Provider HTTP 已经实现；EA App 
 
 运行状态可从 `windows/runs/status.json` 查看。每次会话使用唯一目录，`events.jsonl`
 是本地权威事件流；启用远程上报后还会生成连续序号的 `report-outbox.jsonl` 和确认游标，
-Token 不会写入这些文件、manifest、截图或错误事件。
+Token 不会写入这些文本文件、manifest 或错误事件；EA 原始桌面截图保留屏幕上可见的内容。
 
 ## 观察模式（标定用）
 

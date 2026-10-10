@@ -8,6 +8,7 @@ from pathlib import Path
 import subprocess
 import sys
 import time
+import unicodedata
 from typing import Callable, Sequence
 import uuid
 
@@ -35,6 +36,7 @@ from .ea_app import (
     EaLoginRejected,
     EaOtpUnavailable,
     EaUiState,
+    EaUiRecoveryExhausted,
     OtpChallenge,
 )
 from .ea_evidence import EaLoginEvidence
@@ -321,6 +323,9 @@ class WindowsEaHybridDriver(EaPasswordRecoveryMixin):
             self.user32.SetProcessDPIAware()
 
     def _process_name(self, process_id: int) -> str:
+        return Path(self._process_path(process_id)).name.lower()
+
+    def _process_path(self, process_id: int) -> str:
         process = self.kernel32.OpenProcess(0x1000, False, process_id)
         if not process:
             return ""
@@ -331,7 +336,7 @@ class WindowsEaHybridDriver(EaPasswordRecoveryMixin):
                 process, 0, buffer, ctypes.byref(size)
             ):
                 return ""
-            return Path(buffer.value).name.lower()
+            return buffer.value
         finally:
             self.kernel32.CloseHandle(process)
 
@@ -707,6 +712,90 @@ class WindowsEaHybridDriver(EaPasswordRecoveryMixin):
         self._click_point(hwnd, *point)
         return "anchor"
 
+    @classmethod
+    def _login_field_anchor(
+        cls, observation: EaObservation, *, password: bool = False,
+    ) -> tuple[tuple[int, int], str] | None:
+        """Target the editable row, never its label or the page heading."""
+        labels = ("password", "密码") if password else ACCOUNT_FIELD_TERMS
+        placeholders = (("enteryourpassword", "请输入密码", "输入密码") if password else
+                        ("enteryouremailoreaid", "enteryouremailaddressoreaid",
+                         "请输入邮箱或eaid", "输入邮箱或eaid"))
+        placed = replace(observation, tokens=tuple(
+            token for token in observation.tokens if token.confidence >= 0.85
+        ))
+        label = cls._anchor(placed, labels, exact=True,
+                            x_range=(0.05, 0.90), y_range=(0.20, 0.75))
+        left, top, right, bottom = observation.rect
+        height = bottom - top
+        if label is not None:
+            token = next(t for t in placed.tokens if t.roi is not None
+                         and ((t.roi[0] + t.roi[2]) // 2,
+                              (t.roi[1] + t.roi[3]) // 2) == label)
+            # The field is directly below its label. EA's PASSWORD heading
+            # has identical placeholder text, but is above this row.
+            field_top = token.roi[3]
+            point = cls._anchor(placed, placeholders, exact=True,
+                                x_range=(0.05, 0.90),
+                                y_range=((field_top - top) / height,
+                                         min(0.85, (field_top - top) / height + 0.10)))
+            if point is not None:
+                return point, "placeholder"
+            y = round(field_top + (token.roi[3] - token.roi[1]) * 1.6)
+            if top < y < bottom:
+                return ((left + right) // 2, y), "label-offset"
+        # An OCR pass may omit the label. The editable row in the supported
+        # login layouts is below 40% height; the PASSWORD heading is above it.
+        point = cls._anchor(placed, placeholders, exact=True,
+                            x_range=(0.05, 0.90), y_range=(0.40, 0.80))
+        return None if point is None else (point, "placeholder")
+
+    def _click_login_field(
+        self, hwnd: int, observation: EaObservation, *, password: bool = False,
+    ) -> str:
+        expected = (EaPage.PASSWORD, EaPage.RESET_PASSWORD) if password else (
+            EaPage.EMAIL, EaPage.RECOVERY_ACCOUNT,
+        )
+        if observation.page not in expected:
+            raise EaAppAutomationError("EA 输入前页面发生变化，已停止输入")
+        anchor = self._login_field_anchor(observation, password=password)
+        if anchor is None:
+            self._click(hwnd, *(PASSWORD_FIELD_RATIO if password else ACCOUNT_FIELD_RATIO))
+            return "ratio"
+        point, target = anchor
+        self._click_point(hwnd, *point)
+        return target
+
+    @staticmethod
+    def _exact_identifier(value: str) -> str:
+        # Preserve punctuation: user.name and username are different logins.
+        return "".join(unicodedata.normalize("NFKC", value).casefold().split())
+
+    def _verify_login_input(self, observation: EaObservation, identifier: str) -> bool:
+        if self._verified_identifier_echo(observation, identifier):
+            return True
+        # Long email values can be split or missed by whole-window detection.
+        # Read only the editable row; never accept a masked mailbox elsewhere.
+        anchor = self._login_field_anchor(observation)
+        if anchor is None or not hasattr(getattr(self, "ocr", None), "read"):
+            return False
+        (_, y), _ = anchor
+        left, top, right, bottom = observation.rect
+        radius = max(8, round((bottom - top) * 0.023))
+        region = Region("eaLoginIdentifier", (
+            round(left + (right - left) * 0.12), max(top, y - radius),
+            round(left + (right - left) * 0.88), min(bottom, y + radius),
+        ), single_line=True)
+        try:
+            tokens = self.ocr.read(observation.frame, region)
+        except Exception:
+            return False
+        expected = self._exact_identifier(identifier)
+        return bool(expected) and any(
+            token.confidence >= 0.85 and self._exact_identifier(token.text) == expected
+            for token in tokens
+        )
+
     def _type_secret(self, value: str) -> None:
         inputs: list[INPUT] = []
         for character in value:
@@ -786,6 +875,9 @@ class WindowsEaHybridDriver(EaPasswordRecoveryMixin):
             hwnd = self._live(hwnd)
             capture_started = time.monotonic()
             try:
+                # Capture is the desktop, so a console covering EA otherwise
+                # hides BACK, the account badge and the sign-out menu.
+                self._focus(hwnd)
                 frame = self._frame()
                 left, top, right, bottom = self._clip_rect(hwnd, frame)
             except EaAppAutomationError:
@@ -831,6 +923,7 @@ class WindowsEaHybridDriver(EaPasswordRecoveryMixin):
                 tokens=tokens,
                 page=classify_page(token.normalized for token in tokens),
             )
+            self._last_observation = observation
             # The CEF surface hands back a fully blank OCR pass while it is
             # otherwise interactive. Retrying beats treating it as a page.
             if tokens:
@@ -1076,6 +1169,10 @@ class WindowsEaHybridDriver(EaPasswordRecoveryMixin):
                 self._click_point(hwnd, *point)
             dismissed = True
             self.sleep(2.0)
+        observation = self._observe(self._live(hwnd))
+        if observation.page is EaPage.EXPIRED_SESSION:
+            self._record("expired-session-stuck", observation)
+            raise EaAppAutomationError("EA 会话过期页面在返回操作后仍未关闭")
         return dismissed
 
     def _wait_for_page(
@@ -1115,7 +1212,86 @@ class WindowsEaHybridDriver(EaPasswordRecoveryMixin):
         raise EaAppAutomationError("EA App 页面无法识别，领号前预检失败")
 
     def ensure_started(self) -> EaUiState:
-        return self.preflight()
+        return self._with_ui_recovery("preflight", self.preflight)
+
+    def configure_ui_recovery(self, reserve):
+        self._reserve_ui_recovery = reserve
+
+    def _with_ui_recovery(self, operation, action):
+        for attempt in range(2):
+            try:
+                result = action()
+                if result is not False:
+                    return result
+                raise EaAppAutomationError("EA 未确认退出登录")
+            except (EaUiRecoveryExhausted, EaLoginRejected, EaCaptchaRequired, EaAccountBanned, EaOtpUnavailable):
+                raise
+            except EaAppAutomationError as error:
+                if attempt:
+                    self._record("ui-recovery-exhausted", getattr(self, "_last_observation", None))
+                    raise EaUiRecoveryExhausted("EA 页面恢复后仍无法完成当前操作，保留租约等待处理") from error
+                try:
+                    self._recover_ui_surface(operation)
+                except (EaUiRecoveryExhausted, EaLoginRejected, EaCaptchaRequired, EaAccountBanned, EaOtpUnavailable):
+                    raise
+                except EaAppAutomationError as recovery_error:
+                    self._record("ui-recovery-exhausted", getattr(self, "_last_observation", None))
+                    raise EaUiRecoveryExhausted("EA 页面重启失败，保留租约等待处理") from recovery_error
+
+    def _recover_ui_surface(self, operation):
+        # A real app restart changes the stuck surface. A worker restart alone
+        # merely retries the same page, so the allowance belongs to the lease.
+        reserve = getattr(self, "_reserve_ui_recovery", None)
+        if callable(reserve):
+            allowed = reserve(operation)
+        else:
+            used = getattr(self, "_local_ui_recovery", set())
+            allowed = operation not in used
+            self._local_ui_recovery = used | {operation}
+        if not allowed:
+            self._record("ui-recovery-exhausted", getattr(self, "_last_observation", None))
+            raise EaUiRecoveryExhausted("本租约的 EA 页面恢复次数已用完，停止重复尝试")
+        if any(self._process_running(name) for name in APEX_EXECUTABLES):
+            raise EaUiRecoveryExhausted("Apex 尚未退出，不能重启 EA 恢复页面")
+        self._record("ui-recovery-start", getattr(self, "_last_observation", None))
+        self.notify("EA 页面操作未生效，重启 EA 后验证当前流程")
+        try:
+            self.restart_app()
+        except (EaCaptchaRequired, EaAccountBanned, EaUiRecoveryExhausted):
+            raise
+        except EaAppAutomationError:
+            # Login/error pages do not expose Help -> Restart app. Reopen only
+            # the verified EA desktop executable; never clear cached sessions.
+            self._restart_ea_process()
+        self._record("ui-recovery-ready", self._observe(self._ea_window()))
+
+    def _restart_ea_process(self):
+        if any(self._process_running(name) for name in APEX_EXECUTABLES):
+            raise EaUiRecoveryExhausted("Apex 尚未退出，不能重启 EA")
+        hwnd = self._ea_window()
+        pid = wintypes.DWORD()
+        self.user32.GetWindowThreadProcessId(hwnd, ctypes.byref(pid))
+        executable = self._process_path(pid.value)
+        if not pid.value or Path(executable).name.lower() != EA_EXECUTABLE:
+            raise EaUiRecoveryExhausted("无法确认 EA 主窗口进程，停止恢复")
+        try:
+            result = subprocess.run(["taskkill", "/PID", str(pid.value), "/T", "/F"],
+                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=20, check=False,
+                creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+            if result.returncode:
+                raise EaUiRecoveryExhausted("EA 主窗口进程未退出")
+            subprocess.Popen([executable], cwd=str(Path(executable).parent),
+                             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        except (OSError, subprocess.TimeoutExpired) as error:
+            raise EaUiRecoveryExhausted("EA 进程重启未完成") from error
+        self._hwnd = None
+        deadline = time.monotonic() + EA_RESTART_TIMEOUT_S
+        while time.monotonic() < deadline:
+            try:
+                return self.preflight()
+            except EaAppAutomationError:
+                self.sleep(1.0)
+        raise EaUiRecoveryExhausted("EA 重启后仍没有可识别页面")
 
     def current_identity(self) -> EaIdentityFact | None:
         hwnd = self._ea_window()
@@ -1186,35 +1362,30 @@ class WindowsEaHybridDriver(EaPasswordRecoveryMixin):
         *,
         timeout_s: float = 25.0,
     ) -> EaObservation:
-        target = self._click_target(
-            hwnd,
-            observation,
-            ACCOUNT_FIELD_TERMS,
-            ACCOUNT_FIELD_RATIO,
-            y_range=(0.20, 0.80),
-        )
-        self._clear_focused_field()
-        self._type_secret(credentials.login_identifier)
-        # The capture source serves the last frame it has. Reading straight
-        # after typing showed an empty field on a page that had in fact
-        # accepted the text, which is a false negative on the one signal that
-        # says the click found the input.
-        self.sleep(INPUT_SETTLE_S)
-        typed = self._observe(hwnd)
-        # Whether the identifier actually landed in a field separates "the
-        # click missed the input" from "the submit never fired". Only the fact
-        # is kept; the identifier itself never reaches disk.
-        echoed = self._identifier_echoed(typed, credentials.login_identifier)
-        self._login_identifier_verified = self._verified_identifier_echo(
-            typed, credentials.login_identifier
-        )
-        self._record(
-            "account-typed",
-            typed,
-            fieldTarget=target,
-            identifierEchoed=echoed,
-            identifierVerified=self._login_identifier_verified,
-        )
+        self._login_identifier_verified = False
+        target = "none"
+        for attempt in range(2):
+            target = self._click_login_field(hwnd, observation)
+            self._clear_focused_field()
+            self._type_secret(credentials.login_identifier)
+            self.sleep(INPUT_SETTLE_S)
+            typed = self._observe(hwnd)
+            echoed = self._identifier_echoed(typed, credentials.login_identifier)
+            self._login_identifier_verified = (
+                typed.page is EaPage.EMAIL
+                and self._verify_login_input(typed, credentials.login_identifier)
+            )
+            self._record("account-typed", typed, fieldTarget=target,
+                         identifierEchoed=echoed,
+                         identifierVerified=self._login_identifier_verified,
+                         attempt=attempt + 1)
+            if self._login_identifier_verified:
+                break
+            if typed.page is not EaPage.EMAIL:
+                raise EaAppAutomationError("EA 账号输入时页面发生变化，已停止提交")
+            observation = typed
+        if not self._login_identifier_verified:
+            raise EaAppAutomationError("EA 未确认账号已输入编辑框，已停止提交并跳过本次登录")
         submit = self._submit(hwnd, typed, ACCOUNT_SUBMIT_RATIO)
         transitioned = self._wait_for_page(
             hwnd,
@@ -1226,9 +1397,11 @@ class WindowsEaHybridDriver(EaPasswordRecoveryMixin):
             and not transitioned.has_login_error()
             and self._identifier_echoed(transitioned, credentials.login_identifier)
         ):
-            self._login_identifier_verified = self._verified_identifier_echo(
+            self._login_identifier_verified = self._verify_login_input(
                 transitioned, credentials.login_identifier
             )
+            if not self._login_identifier_verified:
+                raise EaAppAutomationError("EA 重试前账号输入无法确认，已停止提交")
             retry_submit = self._submit(hwnd, transitioned, ACCOUNT_SUBMIT_RATIO)
             transitioned = self._wait_for_page(
                 hwnd,
@@ -1271,13 +1444,42 @@ class WindowsEaHybridDriver(EaPasswordRecoveryMixin):
 
     @classmethod
     def _verified_identifier_echo(cls, observation: EaObservation, identifier: str) -> bool:
-        placed = replace(observation, tokens=tuple(
-            token for token in observation.tokens if token.confidence >= 0.85
-        ))
-        return cls._anchor(
-            placed, (normalize_ocr_text(identifier),), exact=True,
-            x_range=(0.02, 0.98), y_range=(0.20, 0.80),
-        ) is not None
+        expected = cls._exact_identifier(identifier)
+        if not expected:
+            return False
+        left, top, right, bottom = observation.rect
+        placed = []
+        for token in observation.tokens:
+            if token.roi is None or token.confidence < 0.85:
+                continue
+            x1, y1, x2, y2 = token.roi
+            if (left + (right - left) * 0.02 <= (x1 + x2) / 2 <= right
+                    and top + (bottom - top) * 0.20 <= (y1 + y2) / 2
+                    <= top + (bottom - top) * 0.80):
+                placed.append(token)
+        if any(cls._exact_identifier(t.text) == expected for t in placed):
+            return True
+        # Join adjacent fragments on the same row, retaining exact characters.
+        for first in placed:
+            prefix = cls._exact_identifier(first.text)
+            if not prefix or not expected.startswith(prefix):
+                continue
+            row = sorted((t for t in placed if t is not first
+                          and t.roi[0] >= first.roi[2]
+                          and abs((first.roi[1] + first.roi[3]) - (t.roi[1] + t.roi[3]))
+                          <= max(first.roi[3] - first.roi[1], t.roi[3] - t.roi[1])),
+                         key=lambda t: t.roi[0])
+            joined, previous = first.text, first
+            for token in row:
+                gap = token.roi[0] - previous.roi[2]
+                row_height = max(first.roi[3] - first.roi[1], token.roi[3] - token.roi[1])
+                if gap > row_height * 1.5:
+                    break
+                joined += token.text
+                if cls._exact_identifier(joined) == expected:
+                    return True
+                previous = token
+        return False
 
     def _submit_password(
         self,
@@ -1285,21 +1487,15 @@ class WindowsEaHybridDriver(EaPasswordRecoveryMixin):
         observation: EaObservation,
         credentials: SecretCredentials,
     ) -> str:
-        # Never let the anchor land on "Forgot your password": that link is on
-        # the same page and it navigates away from the login entirely.
-        target = self._click_target(
-            hwnd,
-            observation,
-            PASSWORD_FIELD_TERMS,
-            PASSWORD_FIELD_RATIO,
-            y_range=(0.20, 0.80),
-            exclude=PASSWORD_LINK_TERMS,
-        )
+        target = self._click_login_field(hwnd, observation, password=True)
         self._clear_focused_field()
         self._type_secret(credentials.password)
         self.sleep(INPUT_SETTLE_S)
-        self._record("password-typed", self._observe(hwnd), fieldTarget=target)
-        return self._submit(hwnd, observation, PASSWORD_SUBMIT_RATIO)
+        typed = self._observe(hwnd)
+        self._record("password-typed", typed, fieldTarget=target)
+        if typed.page is not EaPage.PASSWORD:
+            raise EaAppAutomationError("EA 密码输入时页面发生变化，已停止提交")
+        return self._submit(hwnd, typed, PASSWORD_SUBMIT_RATIO)
 
     @classmethod
     def _login_back_point(
@@ -1373,6 +1569,13 @@ class WindowsEaHybridDriver(EaPasswordRecoveryMixin):
         raise EaAppAutomationError("EA 未能返回清晰账号输入页，已停止输入新密码")
 
     def sign_in(
+        self,
+        credentials: SecretCredentials,
+        otp_supplier: Callable[[OtpChallenge], OtpCode],
+    ) -> EaIdentityFact:
+        return self._with_ui_recovery("signin", lambda: self._sign_in_once(credentials, otp_supplier))
+
+    def _sign_in_once(
         self,
         credentials: SecretCredentials,
         otp_supplier: Callable[[OtpChallenge], OtpCode],
@@ -1626,7 +1829,8 @@ class WindowsEaHybridDriver(EaPasswordRecoveryMixin):
                 self._record("captcha", observation)
                 raise EaCaptchaRequired("EA App 出现 Captcha，已暂停")
             if observation.has_login_error():
-                self._record("login-rejected", observation)
+                self._record("login-rejected", observation,
+                             identifierVerified=bool(getattr(self, "_login_identifier_verified", False)))
                 if (
                     observation.page is EaPage.PASSWORD
                     and getattr(self, "_login_identifier_verified", False)
@@ -2344,6 +2548,9 @@ class WindowsEaHybridDriver(EaPasswordRecoveryMixin):
         return None
 
     def sign_out(self) -> bool:
+        return self._with_ui_recovery("signout", self._sign_out_once)
+
+    def _sign_out_once(self) -> bool:
         hwnd = self._ea_window()
         identity = None
         signed_in_page_seen = False

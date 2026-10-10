@@ -1,13 +1,7 @@
-"""Redaction-safe evidence for one EA login attempt.
+"""EA attempt evidence: original desktop screenshots and bounded text summaries.
 
-A day of real runs produced no reviewable artefact: every failure collapsed
-into one reason code, and the frames that would have explained it were gone
-the moment the driver moved on. This recorder keeps them itself, so a login
-problem is diagnosed from the run that hit it rather than from the next one.
-
-Nothing written here may contain a full email address, a password, a token,
-an OTP or a TOTP secret. Text evidence is limited to known UI markers, and
-screenshots have every sensitive-looking text block painted over.
+Screenshots intentionally preserve the operator's actual desktop. Text logs
+continue to omit credentials; the screenshot outbox is associated with a lease.
 """
 
 from __future__ import annotations
@@ -88,6 +82,11 @@ class EaLoginEvidence:
         self._last_step_at = time.monotonic()
         self._previous_step = None
         self._timing_lease_id = None
+
+    def bind_lease(self, lease_id):
+        if lease_id is not None and not re.fullmatch(r"lease_[a-zA-Z0-9_-]{1,128}", str(lease_id)):
+            raise ValueError("invalid evidence lease")
+        self._timing_lease_id = lease_id
 
     def timing(self, event: str, **payload) -> None:
         """Compact diagnostics survive screenshot-attempt pruning for 14 days."""
@@ -200,7 +199,14 @@ class EaLoginEvidence:
             handle.write(json.dumps(record, ensure_ascii=False, separators=(",", ":")))
             handle.write("\n")
         if frame is not None and self.save_screenshots:
-            self._save_frame(f"{self._seq:02d}-{name}", frame, tokens, rect)
+            try:
+                self._save_frame(f"{self._seq:02d}-{name}", frame, tokens, rect)
+                from .ea_screenshot_outbox import enqueue
+                enqueue(self.root.parent / "diagnostics" / "ea-evidence", frame, record, self._timing_lease_id)
+            except Exception:
+                # Screenshot I/O must never turn a successful login or cleanup
+                # into a business failure. The text event is already durable.
+                pass
 
     def _save_frame(
         self,
@@ -213,18 +219,9 @@ class EaLoginEvidence:
         # any non-Windows caller have no reason to need.
         from .vision import save_frame
 
-        redacted = frame.copy()
-        for token in tokens or ():
-            if token.roi is None or not is_sensitive_text(token.text, self._hints):
-                continue
-            x1, y1, x2, y2 = token.roi
-            redacted[max(0, y1) : max(0, y2), max(0, x1) : max(0, x2)] = 0
-        if rect is not None:
-            left, top, right, bottom = rect
-            redacted = redacted[max(0, top) : bottom, max(0, left) : right]
-        if redacted.size == 0:
+        if frame.size == 0:
             return
-        save_frame(self.dir / f"{name}.png", redacted)
+        save_frame(self.dir / f"{name}.png", frame)
 
     @staticmethod
     def _reject_sensitive_values(value: object, trail: str = "") -> None:

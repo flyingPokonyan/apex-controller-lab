@@ -3,6 +3,7 @@ import json
 import sys
 import tempfile
 import unittest
+from unittest.mock import Mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "windows"))
 from apex_automation.diagnostic_reporter import DiagnosticReporter
@@ -63,6 +64,13 @@ class DiagnosticReporterTest(unittest.TestCase):
         self.assertEqual({e["type"] for e in events}, {"WORKFLOW_PHASE", "EA_STEP", "EA_PERFORMANCE"})
         self.assertTrue(all(e["leaseId"] == "lease_1" and e["runId"] is None for e in events))
         self.assertTrue(self.worker.url.endswith("/v1/runner/diagnostics"))
+
+    def test_screenshot_io_failure_does_not_block_text_diagnostics(self):
+        self.ea()
+        self.worker._screenshots = Mock()
+        self.worker._screenshots.process_once.side_effect = OSError('image directory unavailable')
+        self.assertEqual(self.worker.process_once(), 0)
+        self.assertEqual(len(self.transport.requests[0]['events']), 3)
 
     def test_password_recovery_pages_survive_collection_and_upload(self):
         evidence = EaLoginEvidence(self.root / "ea-login", save_screenshots=False)

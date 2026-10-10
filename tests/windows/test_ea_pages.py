@@ -429,7 +429,7 @@ class IdentityMatchTest(unittest.TestCase):
         driver._open_account_menu = lambda _hwnd, identity: opened.append(identity)
         driver.sleep = lambda _seconds: None
 
-        self.assertFalse(driver.sign_out())
+        self.assertFalse(driver._sign_out_once())
         self.assertEqual(opened, [None])
 
     def test_sign_out_tries_the_menu_on_an_empty_library_ban(self) -> None:
@@ -450,7 +450,7 @@ class IdentityMatchTest(unittest.TestCase):
         driver._open_account_menu = lambda _hwnd, identity: opened.append(identity)
         driver.sleep = lambda _seconds: None
 
-        self.assertFalse(driver.sign_out())
+        self.assertFalse(driver._sign_out_once())
         self.assertEqual(opened, [None])
 
 
@@ -1209,7 +1209,7 @@ class LoginSubmitRecoveryTest(unittest.TestCase):
     @staticmethod
     def observation(page_tokens: tuple[str, ...]) -> EaObservation:
         placed = tuple(
-            OcrToken(text, 0.99, (100, 100 + index * 30, 500, 125 + index * 30))
+            OcrToken(text, 0.99, (100, 300 + index * 30, 500, 325 + index * 30))
             for index, text in enumerate(page_tokens)
         )
         return EaObservation(
@@ -1227,7 +1227,7 @@ class LoginSubmitRecoveryTest(unittest.TestCase):
         records: list[str],
     ) -> WindowsEaHybridDriver:
         driver = object.__new__(WindowsEaHybridDriver)
-        driver._click_target = lambda *_args, **_kwargs: "anchor"
+        driver._click_login_field = lambda *_args, **_kwargs: "placeholder"
         driver._clear_focused_field = lambda: None
         driver._type_secret = lambda _value: None
         driver.sleep = lambda _seconds: None
@@ -1239,7 +1239,7 @@ class LoginSubmitRecoveryTest(unittest.TestCase):
 
     def test_echoed_identifier_gets_one_retry_when_next_does_not_advance(self) -> None:
         email = self.observation(
-            tokens(
+            (
                 "Sign in",
                 "Email or EA ID",
                 "player@example.test",
@@ -1264,7 +1264,7 @@ class LoginSubmitRecoveryTest(unittest.TestCase):
 
     def test_visible_login_error_is_not_retried(self) -> None:
         email = self.observation(
-            tokens(
+            (
                 "Email or EA ID",
                 "player@example.test",
                 "Next",

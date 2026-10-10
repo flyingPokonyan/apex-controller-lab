@@ -844,7 +844,7 @@ def run_account_cycle(
                     notify=print,
                     **({"sleep": maintenance.sleep} if maintenance is not None else {}),
                 )
-            preflight = getattr(ea_driver, "preflight", None)
+            preflight = getattr(ea_driver, "ensure_started", None) or getattr(ea_driver, "preflight", None)
             checkpoint = AtomicCheckpointStore(runs_root / "account-cycle-status.json").load()
             # A broken EA page must not prevent cleanup of an interrupted
             # account. Remote occupancy also matters if the local claim reply
@@ -860,9 +860,6 @@ def run_account_cycle(
                             raise
                         maintenance.pulse("PROVIDER_RETRY", blocked=False, reason=error.code)
                         maintenance.sleep(30)
-            if callable(preflight) and not recovering:
-                state = preflight()
-                print(f"EA 领号前预检通过：{state.value}")
             orchestrator = AccountOrchestrator(
                 provider=provider,
                 ea_driver=ea_driver,
@@ -879,6 +876,9 @@ def run_account_cycle(
             )
             if resume:
                 orchestrator.resume()
+            if callable(preflight) and not recovering:
+                state = preflight()
+                print(f"EA 领号前预检通过：{state.value}")
             if once:
                 # One account, one attempt, then stop. Verifying a stage
                 # against the loop means every failure immediately claims the

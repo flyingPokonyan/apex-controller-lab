@@ -22,6 +22,12 @@ class EaCaptureUnavailable(EaAppAutomationError):
     reason_code = "CAPTURE_UNAVAILABLE"
 
 
+class EaUiRecoveryExhausted(EaAppAutomationError):
+    """The same lease already exhausted its bounded EA app recovery."""
+
+    reason_code = "EA_RECOVERY_EXHAUSTED"
+
+
 class EaCaptchaRequired(EaAppAutomationError):
     reason_code = "CAPTCHA"
 

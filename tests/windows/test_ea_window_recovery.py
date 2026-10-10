@@ -130,7 +130,7 @@ class EaUpdateBannerTest(unittest.TestCase):
     def test_restart_does_not_itself_prove_signout(self):
         driver = self.driver([self.banner, self.clear])
         driver._open_account_menu.return_value = None
-        self.assertFalse(driver.sign_out())
+        self.assertFalse(driver._sign_out_once())
         driver.restart_app.assert_called_once()
 
     def test_preflight_handles_update_and_stops_repeating_a_persistent_banner(self):

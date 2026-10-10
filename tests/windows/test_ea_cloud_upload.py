@@ -138,14 +138,14 @@ class CloudUploadRecoveryTest(unittest.TestCase):
     def test_repeated_notice_cannot_cause_unbounded_signout_retries(self):
         driver = self.driver([self.clear, self.dialog, self.clear, self.clear,
                               self.dialog, self.clear, self.clear])
-        self.assertFalse(driver.sign_out())
+        self.assertFalse(driver._sign_out_once())
         self.assertEqual(len(self.menu_calls), 2)
         self.assertEqual(self.records[-1], "signout-cloud-upload-retry-exhausted")
 
     def test_closed_window_after_ok_does_not_prove_signed_out(self):
         driver = self.driver([self.clear, self.dialog, EaAppAutomationError("capture lost")])
         with self.assertRaises(EaAppAutomationError):
-            driver.sign_out()
+            driver._sign_out_once()
         self.assertNotIn("signed-out", self.records)
         self.assertNotIn("signout-cloud-sync-closed", self.records)
 

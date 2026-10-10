@@ -62,6 +62,7 @@ class OrchestrationCheckpoint:
     result_error_code: str | None = None
     cleanup_verified_at: str | None = None
     last_error_code: str | None = None
+    ea_recovery_steps: tuple[str, ...] = ()
     updated_at: str | None = None
 
     def evolve(self, **changes: object) -> "OrchestrationCheckpoint":
@@ -104,6 +105,7 @@ class OrchestrationCheckpoint:
             "resultErrorCode": self.result_error_code,
             "cleanupVerifiedAt": self.cleanup_verified_at,
             "lastErrorCode": self.last_error_code,
+            "eaRecoverySteps": list(self.ea_recovery_steps),
             "updatedAt": self.updated_at or _now(),
         }
         return {key: value for key, value in values.items() if value is not None}
@@ -153,8 +155,15 @@ class OrchestrationCheckpoint:
             result_error_code=_optional_string(payload.get("resultErrorCode")),
             cleanup_verified_at=_optional_string(payload.get("cleanupVerifiedAt")),
             last_error_code=_optional_string(payload.get("lastErrorCode")),
+            ea_recovery_steps=_recovery_steps(payload.get("eaRecoverySteps", [])),
             updated_at=_optional_string(payload.get("updatedAt")),
         )
+
+
+def _recovery_steps(value):
+    if not isinstance(value, list) or any(step not in {"preflight", "signin", "signout"} for step in value):
+        raise ValueError("invalid EA recovery steps")
+    return tuple(dict.fromkeys(value))
 
 
 def _now() -> str:

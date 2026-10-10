@@ -202,6 +202,15 @@ class DiagnosticReporter:
 
     def process_once(self, *, send=True):
         self.collect()
+        if send:
+            from .ea_screenshot_outbox import EaScreenshotUploader
+            if not hasattr(self, "_screenshots"):
+                self._screenshots = EaScreenshotUploader(self.settings, self.root, self.transport,
+                    timeout_s=self.request_timeout_s, notify=self.notify)
+            try:
+                self._screenshots.process_once()
+            except Exception:
+                self._notice("EA_SCREENSHOT_IO")
         pending = self.state["pending"]
         if not send or not pending or time.monotonic() < self._next_send_at:
             return len(pending)

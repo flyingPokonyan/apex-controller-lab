@@ -192,6 +192,7 @@ SIGNED_IN_TERMS = (
 LOGIN_ERROR_TERMS = (
     "incorrect",
     "invalidcredentials",
+    "invalidemailorid",
     "cantfindanaccount",
     "couldntfindanaccount",
     "somethingwentwrong",
