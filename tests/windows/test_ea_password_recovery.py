@@ -74,7 +74,7 @@ class PasswordRecoveryTest(unittest.TestCase):
         driver._type_secret = self.typed.append
         driver._record = lambda name, *args, **kwargs: self.records.append(name)
         driver._raise_if_account_banned = lambda *args: None
-        driver._submit_otp = submit_otp
+        driver._submit_recovery_otp = submit_otp
         driver._login_identifier_verified = True
         driver.sleep = lambda _: None
         driver.notify = lambda _: None
@@ -85,6 +85,89 @@ class PasswordRecoveryTest(unittest.TestCase):
         now = datetime.now(timezone.utc)
         driver._recover_password(1, credentials or self.credentials,
             lambda challenge: OtpCode("123456", challenge.challenge_id, now, now + timedelta(seconds=60)))
+
+    def test_recovery_otp_clicks_fresh_submit_even_after_placeholder_disappears(self):
+        original = replace(self.frames["otp_method"], page=EaPage.OTP, tokens=(
+            OcrToken("Enter 6 digit code", .99, (825, 600, 1170, 630)),
+            OcrToken("NEXT", .99, (995, 730, 1056, 750)),
+        ))
+        # The real failure was UNKNOWN after typing, with the code left in
+        # the input. Exercise actual submission rather than stubbing it out.
+        for button in ("SUBMIT", "VERIFY", "CONFIRM", "NEXT"):
+            with self.subTest(button=button):
+                filled = replace(original, page=EaPage.UNKNOWN, tokens=(
+                    OcrToken("Code", .99, (825, 575, 860, 590)),
+                    OcrToken(button, .99, (975, 850, 1075, 875)),
+                ))
+                driver = self.driver([filled, self.frames["reset_password"]])
+                driver._click_target = lambda *args, **kwargs: "anchor"
+                now = datetime.now(timezone.utc)
+                driver._fresh_otp = lambda *args, **kwargs: OtpCode("123456", "fixture", now, now + timedelta(seconds=60))
+                driver._submit = lambda *args: self.fail("recovery must not use ordinary login submission")
+                WindowsEaHybridDriver._submit_recovery_otp(driver, 1, original, lambda _: None,
+                    method=OtpMethod.TOTP, challenge_started_at=now)
+                self.assertEqual(self.typed, ["123456"])
+                self.assertEqual(self.clicks, [(1025, 862)])
+                self.assertEqual(self.records[-1], "otp-submitted")
+
+    def test_recovery_otp_never_guesses_missing_or_uncertain_submit(self):
+        original = replace(self.frames["otp_method"], page=EaPage.OTP)
+        for confidence, roi in ((.40, (975, 850, 1075, 875)), (.99, None)):
+            with self.subTest(confidence=confidence):
+                filled = replace(original, tokens=(OcrToken("SUBMIT", confidence, roi),))
+                driver = self.driver([filled])
+                driver._click_target = lambda *args, **kwargs: "anchor"
+                now = datetime.now(timezone.utc)
+                driver._fresh_otp = lambda *args, **kwargs: OtpCode("123456", "fixture", now, now + timedelta(seconds=60))
+                with self.assertRaises(EaAppAutomationError):
+                    WindowsEaHybridDriver._submit_recovery_otp(driver, 1, original, lambda _: None,
+                        method=OtpMethod.TOTP, challenge_started_at=now)
+                self.assertEqual(self.clicks, [])
+
+    def test_filled_enter_a_code_form_remains_an_otp_page(self):
+        self.assertEqual(classify_page(("enteracode", "code", "submit")), EaPage.OTP)
+
+    def test_recovery_otp_retries_one_explicit_totp_rejection(self):
+        invalid = replace(self.frames["otp_method"], page=EaPage.OTP,
+                          tokens=(OcrToken("Your code is incorrect", .99),))
+        driver = self.driver([invalid, invalid, self.frames["reset_password"]])
+        sleeps = []
+        driver.sleep = sleeps.append
+        driver._password_recovery_deadline = float("inf")
+        result = driver._verify_recovery_otp(1, invalid, lambda _: None,
+            method=OtpMethod.TOTP, challenge_started_at=datetime.now(timezone.utc))
+        self.assertEqual(result.page, EaPage.RESET_PASSWORD)
+        self.assertEqual(self.otp_methods, [OtpMethod.TOTP, OtpMethod.TOTP])
+        self.assertEqual(sleeps, [31.0])
+
+    def test_recovery_otp_unchanged_page_is_bounded_and_preserves_last_evidence(self):
+        unchanged = replace(self.frames["otp_method"], page=EaPage.UNKNOWN, tokens=())
+        driver = self.driver([unchanged])
+        driver._password_recovery_deadline = 240
+        with patch("apex_automation.ea_password_recovery.time.monotonic", side_effect=[0, 1, 30]):
+            with self.assertRaises(EaAppAutomationError):
+                driver._verify_recovery_otp(1, unchanged, lambda _: None,
+                    method=OtpMethod.TOTP, challenge_started_at=datetime.now(timezone.utc))
+        self.assertEqual(self.otp_methods, [OtpMethod.TOTP])
+        self.assertIs(driver._password_recovery_observation, unchanged)
+
+    def test_recovery_otp_email_rejection_does_not_resubmit_same_code(self):
+        invalid = replace(self.frames["otp_method"], page=EaPage.OTP,
+                          tokens=(OcrToken("Your code is incorrect", .99),))
+        driver = self.driver([invalid])
+        driver._password_recovery_deadline = float("inf")
+        with self.assertRaises(EaAppAutomationError):
+            driver._verify_recovery_otp(1, invalid, lambda _: None,
+                method=OtpMethod.EMAIL, challenge_started_at=datetime.now(timezone.utc))
+        self.assertEqual(self.otp_methods, [OtpMethod.EMAIL])
+
+    def test_unknown_recovery_with_visible_back_leaves_code_form_before_cleanup(self):
+        unknown = replace(self.frames["otp_method"], page=EaPage.UNKNOWN, tokens=(
+            OcrToken("BACK", .99, (812, 298, 890, 317)),))
+        driver = self.driver([unknown, self.frames["login_account"]])
+        driver._leave_recovery_captcha(1)
+        self.assertEqual(self.clicks, [(851, 307)])
+        self.assertEqual(self.remaining, [])
 
     def test_screenshot_pages_are_distinct_from_login(self):
         expected = {"rejected": EaPage.PASSWORD, "recovery_account": EaPage.RECOVERY_ACCOUNT,
@@ -236,14 +319,14 @@ class PasswordRecoveryTest(unittest.TestCase):
 
     def test_otp_provider_failure_is_a_bounded_account_failure(self):
         driver=self.driver(self.flow())
-        driver._submit_otp=lambda *args,**kwargs: (_ for _ in ()).throw(
+        driver._submit_recovery_otp=lambda *args,**kwargs: (_ for _ in ()).throw(
             LeaseProviderError("mail unavailable",code="MAIL_UNAVAILABLE"))
         with self.assertRaises(EaAppAutomationError):self.recover(driver)
         self.assertEqual(self.typed,[self.credentials.login_identifier])
 
     def test_stale_lease_is_never_hidden_as_a_password_failure(self):
         driver=self.driver(self.flow())
-        driver._submit_otp=lambda *args,**kwargs: (_ for _ in ()).throw(LeaseStaleError("stale"))
+        driver._submit_recovery_otp=lambda *args,**kwargs: (_ for _ in ()).throw(LeaseStaleError("stale"))
         with self.assertRaises(LeaseStaleError):self.recover(driver)
         self.assertEqual(self.typed,[self.credentials.login_identifier])
 

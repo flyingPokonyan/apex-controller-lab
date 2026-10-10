@@ -1436,12 +1436,18 @@ class WindowsEaHybridDriver(EaPasswordRecoveryMixin):
                         self._leave_recovery_captcha(hwnd)
                     except EaAppAutomationError:
                         pass
-                    self._record("password-recovery-failed")
+                    self._record("password-recovery-failed", getattr(self, "_password_recovery_observation", None))
                     raise EaCredentialsRejected("EA 密码恢复遇到 Captcha，跳过本次账号") from error
                 except EaAccountBanned:
                     raise
                 except EaAppAutomationError as error:
-                    self._record("password-recovery-failed")
+                    self._record("password-recovery-failed", getattr(self, "_password_recovery_observation", None))
+                    self.notify(str(error))
+                    if getattr(self, "_password_recovery_observation", None) is not None:
+                        try:
+                            self._leave_recovery_captcha(hwnd)
+                        except EaAppAutomationError:
+                            pass
                     raise EaCredentialsRejected("EA 密码恢复未完成，凭据仍需核对") from error
         raise EaAppAutomationError("EA 会话过期后重新登录仍未完成")
 

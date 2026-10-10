@@ -86,6 +86,7 @@ OTP_TERMS = (
     "securitycode",
     "logincode",
     "enterthecode",
+    "enteracode",
     "enteryourcode",
     "enter6digitcode",
     "rememberthisdevice",

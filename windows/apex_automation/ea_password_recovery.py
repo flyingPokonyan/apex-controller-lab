@@ -11,8 +11,8 @@ import re
 import time
 
 from .ea_app import EaAppAutomationError, EaCaptchaRequired, EaOtpUnavailable
-from .account_provider import LeaseProviderError, LeaseStaleError
-from .ea_pages import EaPage, password_page_blocker, phrase_point
+from .account_provider import LeaseProviderError, LeaseStaleError, OtpMethod
+from .ea_pages import EaPage, OTP_FIELD_TERMS, password_page_blocker, phrase_point
 
 
 class EaPasswordRecoveryMixin:
@@ -40,7 +40,7 @@ class EaPasswordRecoveryMixin:
             observation = self._observe(hwnd)
             if observation.page is EaPage.EMAIL:
                 return
-            if observation.page is not EaPage.CAPTCHA:
+            if observation.page not in (EaPage.CAPTCHA, EaPage.UNKNOWN):
                 self._return_to_account_page(hwnd, observation)
                 return
             back = self._login_back_point(observation)
@@ -48,6 +48,73 @@ class EaPasswordRecoveryMixin:
                 return
             self._click_point(hwnd, *back)
             self.sleep(1.0)
+
+    def _submit_recovery_otp(self, hwnd, observation, otp_supplier, *, method, challenge_started_at):
+        # Password recovery has its own confirmation controls. Ordinary login
+        # submission does not recognise SUBMIT/VERIFY, and its fixed fallback
+        # can leave six digits in the field without submitting them.
+        from .ea_app_win32 import OTP_FIELD_RATIO, INPUT_SETTLE_S
+        self._record(f"otp-{method.value.lower()}-code-page", observation)
+        otp = self._fresh_otp(otp_supplier, method=method, challenge_started_at=challenge_started_at)
+        self._click_target(hwnd, observation, OTP_FIELD_TERMS, OTP_FIELD_RATIO, y_range=(0.20, 0.80))
+        self._clear_focused_field()
+        self._type_secret(otp.code)
+        self.sleep(INPUT_SETTLE_S)
+        typed = self._observe(hwnd)
+        self._password_recovery_observation = typed
+        if typed.page is EaPage.CAPTCHA:
+            raise EaCaptchaRequired("EA 密码恢复出现 Captcha")
+        self._raise_if_account_banned(hwnd, typed)
+        if typed.page not in (EaPage.OTP, EaPage.UNKNOWN):
+            raise EaOtpUnavailable("EA 密码恢复验证码输入后页面发生变化")
+        # Filling the code removes its placeholder. Never infer that this
+        # alone submitted the form, and never click a stale button position.
+        point = self._recovery_control(typed, ("submit", "verify", "confirm", "next", "continue", "signin",
+                                              "提交", "验证", "确认", "下一步", "继续"), y_range=(0.40, 0.95))
+        self._click_point(hwnd, *point)
+        submitted = self._observe(hwnd)
+        self._password_recovery_observation = submitted
+        self._record("otp-submitted", submitted)
+
+    def _verify_recovery_otp(self, hwnd, observation, otp_supplier, *, method, challenge_started_at):
+        for attempt in range(2):
+            try:
+                self._submit_recovery_otp(hwnd, observation, otp_supplier, method=method,
+                                          challenge_started_at=challenge_started_at)
+            except LeaseStaleError:
+                raise
+            except LeaseProviderError as error:
+                raise EaOtpUnavailable("EA 密码恢复验证码获取失败，跳过本次账号") from error
+            deadline = min(time.monotonic() + 20.0, self._password_recovery_deadline)
+            while time.monotonic() < deadline:
+                observation = self._observe(hwnd)
+                self._password_recovery_observation = observation
+                if observation.page is EaPage.CAPTCHA:
+                    raise EaCaptchaRequired("EA 密码恢复出现 Captcha")
+                self._raise_if_account_banned(hwnd, observation)
+                if observation.page is EaPage.RESET_PASSWORD:
+                    return observation
+                if observation.has_login_error():
+                    break
+                if observation.page is EaPage.EXPIRED_SESSION:
+                    raise EaOtpUnavailable("EA 密码恢复验证会话已过期")
+                self.sleep(0.5)
+            else:
+                raise EaOtpUnavailable("EA 未确认密码恢复验证码，跳过本次账号")
+            compact = "".join(observation.normalized)
+            # Retry only an explicitly rejected TOTP, not an unchanged form,
+            # email code or rate limit. Wait out the 30-second code window.
+            if (attempt or method is not OtpMethod.TOTP or observation.page is not EaPage.OTP
+                    or not any(term in compact for term in ("incorrect", "invalidcode", "验证码错误"))
+                    or "toomanyattempts" in compact):
+                raise EaOtpUnavailable("EA 密码恢复验证码未通过，跳过本次账号")
+            self.notify("EA 未接受验证器验证码，等待下一个窗口后重试一次")
+            self.sleep(31.0)
+            if time.monotonic() >= self._password_recovery_deadline:
+                raise EaOtpUnavailable("EA 密码恢复验证超时")
+            observation = self._recovery_wait(hwnd, (EaPage.OTP,))
+            challenge_started_at = datetime.now(timezone.utc)
+        raise EaOtpUnavailable("EA 密码恢复验证码未通过")
 
     @staticmethod
     def _reset_password_rejected(observation):
@@ -117,6 +184,7 @@ class EaPasswordRecoveryMixin:
             hwnd, (*pages, EaPage.CAPTCHA, EaPage.BANNED, EaPage.EXPIRED_SESSION),
             timeout_s=min(timeout_s, remaining),
         )
+        self._password_recovery_observation = observation
         if observation.page is EaPage.CAPTCHA:
             raise EaCaptchaRequired("EA 密码恢复出现 Captcha，已暂停")
         self._raise_if_account_banned(hwnd, observation)
@@ -131,6 +199,7 @@ The caller keeps the lease active and renews it during email/OTP waits.
 A new candidate is persisted encrypted before changing the UI password.
 """
         self._password_recovery_deadline = time.monotonic() + 240.0
+        self._password_recovery_observation = None
         rejected = self._observe(hwnd)
         if (rejected.page is not EaPage.PASSWORD
                 or not rejected.has_login_error()
@@ -168,14 +237,8 @@ A new candidate is persisted encrypted before changing the UI password.
             )
             observation = self._recovery_wait(hwnd, (EaPage.OTP,))
         method = self._otp_page_method(observation, credentials.otp_methods, selected_method)
-        try:
-            self._submit_otp(hwnd, observation, otp_supplier, method=method,
-                             challenge_started_at=challenge_started_at)
-        except LeaseStaleError:
-            raise
-        except LeaseProviderError as error:
-            raise EaOtpUnavailable("EA 密码恢复验证码获取失败，跳过本次账号") from error
-        observation = self._recovery_wait(hwnd, (EaPage.RESET_PASSWORD,), timeout_s=20.0)
+        observation = self._verify_recovery_otp(hwnd, observation, otp_supplier, method=method,
+                                                 challenge_started_at=challenge_started_at)
         self._record("password-recovery-verified", observation)
         field_observation = observation
         success = None
