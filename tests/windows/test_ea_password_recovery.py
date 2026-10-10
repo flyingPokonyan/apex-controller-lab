@@ -11,7 +11,7 @@ from unittest.mock import patch
 import numpy as np
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "windows"))
-from apex_automation.account_provider import OtpCode, OtpMethod, SecretCredentials
+from apex_automation.account_provider import OtpCode, OtpMethod, SecretCredentials, LeaseProviderError, LeaseStaleError
 from apex_automation.ea_app import EaAppAutomationError, EaCaptchaRequired, EaUiState
 from apex_automation.ea_app_win32 import EaObservation, WindowsEaHybridDriver
 from apex_automation.ea_evidence import EaLoginEvidence
@@ -233,6 +233,19 @@ class PasswordRecoveryTest(unittest.TestCase):
             self.recover(driver)
         self.assertNotIn("password-recovery-success", self.records)
         self.assertNotIn("password-recovery-login-ready", self.records)
+
+    def test_otp_provider_failure_is_a_bounded_account_failure(self):
+        driver=self.driver(self.flow())
+        driver._submit_otp=lambda *args,**kwargs: (_ for _ in ()).throw(
+            LeaseProviderError("mail unavailable",code="MAIL_UNAVAILABLE"))
+        with self.assertRaises(EaAppAutomationError):self.recover(driver)
+        self.assertEqual(self.typed,[self.credentials.login_identifier])
+
+    def test_stale_lease_is_never_hidden_as_a_password_failure(self):
+        driver=self.driver(self.flow())
+        driver._submit_otp=lambda *args,**kwargs: (_ for _ in ()).throw(LeaseStaleError("stale"))
+        with self.assertRaises(LeaseStaleError):self.recover(driver)
+        self.assertEqual(self.typed,[self.credentials.login_identifier])
 
     def test_captcha_stops_before_password_entry(self):
         flow = self.flow()

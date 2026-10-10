@@ -11,6 +11,7 @@ import re
 import time
 
 from .ea_app import EaAppAutomationError, EaCaptchaRequired, EaOtpUnavailable
+from .account_provider import LeaseProviderError, LeaseStaleError
 from .ea_pages import EaPage, password_page_blocker, phrase_point
 
 
@@ -167,8 +168,13 @@ A new candidate is persisted encrypted before changing the UI password.
             )
             observation = self._recovery_wait(hwnd, (EaPage.OTP,))
         method = self._otp_page_method(observation, credentials.otp_methods, selected_method)
-        self._submit_otp(hwnd, observation, otp_supplier, method=method,
-                         challenge_started_at=challenge_started_at)
+        try:
+            self._submit_otp(hwnd, observation, otp_supplier, method=method,
+                             challenge_started_at=challenge_started_at)
+        except LeaseStaleError:
+            raise
+        except LeaseProviderError as error:
+            raise EaOtpUnavailable("EA 密码恢复验证码获取失败，跳过本次账号") from error
         observation = self._recovery_wait(hwnd, (EaPage.RESET_PASSWORD,), timeout_s=20.0)
         self._record("password-recovery-verified", observation)
         field_observation = observation
