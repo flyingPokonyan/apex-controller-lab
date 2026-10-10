@@ -568,6 +568,24 @@ class AccountOrchestrator:
 
         return provide
 
+    def _password_recovery_handler(self, lease):
+        def recover(action, credentials):
+            try:
+                with self._provider_operation_lock:
+                    operation_id = self._begin_operation(PendingOperation.PASSWORD_RESET)
+                    updated = self.provider.password_reset(lease.lease_id, lease.lease_fence,
+                        operation_id, action=action,
+                        reset_id=credentials.password_reset_id if action == "COMMIT" else None)
+                    if updated.login_identifier.casefold() != credentials.login_identifier.casefold():
+                        raise EaAppAutomationError("密码恢复凭据与本次账号不匹配")
+                    self._finish_operation()
+                    return updated
+            except LeaseProviderError as error:
+                # Keep the encrypted candidate on Forge. Cleanup can move to
+                # another account; a later lease can reconcile the candidate.
+                raise EaCredentialsRejected("EA 密码恢复凭据服务未完成") from error
+        return recover
+
     def _ensure_account_identity(
         self,
         lease: AccountLease,
@@ -607,6 +625,9 @@ class AccountOrchestrator:
                     operation_id,
                 )
                 self._finish_operation()
+            configure = getattr(self.ea_driver, "configure_password_recovery", None)
+            if callable(configure):
+                configure(self._password_recovery_handler(lease))
             self.ea_driver.sign_in(credentials, self._otp_supplier(lease))
 
         self._update_checkpoint(
@@ -616,6 +637,14 @@ class AccountOrchestrator:
         identity = self.ea_driver.verify_identity(expected)
         if not identity.verified or identity.ea_account_id != expected:
             raise EaAppAutomationError("EA App 登录身份无法与租约账号匹配")
+        if (current is not None or credentials.password_reset_id is not None) and callable(
+            getattr(self.provider, "password_reset", None)
+        ):
+            with self._provider_operation_lock:
+                credentials = self.provider.credentials(lease.lease_id, lease.lease_fence,
+                    self.operation_id_factory())
+                if credentials.password_reset_id is not None:
+                    self._password_recovery_handler(lease)("COMMIT", credentials)
         return identity
 
     def _session_identity(

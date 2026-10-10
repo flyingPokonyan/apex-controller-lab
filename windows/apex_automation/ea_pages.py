@@ -18,6 +18,9 @@ from .ocr_obstacles import normalize_ocr_text
 class EaPage(str, Enum):
     EMAIL = "EMAIL"
     PASSWORD = "PASSWORD"
+    RECOVERY_ACCOUNT = "RECOVERY_ACCOUNT"
+    RESET_PASSWORD = "RESET_PASSWORD"
+    RESET_SUCCESS = "RESET_SUCCESS"
     OTP_METHOD = "OTP_METHOD"
     OTP = "OTP"
     CAPTCHA = "CAPTCHA"
@@ -264,6 +267,15 @@ def classify_page(normalized_tokens: Iterable[str]) -> EaPage:
         return EaPage.CAPTCHA
     if has_any(compact, EXPIRED_SESSION_TERMS):
         return EaPage.EXPIRED_SESSION
+    # Recovery is a different transaction from login. Its account/password
+    # fields must never be accepted as the ordinary login form.
+    if "yourpasswordhasbeenchanged" in compact and "success" in compact:
+        return EaPage.RESET_SUCCESS
+    if ("resetyourpassword" in compact and "submit" in compact
+            and has_password_field(compact) and not has_account_field(compact)):
+        return EaPage.RESET_PASSWORD
+    if "passwordrecovery" in compact and has_account_field(compact):
+        return EaPage.RECOVERY_ACCOUNT
     # The chooser talks about codes too, so it has to be settled before the
     # code-entry page: typing into it would go nowhere.
     if has_any(compact, OTP_METHOD_TERMS):
@@ -368,6 +380,9 @@ def page_markers(normalized_tokens: Iterable[str]) -> tuple[str, ...]:
         ("submit", SUBMIT_TERMS),
         ("error", LOGIN_ERROR_TERMS),
         ("nav", SIGNED_IN_TERMS),
+        ("recoveryAccount", ("passwordrecovery",)),
+        ("resetPassword", ("resetyourpassword",)),
+        ("resetSuccess", ("yourpasswordhasbeenchanged",)),
     ):
         if has_any(compact, terms):
             seen.append(name)

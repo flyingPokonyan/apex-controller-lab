@@ -66,6 +66,14 @@ EA_STEPS = frozenset(['OTHER',
  'otp-method-unavailable',
  'otp-submitted',
  'otp-totp-code-page',
+ 'password-recovery-account-verified',
+ 'password-recovery-failed',
+ 'password-recovery-login-ready',
+ 'password-recovery-password-typed',
+ 'password-recovery-start',
+ 'password-recovery-new-password',
+ 'password-recovery-success',
+ 'password-recovery-verified',
  'password-typed',
  'preflight',
  'preflight-unknown',
@@ -98,7 +106,7 @@ EA_STEPS = frozenset(['OTHER',
  'signout-menu-missing',
  'signout-not-signed-in',
  'signout-timeout'])
-EA_PAGES = frozenset(['BANNED', 'CAPTCHA', 'EMAIL', 'EXPIRED_SESSION', 'NONE', 'OTP', 'OTP_METHOD', 'PASSWORD', 'SIGNED_IN', 'UNKNOWN'])
+EA_PAGES = frozenset(['BANNED', 'CAPTCHA', 'EMAIL', 'EXPIRED_SESSION', 'NONE', 'OTP', 'OTP_METHOD', 'PASSWORD', 'RECOVERY_ACCOUNT', 'RESET_PASSWORD', 'RESET_SUCCESS', 'SIGNED_IN', 'UNKNOWN'])
 PHASES = frozenset(['CLAIMING', 'EA_STARTING', 'EA_SIGNING_IN', 'EA_IDENTITY_VERIFYING', 'APEX_STARTING', 'APEX_PLAYING', 'APEX_STOPPING', 'EA_SIGNING_OUT', 'LEASE_COMPLETING'])
 
 

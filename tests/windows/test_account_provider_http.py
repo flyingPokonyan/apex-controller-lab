@@ -80,6 +80,19 @@ class FakeTransport:
 
 
 class HttpAccountProviderTest(unittest.TestCase):
+    def test_password_reset_candidate_is_recoverable_and_secret_on_repr(self):
+        transport=FakeTransport(response({"loginIdentifier":"fixture@example.test","password":"Candidate42!",
+            "otpMethods":["EMAIL"],"passwordResetId":"reset-1"}),
+            response({"loginIdentifier":"fixture@example.test","password":"Candidate42!","otpMethods":["EMAIL"]}))
+        provider=self.provider(transport)
+        prepared=provider.password_reset("lease_1",7,"prepare-1",action="PREPARE")
+        self.assertEqual(prepared.password_reset_id,"reset-1")
+        self.assertNotIn("Candidate42!",repr(prepared))
+        committed=provider.password_reset("lease_1",7,"commit-1",action="COMMIT",reset_id="reset-1")
+        self.assertIsNone(committed.password_reset_id)
+        self.assertEqual(transport.calls[0]["json"],{"schemaVersion":1,"leaseFence":7,"action":"PREPARE"})
+        self.assertEqual(transport.calls[1]["json"]["resetId"],"reset-1")
+
     def test_expired_recovery_is_an_explicit_opt_in_on_the_wire(self) -> None:
         transport = FakeTransport(response(lease_payload()), response(lease_payload()))
         provider = self.provider(transport)

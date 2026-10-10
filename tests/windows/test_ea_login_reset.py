@@ -73,6 +73,9 @@ class LoginResetTest(unittest.TestCase):
         driver._await_identity = await_identity
         driver.sleep = lambda _seconds: None
         driver.notify = lambda _message: None
+        def recovery_unavailable(*_args):
+            raise EaAppAutomationError("fixture has no password recovery surface")
+        driver._recover_password = recovery_unavailable
         return driver
 
     def sign_in(self, driver):
@@ -159,6 +162,47 @@ class LoginResetTest(unittest.TestCase):
             self.sign_in(driver)
         self.assertEqual(caught.exception.reason_code, "EA_CREDENTIALS_INVALID")
         self.assertEqual([e[0] for e in self.events], ["back", "identifier", "password", "await"])
+
+    def test_recovered_account_is_logged_in_again_before_returning_identity(self):
+        driver = self.driver([self.email, self.email])
+        attempts, recoveries = [], []
+        def await_identity(*_args, **_kwargs):
+            attempts.append(True)
+            if len(attempts) == 1:
+                raise EaCredentialsRejected("fresh credentials rejected")
+            return self.identity
+        driver._await_identity = await_identity
+        driver._recover_password = lambda *args: recoveries.append(args)
+        self.assertIs(self.sign_in(driver), self.identity)
+        self.assertEqual(len(recoveries), 1)
+        self.assertIs(recoveries[0][1], self.credentials)
+        self.assertEqual([e[0] for e in self.events], ["identifier", "password"] * 2)
+
+    def test_rejection_after_recovery_does_not_reset_again(self):
+        driver = self.driver([self.email, self.email], rejection=True)
+        recoveries = []
+        driver._recover_password = lambda *args: recoveries.append(True)
+        with self.assertRaises(EaCredentialsRejected):
+            self.sign_in(driver)
+        self.assertEqual(recoveries, [True])
+
+    def test_generic_rejection_does_not_reset_password(self):
+        driver = self.driver([self.email])
+        def reject(*_args, **_kwargs):
+            raise EaLoginRejected("rate limited")
+        driver._await_identity = reject
+        driver._recover_password = lambda *args: self.fail("must not reset")
+        with self.assertRaises(EaLoginRejected):
+            self.sign_in(driver)
+
+    def test_recovery_captcha_closes_and_skips_failed_credentials(self):
+        driver = self.driver([self.email], rejection=True)
+        def captcha(*_args):
+            raise EaCaptchaRequired("captcha")
+        driver._recover_password = captcha
+        driver._leave_recovery_captcha = lambda _hwnd: None
+        with self.assertRaises(EaCredentialsRejected):
+            self.sign_in(driver)
 
     def test_password_rejection_requires_fresh_identifier_echo_for_review(self):
         for verified, page, expected in (

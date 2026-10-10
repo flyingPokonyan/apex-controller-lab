@@ -87,6 +87,7 @@ class OtpMethod(str, Enum):
 class SecretCredentials:
     login_identifier: str = field(repr=False)
     password: str = field(repr=False)
+    password_reset_id: str | None = field(default=None, repr=False, kw_only=True)
     # Old Providers only supported TOTP and did not return this field.
     otp_methods: tuple[OtpMethod, ...] = (OtpMethod.TOTP,)
 
@@ -749,6 +750,20 @@ class HttpAccountProvider:
             operation_id=operation_id,
         )
         assert payload is not None
+        return self._secret_credentials(payload)
+
+    def password_reset(self, lease_id, lease_fence, operation_id, *, action, reset_id=None):
+        request = {"schemaVersion": 1, "leaseFence": lease_fence, "action": action}
+        if reset_id is not None:
+            request["resetId"] = reset_id
+        payload, _ = self._request("POST", self._lease_suffix(lease_id, "password-reset"),
+            payload=request, operation_id=operation_id)
+        return self._secret_credentials(payload)
+
+    def _secret_credentials(self, payload):
+        reset_id = payload.get("passwordResetId")
+        if reset_id is not None and (not isinstance(reset_id, str) or not 1 <= len(reset_id) <= 128):
+            raise LeaseProviderError("Provider 返回了无效的密码恢复 ID", code="INVALID_PROVIDER_RESPONSE")
         raw_methods = payload.get("otpMethods")
         if raw_methods is None:
             otp_methods = (OtpMethod.TOTP,)
@@ -771,6 +786,7 @@ class HttpAccountProvider:
             login_identifier=self._string(payload, "loginIdentifier"),
             password=self._string(payload, "password"),
             otp_methods=otp_methods,
+            password_reset_id=reset_id,
         )
 
     def renew(

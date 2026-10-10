@@ -38,6 +38,7 @@ from .ea_app import (
     OtpChallenge,
 )
 from .ea_evidence import EaLoginEvidence
+from .ea_password_recovery import EaPasswordRecoveryMixin
 from .ea_onboarding import library_tour_close_point, library_tour_visible
 from .ea_pages import (
     ACCOUNT_BANNED_CLOSE_TERMS,
@@ -183,6 +184,9 @@ PRE_LOGIN_PAGES = (
     EaPage.OTP_METHOD,
     EaPage.OTP,
     EaPage.EXPIRED_SESSION,
+    EaPage.RECOVERY_ACCOUNT,
+    EaPage.RESET_PASSWORD,
+    EaPage.RESET_SUCCESS,
 )
 GW_OWNER = 4
 
@@ -226,7 +230,7 @@ class _LoginRestart(Exception):
     """BACK TO SIGN-IN was used; the caller must type the login again."""
 
 
-class WindowsEaHybridDriver:
+class WindowsEaHybridDriver(EaPasswordRecoveryMixin):
     """Win32/OCR fallback for the EA CEF surface that exposes no inner UIA tree."""
 
     def __init__(
@@ -1028,7 +1032,7 @@ class WindowsEaHybridDriver:
         # Login evidence outranks a stray account-id shaped word: reading the
         # login page as "signed in as somebody else" sent the orchestrator off
         # to sign out of a session that was never there.
-        if page in (EaPage.EMAIL, EaPage.PASSWORD, EaPage.EXPIRED_SESSION):
+        if page in PRE_LOGIN_PAGES:
             return EaUiState.LOGIN
         if page is EaPage.SIGNED_IN or self._identity(hwnd) is not None:
             return EaUiState.SIGNED_IN
@@ -1313,7 +1317,12 @@ class WindowsEaHybridDriver:
         # A password/OTP page belongs to the identifier submitted earlier,
         # potentially by another lease. Masked email copy cannot bind it to
         # these credentials. Start each new login with its own identifier.
-        intermediate = (EaPage.PASSWORD, EaPage.OTP_METHOD, EaPage.OTP)
+        if observation.page is EaPage.RESET_SUCCESS:
+            point = self._recovery_control(observation, ("signin",), y_range=(0.25, 0.80))
+            self._click_point(hwnd, *point)
+            observation = self._wait_for_page(hwnd, (EaPage.EMAIL,), timeout_s=20.0)
+        intermediate = (EaPage.PASSWORD, EaPage.OTP_METHOD, EaPage.OTP,
+                        EaPage.RECOVERY_ACCOUNT, EaPage.RESET_PASSWORD)
         if observation.page not in intermediate:
             return observation
         self._record("signin-reset-start", observation)
@@ -1370,8 +1379,11 @@ class WindowsEaHybridDriver:
     ) -> EaIdentityFact:
         if self.evidence is not None:
             self.notify(f"EA 登录证据目录：{self.evidence.rotate()}")
-            self.evidence.protect(credentials.login_identifier)
-        for _attempt in range(2):
+            self.evidence.protect(credentials.login_identifier, credentials.password)
+        recovery_attempted = False
+        expired_restarts = 0
+        # One password recovery and one expired-session restart, at most.
+        for _attempt in range(3):
             self._login_identifier_verified = False
             hwnd = self._ea_window()
             self._dismiss_expired_session(hwnd)
@@ -1401,14 +1413,36 @@ class WindowsEaHybridDriver:
                     f"EA App 当前不是可登录页面（{observation.page.value}）"
                 )
             try:
-                return self._await_identity(
+                identity = self._await_identity(
                     hwnd,
                     otp_supplier,
                     otp_methods=credentials.otp_methods,
                     initial_challenge_started_at=challenge_started_at,
                 )
+                return identity
             except _LoginRestart:
+                if expired_restarts >= 1:
+                    break
+                expired_restarts += 1
                 self.notify("EA 会话已过期，已返回登录页，重新登录")
+            except EaCredentialsRejected:
+                if recovery_attempted:
+                    raise
+                recovery_attempted = True
+                try:
+                    credentials = self._recover_password(hwnd, credentials, otp_supplier) or credentials
+                except EaCaptchaRequired as error:
+                    try:
+                        self._leave_recovery_captcha(hwnd)
+                    except EaAppAutomationError:
+                        pass
+                    self._record("password-recovery-failed")
+                    raise EaCredentialsRejected("EA 密码恢复遇到 Captcha，跳过本次账号") from error
+                except EaAccountBanned:
+                    raise
+                except EaAppAutomationError as error:
+                    self._record("password-recovery-failed")
+                    raise EaCredentialsRejected("EA 密码恢复未完成，凭据仍需核对") from error
         raise EaAppAutomationError("EA 会话过期后重新登录仍未完成")
 
     def _choose_otp_method(
@@ -1626,7 +1660,7 @@ class WindowsEaHybridDriver:
                 continue
             # A login page still on screen is not a badge to read, whatever a
             # corner crop makes of the text sitting there.
-            if observation.page in (EaPage.EMAIL, EaPage.PASSWORD):
+            if observation.page in PRE_LOGIN_PAGES:
                 pending_identity = None
                 continue
             identity = self._identity(hwnd)

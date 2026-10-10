@@ -549,6 +549,37 @@ class FakeManagedSession:
 
 
 class AccountOrchestratorTest(unittest.TestCase):
+    def test_pending_password_commits_only_after_the_leased_stable_identity(self):
+        from unittest.mock import Mock
+        import threading
+        for observed, allowed in (("ea_acct_1", True), ("unrelated", False)):
+            with self.subTest(observed=observed):
+                lease=replace(FakeAccountProvider.lease("acct_1"),expected_ea_account_id="ea_acct_1")
+                driver=Mock()
+                driver.current_page_is_banned.return_value=False
+                driver.current_identity.return_value=None
+                driver.verify_identity.return_value=EaIdentityFact(observed,"fixture",True)
+                provider=Mock()
+                candidate=SecretCredentials("fixture@example.test","Candidate42!",password_reset_id="reset-1")
+                provider.credentials.return_value=candidate
+                provider.password_reset.return_value=replace(candidate,password_reset_id=None)
+                orchestrator=object.__new__(AccountOrchestrator)
+                orchestrator.provider=provider;orchestrator.ea_driver=driver
+                orchestrator._provider_operation_lock=threading.RLock()
+                orchestrator._update_checkpoint=lambda **_:None
+                orchestrator._begin_operation=lambda _:"op-1"
+                orchestrator._finish_operation=lambda:None
+                orchestrator._otp_supplier=lambda _:None
+                orchestrator.operation_id_factory=lambda:"op-2"
+                orchestrator.notify=lambda _:None
+                if allowed:
+                    orchestrator._ensure_account_identity(lease)
+                    self.assertEqual(provider.password_reset.call_args.kwargs,
+                        {"action":"COMMIT","reset_id":"reset-1"})
+                else:
+                    with self.assertRaises(EaAppAutomationError):orchestrator._ensure_account_identity(lease)
+                    provider.password_reset.assert_not_called()
+
     def test_cleanup_retries_past_three_restarts_before_claiming_another_account(self) -> None:
         from unittest.mock import Mock
         import managed_launcher

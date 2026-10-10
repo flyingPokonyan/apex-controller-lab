@@ -56,12 +56,20 @@ RUN_PACK_OCR_TESTS=1 windows/.venv/bin/python -m unittest discover -s tests/wind
 
 本地 `windows/runs/ea-login/<attempt>/steps.jsonl` 和每日耗时文件可查看 `cloud-upload-error-ack`、`cloud-upload-error-dismissed`、`cloud-upload-error-action-missing`、`cloud-upload-error-stuck` 与 `signout-cloud-upload-retry`。更新 Controller 并重新启动账号循环后生效；已有暂停由原 checkpoint 恢复流程处理，不要删除 `windows/runs`。
 
-## 登录失败后的换号
+## 登录失败后的密码恢复与换号
 
 `Your credentials are incorrect or have expired` 表示 EA 拒绝了该次登录，不能单凭提示确认某个新租约的密码错误。密码页及验证码页可能仍属于上一账号；脱敏邮箱不足以验证完整账号。
 
 每次新的 `sign_in` 如果开始于密码或验证码页，会先点击左上角已识别的 `BACK`，确认回到只有账号输入框的页面，再填写本次租约的登录标识和密码。最多四次返回操作；缺少可信按钮、过渡画面未结束或无法返回时，不输入新密码。当前调用中刚提交账号后正常到达的密码/验证码页继续原流程。
 
-本次填写的完整登录标识在账号输入区域回显、OCR 置信度至少 0.85，提交后在密码页看到明确凭据错误或过期时，返回 `EA_CREDENTIALS_INVALID`。Forge 在安全清理并关闭失败租约后，用现有 `automation_hold` 暂停账号并记录“EA 登录凭据待核对”，连续 Runner 等待 1 秒后继续领取其他账号。账号、密码、等级和组合包资料均保留；修正密码后在 Forge 恢复自动取号即可。旧客户端的 `LOGIN_INVALID`、未核实标识的拒绝、限流及验证码问题维持原冷却处理，避免把错配或暂时失败直接当成凭据坏号。
+本次填写的完整登录标识在账号输入区域回显、OCR 置信度至少 0.85，提交后在密码页看到明确凭据错误或过期时，先在当前租约内尝试一次原密码恢复。点击密码恢复链接后，在 `Password Recovery` 页面重新填写并核实本次租约邮箱，再优先使用现有验证器；仅有邮箱验证码来源时走邮箱验证。`Reset Your Password` 页面填写 Forge 保存的原密码，输入后重新截图识别 `SUBMIT`，适配聚焦时展开密码规则导致按钮下移。只有读到 `Success! / Your password has been changed.`，再点击 `SIGN IN` 返回清晰账号页，重新填写本次账号并完成原有身份核对，才继续启动 Apex。
+
+恢复总预算 240 秒，每次 `sign_in` 最多一次；验证码仅提交一次。缺少可信控件、账号回显未通过、验证/提交超时或重设后再次拒绝时，保留 `EA_CREDENTIALS_INVALID`。恢复中的 Captcha 尝试可信 BACK 后安全清理并跳过，封禁仍使用原有专门原因。原密码不满足规则或 EA 明确拒绝重设时，最多生成一个替代密码；提交结果未知时不换密码重试。不把限流或未核实账号的拒绝当作重置触发条件。Forge 在安全清理并关闭失败租约后，用现有 `automation_hold` 暂停账号并记录“EA 登录凭据待核对”，连续 Runner 等待 1 秒后继续领取其他账号。账号、密码、等级和组合包资料均保留；修正密码后在 Forge 恢复自动取号即可。旧客户端的 `LOGIN_INVALID`、未核实标识的拒绝、限流及验证码问题维持原冷却处理，避免把错配或暂时失败直接当成凭据坏号。
 
 可在上述 EA 日志中查看 `signin-reset-start`、`signin-back-to-account`、`signin-account-page-ready`、`signin-back-missing` 和 `signin-account-reset-failed`，结合 `account-typed.identifierEchoed` / `identifierVerified` 判断是否完成返回和账号重填。只记录核对结果，不保存明文登录标识。
+
+恢复证据记录 `password-recovery-new-password`、`password-recovery-start`、`password-recovery-account-verified`、`password-recovery-verified`、`password-recovery-password-typed`、`password-recovery-success`、`password-recovery-login-ready`、`password-recovery-failed`。只保存固定阶段和核实结果，不保存邮箱、密码或验证码明文。Forge 与 Controller 的诊断白名单需一起更新；先部署 Forge，再更新 Windows。新增回归使用脱敏页面文字和控件几何，覆盖密码规则展开后的 SUBMIT 位置。真实 Windows 恢复仍需停机后的单账号验证。
+
+新密码使用租约专属 `/password-reset` API，要求持有当前租约、有效 fence、`credentials:read` 和 `lease:renew`。`PREPARE` 在 Forge 加密保存候选密码后才返回；`COMMIT` 仅在 EA 显示明确重设成功或后续登录核对稳定 EA ID 成功后执行，原子更新 `ea_accounts.password_ciphertext`。候选密码不写本地 checkpoint、日志或审计明文。网络失败、重启、甚至换租约时仍保留候选密码，后续可再次重设或核对登录后提交，防止 EA 已更新而 Forge 丢失密码。
+
+人工验证可使用一次性 `apex_login_recovery_requests` 队列，按优先级派发且可绑定设备；仍执行全部资格与占用检查，领用事务提交后自动移除，不改变正常补库存调度。清理或退出证据无法确认时保留租约并暂停设备，避免同一账号被重复派发。

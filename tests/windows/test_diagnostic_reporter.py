@@ -64,6 +64,17 @@ class DiagnosticReporterTest(unittest.TestCase):
         self.assertTrue(all(e["leaseId"] == "lease_1" and e["runId"] is None for e in events))
         self.assertTrue(self.worker.url.endswith("/v1/runner/diagnostics"))
 
+    def test_password_recovery_pages_survive_collection_and_upload(self):
+        evidence = EaLoginEvidence(self.root / "ea-login", save_screenshots=False)
+        pairs = [("password-recovery-account-verified", "RECOVERY_ACCOUNT"),
+                 ("password-recovery-password-typed", "RESET_PASSWORD"),
+                 ("password-recovery-success", "RESET_SUCCESS")]
+        for step, page in pairs:
+            evidence.step(step, page=page)
+        self.assertEqual(self.worker.process_once(), 0)
+        events = self.transport.requests[0]["events"]
+        self.assertEqual([(e["payload"]["step"], e["payload"]["page"]) for e in events], pairs)
+
     def test_offline_restart_replays_same_ids_and_atomic_cursor(self):
         self.ea()
         self.transport.error = OSError("private-token https://private-url/secret")
