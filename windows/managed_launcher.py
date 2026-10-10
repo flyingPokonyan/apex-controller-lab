@@ -326,10 +326,13 @@ class Launcher:
         env = dict(os.environ, PYTHONPATH=str(self.repo.root / "windows"),
                    PYTHONUNBUFFERED="1", APEX_MANAGED_ROOT=str(self.root),
                    APEX_MANAGED_SESSION=self.session)
-        # Use --resume only at an explicit launch attempt. It does not bypass
-        # remote lease fences or the recovery-before-claim path.
+        # A retry of the same revision must retain the checkpoint's pause and
+        # EA recovery budget. Explicit operator resume or a new revision gets
+        # one recovery attempt, still subject to remote lease fences.
         args = [str(self.repo.worker_python), "-u", "-m", "apex_automation", "account-cycle",
-                "--runner-config", str(self.repo.root / "windows/account-cycle.private.json"), "--resume"]
+                "--runner-config", str(self.repo.root / "windows/account-cycle.private.json")]
+        if self.state.get("resumeWorker") or self.state.get("running") != commit:
+            args.append("--resume")
         self.worker = subprocess.Popen(args, cwd=self.repo.root, env=env,
                                        creationflags=subprocess.CREATE_NEW_PROCESS_GROUP if os.name == "nt" else 0,
                                        start_new_session=os.name != "nt")
@@ -339,7 +342,7 @@ class Launcher:
             terminate_owned(self.worker)
             self.worker = None
             raise
-        self.save("WORKER_STARTING", running=commit, pid=self.worker.pid, session=self.session,
+        self.save("WORKER_STARTING", running=commit, resumeWorker=False, pid=self.worker.pid, session=self.session,
                   workerStartedAt=self.started, workerConfirmedAt=None, workerHeartbeatAt=None,
                   workerPid=None, workerPhase=None, workerBlocked=False, workerReason=None, completed=0, error=None)
 
@@ -462,6 +465,7 @@ class Launcher:
 
     def run(self, *, resume=False, update_only=False):
         if resume:
+            self.state["resumeWorker"] = True
             self.state["operatorStopped"] = False
             self.state["failures"] = {}
             self.state["recoveryFailures"] = {}
@@ -488,6 +492,7 @@ class Launcher:
                 if check_now.exists():
                     control = read_json(check_now)
                     if control.get("resume"):
+                        self.state["resumeWorker"] = True
                         self.state["operatorStopped"] = False
                         self.state["failures"] = {}
                         self.state["recoveryFailures"] = {}

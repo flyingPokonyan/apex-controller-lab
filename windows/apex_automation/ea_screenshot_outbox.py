@@ -61,7 +61,7 @@ def enqueue(root: Path, frame, record, lease_id):
 
 
 class EaScreenshotUploader:
-    def __init__(self, settings, runs_root, transport, *, timeout_s=10, notify=lambda _message: None):
+    def __init__(self, settings, runs_root, transport, *, timeout_s=30, notify=lambda _message: None):
         self.settings, self.transport = settings, transport
         self.root = Path(runs_root) / "diagnostics" / "ea-evidence"
         parsed = urlsplit(settings.report_url or "")
@@ -70,10 +70,12 @@ class EaScreenshotUploader:
         self.next_send_at = 0.0
         self.backoff = 2.0
 
-    def process_once(self):
+    def process_once(self, *, should_stop=lambda: False):
         if time.monotonic() < self.next_send_at:
             return
-        for path in _pending_files(self.root)[:4]:
+        for path in _pending_files(self.root)[:2]:
+            if should_stop():
+                return
             try:
                 if time.time() - path.stat().st_mtime > 86400:
                     path.unlink(missing_ok=True)

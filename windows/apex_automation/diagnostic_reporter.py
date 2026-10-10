@@ -25,13 +25,14 @@ def _digest(value):
 
 class DiagnosticReporter:
     def __init__(self, settings, runs_root, *, transport=None, notify=lambda _: None,
-                 poll_interval_s=30, request_timeout_s=5):
+                 poll_interval_s=30, request_timeout_s=5, screenshot_timeout_s=30):
         self.settings = settings
         self.root = Path(runs_root)
         self.transport = transport or UrllibReportTransport()
         self.notify = notify
         self.poll_interval_s = poll_interval_s
         self.request_timeout_s = request_timeout_s
+        self.screenshot_timeout_s = screenshot_timeout_s
         self.path = self.root / "diagnostics" / (_digest(settings.device_id)[:16] + ".json")
         self.state = json.loads(self.path.read_text(encoding="utf-8")) if self.path.exists() else {"cursors": {}, "pending": [], "rejected": 0}
         if not isinstance(self.state.get("cursors"), dict) or not isinstance(self.state.get("pending"), list):
@@ -206,13 +207,13 @@ class DiagnosticReporter:
             from .ea_screenshot_outbox import EaScreenshotUploader
             if not hasattr(self, "_screenshots"):
                 self._screenshots = EaScreenshotUploader(self.settings, self.root, self.transport,
-                    timeout_s=self.request_timeout_s, notify=self.notify)
+                    timeout_s=self.screenshot_timeout_s, notify=self.notify)
             try:
-                self._screenshots.process_once()
+                self._screenshots.process_once(should_stop=self._stop.is_set)
             except Exception:
                 self._notice("EA_SCREENSHOT_IO")
         pending = self.state["pending"]
-        if not send or not pending or time.monotonic() < self._next_send_at:
+        if not send or self._stop.is_set() or not pending or time.monotonic() < self._next_send_at:
             return len(pending)
         batch = pending[:self._batch_size]
         payload = {"schemaVersion": 1, "deviceId": self.settings.device_id,
@@ -268,7 +269,7 @@ class DiagnosticReporter:
     def stop(self):
         self._stop.set()
         if self._thread is not None:
-            self._thread.join(timeout=self.request_timeout_s + 1)
+            self._thread.join(timeout=max(self.request_timeout_s, self.screenshot_timeout_s) + 1)
             # A wedged OS transport must never hold account cleanup hostage.
             if self._thread.is_alive():
                 self._notice("DIAGNOSTIC_STOP_PENDING")

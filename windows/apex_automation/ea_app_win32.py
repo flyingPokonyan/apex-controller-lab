@@ -445,10 +445,12 @@ class WindowsEaHybridDriver(EaPasswordRecoveryMixin):
 
     def _focus(self, hwnd: int) -> None:
         hwnd = self._live(hwnd)
-        self.user32.ShowWindow(hwnd, SW_RESTORE)
         foreground = int(self.user32.GetForegroundWindow() or 0)
         if self._window_belongs_to_ea(hwnd, foreground):
             return
+        # Restoring an already foreground EA frame can dismiss its popup menu
+        # between the click and the OCR observation.
+        self.user32.ShowWindow(hwnd, SW_RESTORE)
         current_thread = int(self.kernel32.GetCurrentThreadId())
         fg_pid = wintypes.DWORD()
         fg_thread = int(
@@ -948,7 +950,13 @@ class WindowsEaHybridDriver(EaPasswordRecoveryMixin):
             if metrics:
                 metrics.flush(force=True, step=step)
             if observation is None:
-                self.evidence.step(step, page="NONE", **detail)
+                # Window discovery/focus can fail before the first observation.
+                # Capture the desktop for diagnosis without focusing or acting.
+                try:
+                    frame = self._frame()
+                except Exception:
+                    frame = None
+                self.evidence.step(step, page="NONE", frame=frame, **detail)
             else:
                 self.evidence.step(
                     step,

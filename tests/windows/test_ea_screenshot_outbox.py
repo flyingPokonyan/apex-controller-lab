@@ -12,6 +12,7 @@ import numpy as np
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2] / 'windows'))
 from apex_automation.ea_evidence import EaLoginEvidence
+from apex_automation.ea_app_win32 import WindowsEaHybridDriver
 from apex_automation.ea_screenshot_outbox import EaScreenshotUploader, MAX_PENDING
 from apex_automation.ocr_obstacles import OcrToken
 
@@ -84,3 +85,41 @@ class EaScreenshotTest(unittest.TestCase):
             self.capture()
         self.assertIn('account-typed', self.evidence.steps_path.read_text())
         self.assertEqual(len(list(self.evidence.dir.glob('*.png'))), 1)
+
+    def test_failure_before_window_observation_still_captures_the_desktop(self):
+        driver = object.__new__(WindowsEaHybridDriver)
+        driver.evidence = self.evidence
+        driver.notify = Mock()
+        frame = np.full((100, 200, 3), 180, dtype=np.uint8)
+        driver._frame = Mock(return_value=frame)
+        driver._focus = Mock(side_effect=AssertionError('diagnostics must not focus'))
+        driver._record('ui-recovery-start')
+        payload = json.loads(next((self.root / 'diagnostics/ea-evidence').glob('*.json')).read_text())
+        self.assertEqual(payload['page'], 'NONE')
+        self.assertEqual(payload['step'], 'ui-recovery-start')
+        driver._focus.assert_not_called()
+        driver.notify.assert_not_called()
+
+    def test_capture_failure_still_preserves_the_text_event(self):
+        driver = object.__new__(WindowsEaHybridDriver)
+        driver.evidence = self.evidence
+        driver.notify = Mock()
+        driver._frame = Mock(side_effect=RuntimeError('capture unavailable'))
+        driver._record('ui-recovery-start')
+        self.assertIn('ui-recovery-start', self.evidence.steps_path.read_text())
+        driver.notify.assert_not_called()
+
+    def test_stopping_finishes_only_the_current_image_and_preserves_the_rest(self):
+        self.capture()
+        self.capture()
+        stopping = [False]
+        transport = Mock()
+        def send(_url, _token, payload, timeout):
+            self.assertEqual(timeout, 30)
+            stopping[0] = True
+            return 200, {'schemaVersion': 1, 'deviceId': 'dev_1', 'eventId': payload['eventId']}, {}
+        transport.send.side_effect = send
+        uploader = EaScreenshotUploader(self.settings, self.root, transport)
+        uploader.process_once(should_stop=lambda: stopping[0])
+        self.assertEqual(transport.send.call_count, 1)
+        self.assertEqual(len(list(uploader.root.glob('*.json'))), 1)

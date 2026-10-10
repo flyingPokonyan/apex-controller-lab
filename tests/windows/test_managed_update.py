@@ -261,6 +261,31 @@ class LauncherTest(unittest.TestCase):
         self.assertEqual(self.app.state["stage"], "WORKER_STARTING")
         self.assertIsNone(self.app.state.get("workerConfirmedAt"))
 
+    def test_new_revision_resumes_once_but_automatic_retries_keep_the_checkpoint_pause(self):
+        self.app.state['running'] = 'old'
+        with patch.object(launcher.subprocess, 'Popen', return_value=Mock(pid=123)) as spawn, patch.object(launcher, 'WorkerJob'):
+            self.app.start('new')
+            self.assertIn('--resume', spawn.call_args.args[0])
+            # A launcher restart must not replenish the worker's recovery budget.
+            reloaded = launcher.Launcher(self.repo)
+            reloaded.start('new')
+            self.assertNotIn('--resume', spawn.call_args.args[0])
+
+    def test_operator_resume_survives_launcher_reload_and_is_consumed_once(self):
+        future = Future()
+        future.set_exception(launcher.LauncherError('OFFLINE'))
+        executor = Mock()
+        executor.submit.return_value = future
+        self.app.state['running'] = 'same'
+        with patch.object(launcher, 'ThreadPoolExecutor', return_value=executor):
+            self.app.run(resume=True, update_only=True)
+        reloaded = launcher.Launcher(self.repo)
+        with patch.object(launcher.subprocess, 'Popen', return_value=Mock(pid=123)) as spawn, patch.object(launcher, 'WorkerJob'):
+            reloaded.start('same')
+            self.assertIn('--resume', spawn.call_args.args[0])
+            reloaded.start('same')
+            self.assertNotIn('--resume', spawn.call_args.args[0])
+
     def test_only_successful_account_resets_budget(self):
         self.worker()
         self.app.state["failures"]["old"] = 2

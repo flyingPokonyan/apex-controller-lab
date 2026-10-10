@@ -3,7 +3,7 @@ import json
 import sys
 import tempfile
 import unittest
-from unittest.mock import Mock
+from unittest.mock import Mock, patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "windows"))
 from apex_automation.diagnostic_reporter import DiagnosticReporter
@@ -202,3 +202,16 @@ class DiagnosticReporterTest(unittest.TestCase):
         self.worker._run()
         self.assertEqual(len(self.build().state["pending"]), 3)
         self.assertEqual(self.transport.requests, [])
+
+    def test_screenshots_have_their_own_timeout_and_shutdown_waits_for_one_request(self):
+        with patch('apex_automation.ea_screenshot_outbox.EaScreenshotUploader') as uploader:
+            self.worker.process_once()
+        self.assertEqual(uploader.call_args.kwargs['timeout_s'], 30)
+        self.assertEqual(self.worker.request_timeout_s, 5)
+        should_stop = uploader.return_value.process_once.call_args.kwargs['should_stop']
+        self.assertFalse(should_stop())
+        self.worker._thread = Mock()
+        self.worker._thread.is_alive.return_value = False
+        self.worker.stop()
+        self.assertTrue(should_stop())
+        self.worker._thread.join.assert_called_once_with(timeout=31)

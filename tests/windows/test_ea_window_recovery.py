@@ -17,6 +17,19 @@ from apex_automation.ocr_obstacles import OcrToken
 
 
 class EaWindowRecoveryTest(unittest.TestCase):
+    def test_observing_an_ea_popup_does_not_restore_and_dismiss_it(self):
+        driver = object.__new__(WindowsEaHybridDriver)
+        driver._live = lambda hwnd: hwnd
+        # The popup is owned by the EA main window, with a different handle.
+        driver.user32 = Mock()
+        driver.user32.GetForegroundWindow.return_value = 8
+        driver.user32.GetParent.return_value = 0
+        driver.user32.GetWindow.return_value = 7
+        driver._focus(7)
+        driver.user32.ShowWindow.assert_not_called()
+        driver.user32.BringWindowToTop.assert_not_called()
+        driver.user32.SetForegroundWindow.assert_not_called()
+
     def driver(self, windows):
         driver = object.__new__(WindowsEaHybridDriver)
         clock = [0.0]
