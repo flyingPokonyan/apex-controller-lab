@@ -161,6 +161,50 @@ class CloudUploadRecoveryTest(unittest.TestCase):
         driver.start_apex()
         self.assertEqual(self.clicks, [(1515, 867), (345, 610), (1340, 810)])
 
+    def interrupted_launch(self):
+        # Proportions transcribed from Runner 1's 2026-10-10 21:35 screenshot.
+        return replace(self.clear, rect=(0, 0, 1000, 600), tokens=(
+            OcrToken('Your latest sync was interrupted', .99, (310, 200, 690, 230)),
+            OcrToken('Launch game', .99, (515, 375, 615, 400)),
+            OcrToken('Cancel', .99, (630, 375, 700, 400)),
+        ))
+
+    def test_cleanup_cancels_pending_launch_then_still_requires_signed_out_evidence(self):
+        dialog = self.interrupted_launch()
+        driver = self.driver([dialog, self.blank, self.clear, self.clear, self.login])
+        self.assertTrue(driver._sign_out_once())
+        self.assertEqual(self.clicks, [(665, 387), (700, 500)])
+        self.assertEqual(self.records[-1], 'signed-out')
+        self.assertIn('signout-cloud-launch-dismissed', self.records)
+
+    def test_interrupted_launch_cancel_requires_title_and_both_matching_actions(self):
+        dialog = self.interrupted_launch()
+        for tokens in (dialog.tokens[:2], dialog.tokens[:1] + dialog.tokens[2:],
+                       tuple(replace(t, confidence=.4) for t in dialog.tokens)):
+            driver = self.driver([])
+            with self.assertRaises(EaAppAutomationError):
+                driver._cancel_interrupted_cloud_launch(1, replace(dialog, tokens=tokens))
+            self.assertEqual(self.clicks, [])
+        driver = self.driver([])
+        unrelated = replace(dialog, tokens=dialog.tokens[1:])
+        self.assertIs(driver._cancel_interrupted_cloud_launch(1, unrelated), unrelated)
+        self.assertEqual(self.clicks, [])
+
+    def test_persistent_interrupted_launch_is_bounded_and_cannot_prove_logout(self):
+        dialog = self.interrupted_launch()
+        driver = self.driver([dialog], repeat=dialog)
+        with self.assertRaises(EaAppAutomationError):
+            driver._sign_out_once()
+        self.assertEqual(self.clicks, [(665, 387)] * 2)
+        self.assertEqual(self.menu_calls, [])
+        self.assertNotIn('signed-out', self.records)
+
+    def test_window_loss_after_launch_cancel_is_not_logout_confirmation(self):
+        driver = self.driver([self.interrupted_launch(), EaAppAutomationError('window gone')])
+        with self.assertRaises(EaAppAutomationError):
+            driver._sign_out_once()
+        self.assertNotIn('signed-out', self.records)
+
 
 if __name__ == "__main__":
     unittest.main()

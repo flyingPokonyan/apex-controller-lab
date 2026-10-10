@@ -178,6 +178,7 @@ CLOUD_UPLOAD_LOCAL_SAVE_TERMS = (
     "gameisstillsavedlocally",
     "游戏仍保存在本地",
 )
+CLOUD_LAUNCH_INTERRUPTED_TERMS = ("yourlatestsyncwasinterrupted",)
 
 # Pages that prove no session exists yet.
 PRE_LOGIN_PAGES = (
@@ -661,6 +662,43 @@ class WindowsEaHybridDriver(EaPasswordRecoveryMixin):
                 break
         self._record("cloud-upload-error-stuck", observation)
         raise EaAppAutomationError("EA 云端上传失败提示未能确认关闭，已停止点击")
+
+    def _cancel_interrupted_cloud_launch(
+        self, hwnd: int, observation: EaObservation,
+    ) -> EaObservation:
+        # This modal offers Launch game / Cancel, not the upload notice's OK.
+        # During sign-out cancel the pending launch, then still verify logout.
+        if not self._contains_any(observation, CLOUD_LAUNCH_INTERRUPTED_TERMS):
+            return observation
+        for attempt in range(1, 3):
+            placed = replace(observation, tokens=tuple(
+                token for token in observation.tokens if token.confidence >= 0.80
+            ))
+            title = phrase_point(placed.tokens, placed.rect, CLOUD_LAUNCH_INTERRUPTED_TERMS[0],
+                                 x_range=(0.25, 0.80), y_range=(0.20, 0.65))
+            cancel = self._anchor(placed, ("cancel", "取消"), exact=True,
+                                  x_range=(0.40, 0.85), y_range=(0.40, 0.85))
+            launch = self._anchor(placed, ("launchgame", "启动游戏", "开始游戏"), exact=True,
+                                  x_range=(0.35, 0.85), y_range=(0.40, 0.85))
+            if title is None or cancel is None or launch is None or cancel[1] <= title[1]:
+                self._record("signout-cloud-launch-action-missing", observation)
+                raise EaAppAutomationError("EA 云同步中断弹窗未找到可信取消按钮")
+            self._record("signout-cloud-launch-cancel", observation, attempt=attempt)
+            self._click_point(hwnd, *cancel)
+            clear_samples = 0
+            for _ in range(4):
+                self.sleep(1.0)
+                observation = self._observe(hwnd)
+                visible = self._contains_any(observation, CLOUD_LAUNCH_INTERRUPTED_TERMS)
+                clear = not visible and observation.page in (EaPage.SIGNED_IN, EaPage.BANNED, *PRE_LOGIN_PAGES)
+                clear_samples = clear_samples + 1 if clear else 0
+                if clear_samples >= 2:
+                    self._record("signout-cloud-launch-dismissed", observation)
+                    return observation
+            if not self._contains_any(observation, CLOUD_LAUNCH_INTERRUPTED_TERMS):
+                break
+        self._record("signout-cloud-launch-stuck", observation)
+        raise EaAppAutomationError("EA 云同步中断弹窗未能确认关闭")
 
     @classmethod
     def _apex_update_point(
@@ -2579,6 +2617,7 @@ class WindowsEaHybridDriver(EaPasswordRecoveryMixin):
                 self._dismiss_expired_session(hwnd)
                 continue
             observation = self._dismiss_cloud_upload_error(hwnd, observation)
+            observation = self._cancel_interrupted_cloud_launch(hwnd, observation)
             local_data = self._continue_local_data_point(observation)
             if local_data is not None:
                 if cloud_sync_close_deadline is not None:
@@ -2649,6 +2688,7 @@ class WindowsEaHybridDriver(EaPasswordRecoveryMixin):
                 raise
             upload_notice = self._contains_any(observation, CLOUD_UPLOAD_ERROR_TERMS)
             observation = self._dismiss_cloud_upload_error(hwnd, observation)
+            observation = self._cancel_interrupted_cloud_launch(hwnd, observation)
             if observation.page in (EaPage.EMAIL, EaPage.PASSWORD):
                 self._record("signed-out", observation)
                 return True
