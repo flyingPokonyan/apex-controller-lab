@@ -9,24 +9,21 @@ from pathlib import Path
 from .atomic_files import replace_with_retry
 
 EA_EXECUTABLE = "eadesktop.exe"
-# Every process that can keep an EA window or respawn one. Child processes of
-# these images are taken with taskkill /T; names outside this list are left
-# alone.
-EA_PROCESS_NAMES = ("EADesktop.exe", "EABackgroundService.exe")
 CREATE_BREAKAWAY_FROM_JOB = 0x01000000
 
 
-def listed_ea_pids(tasklist_csv: str) -> list[int]:
-    """PIDs from `tasklist /FO CSV` whose image is an EA desktop process."""
+def listed_ea_pids(tasklist_csv: str, *, session_id: int) -> list[int]:
+    """EA Desktop PIDs in the runner's session, never the system service."""
 
-    names = {name.casefold() for name in EA_PROCESS_NAMES}
     found: list[int] = []
     for row in csv.reader(tasklist_csv.splitlines()):
-        if len(row) < 2 or not row[1].isdigit():
+        if not row or row[0].casefold() != EA_EXECUTABLE:
             continue
-        if row[0].casefold() in names:
+        if len(row) < 4 or not row[1].isdigit() or not row[3].isdigit():
+            raise ValueError("unreadable EA Desktop process identity")
+        if int(row[3]) == session_id:
             pid = int(row[1])
-            if pid not in found:
+            if pid > 0 and pid not in found:
                 found.append(pid)
     return found
 

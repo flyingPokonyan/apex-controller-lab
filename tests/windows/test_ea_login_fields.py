@@ -98,6 +98,7 @@ class LoginFieldsTest(unittest.TestCase):
         driver._submit_password(1, password, self.credentials)
         driver._dismiss_library_tour = lambda _hwnd, observation: observation
         driver._raise_if_account_banned = lambda *_args: None
+        driver._ea_window = lambda: 1
         with self.assertRaises(EaCredentialsRejected):
             driver._await_identity(1, lambda _: None, otp_methods=self.credentials.otp_methods,
                                    initial_challenge_started_at=datetime.now(timezone.utc))

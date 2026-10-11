@@ -137,6 +137,35 @@ class IdentityEvidenceTest(unittest.TestCase):
             )
 
 
+    def test_untrusted_badge_does_not_block_trusted_expected_window_text(self):
+        driver = self.driver(self.fact("noise", False))
+        driver._matching_identity.return_value = self.fact("wanted")
+        driver.bind_expected_identity("wanted")
+        result = driver._await_identity(1, Mock(), otp_methods=(OtpMethod.TOTP,),
+                                       initial_challenge_started_at=datetime.now(timezone.utc))
+        self.assertEqual(result.ea_account_id, "wanted")
+        self.assertTrue(result.verified)
+        self.assertEqual(driver._observe.call_count, 1)
+
+    def test_untrusted_badge_and_untrusted_window_text_still_time_out(self):
+        driver = self.driver(self.fact("noise", False))
+        driver._matching_identity.return_value = self.fact("wanted", False)
+        driver.bind_expected_identity("wanted")
+        with self.assertRaises(EaAppAutomationError):
+            driver._await_identity(1, Mock(), otp_methods=(OtpMethod.TOTP,),
+                                  initial_challenge_started_at=datetime.now(timezone.utc))
+
+    def test_login_page_never_uses_the_signin_window_text_fallback(self):
+        driver = self.driver(self.fact("noise", False))
+        driver._observe.return_value = replace(driver._observe.return_value, page=EaPage.PASSWORD)
+        driver._matching_identity.return_value = self.fact("wanted")
+        driver.bind_expected_identity("wanted")
+        with self.assertRaises(EaAppAutomationError):
+            driver._await_identity(1, Mock(), otp_methods=(OtpMethod.TOTP,),
+                                  initial_challenge_started_at=datetime.now(timezone.utc))
+        driver._matching_identity.assert_not_called()
+
+
 class ManagedRecoveryTest(unittest.TestCase):
     def setUp(self):
         self.root = Path(self.enterContext(tempfile.TemporaryDirectory()))

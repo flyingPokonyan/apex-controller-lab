@@ -4,6 +4,8 @@ import ctypes
 from ctypes import wintypes
 from dataclasses import dataclass, replace
 from datetime import datetime, timezone
+import ntpath
+import os
 from pathlib import Path
 import subprocess
 import sys
@@ -42,7 +44,6 @@ from .ea_app import (
 from .ea_evidence import EaLoginEvidence, is_sensitive_text
 from .ea_password_recovery import EaPasswordRecoveryMixin
 from .ea_process import (
-    EA_PROCESS_NAMES,
     EaDesktopInstallation,
     desktop_app_creationflags,
     listed_ea_pids,
@@ -278,6 +279,10 @@ class WindowsEaHybridDriver(EaPasswordRecoveryMixin):
         ]
         self.user32.AttachThreadInput.restype = wintypes.BOOL
         self.kernel32.GetCurrentThreadId.restype = wintypes.DWORD
+        self.kernel32.ProcessIdToSessionId.argtypes = [
+            wintypes.DWORD, ctypes.POINTER(wintypes.DWORD),
+        ]
+        self.kernel32.ProcessIdToSessionId.restype = wintypes.BOOL
         self.user32.GetWindowThreadProcessId.argtypes = [
             wintypes.HWND,
             ctypes.POINTER(wintypes.DWORD),
@@ -431,33 +436,23 @@ class WindowsEaHybridDriver(EaPasswordRecoveryMixin):
     def _choose_ea_window(self, matches: list[tuple[int, int]]) -> int | None:
         """Topmost EA window with a real interior, never a flat empty frame.
 
-        `matches` is already in EnumWindows order, front to back. A blank
-        window is often larger than the login or library window and can sit
-        in front of it, so area is not the choice. When the capture cannot
-        be sampled, the previous largest-window rule remains.
+        Desktop capture contains the covering window's pixels. Focus each
+        candidate before sampling so a blank sibling cannot hide a valid
+        login window, nor borrow content from the window in front of it.
         """
 
-        frame = None
-        try:
-            frame = self._frame()
-        except Exception:
-            frame = None
-        unsampled: list[tuple[int, int]] = []
-        for area, hwnd in matches:
-            if frame is None:
-                unsampled.append((area, hwnd))
-                continue
+        for _area, hwnd in matches:
             try:
+                self._focus(hwnd)
+                frame = self._frame()
                 blank = self._interior_is_blank(frame, self._rect(hwnd))
-            except Exception:
-                blank = None
+            except EaCaptureUnavailable:
+                raise
+            except EaAppAutomationError:
+                continue
             if blank is False:
                 return hwnd
-            if blank is None:
-                unsampled.append((area, hwnd))
-        if not unsampled:
-            return None
-        return max(unsampled)[1]
+        return None
 
     @staticmethod
     def _luma(pixel: object) -> int:
@@ -507,18 +502,7 @@ class WindowsEaHybridDriver(EaPasswordRecoveryMixin):
     def _ea_window_for_identity(self, previous: int) -> int:
         """Select again. The hwnd that survived login may now be a blank frame."""
 
-        # Unit fixtures build the driver without a Win32 binding and without
-        # replacing discovery. Production always has user32 from __init__.
-        if "_ea_window" not in self.__dict__ and "user32" not in self.__dict__:
-            return previous
-        try:
-            return self._ea_window()
-        except EaAppAutomationError:
-            if "user32" in self.__dict__ and self._alive(previous):
-                return previous
-            if "user32" not in self.__dict__:
-                return previous
-            raise
+        return self._ea_window()
 
     def _safe_window_title(self, hwnd: int) -> str:
         user32 = getattr(self, "user32", None)
@@ -585,11 +569,9 @@ class WindowsEaHybridDriver(EaPasswordRecoveryMixin):
             parent = int(self.user32.GetParent(current) or 0)
             owner = int(self.user32.GetWindow(current, GW_OWNER) or 0)
             current = parent or owner
-        pid_ea = wintypes.DWORD()
-        pid_other = wintypes.DWORD()
-        self.user32.GetWindowThreadProcessId(ea_hwnd, ctypes.byref(pid_ea))
-        self.user32.GetWindowThreadProcessId(int(candidate), ctypes.byref(pid_other))
-        return bool(pid_ea.value and pid_ea.value == pid_other.value)
+        # A blank sibling and the real EA frame can share a process. Same
+        # PID is not proof that the requested window is in the foreground.
+        return False
 
     def _focus(self, hwnd: int) -> None:
         hwnd = self._live(hwnd)
@@ -1477,12 +1459,19 @@ class WindowsEaHybridDriver(EaPasswordRecoveryMixin):
             creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
         )
 
-    def _listed_ea_pids(self) -> list[int]:
+    def _runner_session_id(self) -> int:
+        session = wintypes.DWORD()
+        if not self.kernel32.ProcessIdToSessionId(os.getpid(), ctypes.byref(session)):
+            raise EaUiRecoveryExhausted("无法确认 Runner 的 Windows 会话，停止重启 EA")
+        return int(session.value)
+
+    def _listed_ea_pids(self, session_id: int) -> list[int]:
         try:
             result = subprocess.run(
                 ["tasklist", "/FO", "CSV", "/NH"],
                 capture_output=True,
                 text=True,
+                errors="replace",
                 timeout=20,
                 check=False,
                 creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
@@ -1491,43 +1480,52 @@ class WindowsEaHybridDriver(EaPasswordRecoveryMixin):
             raise EaUiRecoveryExhausted("无法确认 EA 进程是否已退出") from error
         if result.returncode not in (0,):
             raise EaUiRecoveryExhausted("无法确认 EA 进程是否已退出")
-        return listed_ea_pids(result.stdout or "")
+        try:
+            return listed_ea_pids(result.stdout or "", session_id=session_id)
+        except ValueError as error:
+            raise EaUiRecoveryExhausted("无法确认 EA 进程身份，停止重启") from error
 
-    def _stop_ea_processes(self, extra_pids: set[int]) -> None:
-        """End every EA desktop process and do not return while one remains.
+    def _stop_ea_processes(self, executable: Path) -> None:
+        """Stop verified desktop instances in this session before relaunching.
 
-        A single window PID plus an immediate relaunch left EADesktop and
-        EABackgroundService alive, so the new process showed up as a second
-        blank "EA" window. Image kills cover instances tasklist has not listed
-        yet; the following poll is what decides that it is safe to start one.
+        A missing window does not prove the desktop process exited. Do not
+        launch into a leftover instance, kill EA's system service, or touch
+        another logged-in session. Require two empty polls to cover delayed
+        shutdown/relaunch after Help -> Restart app.
         """
 
+        session_id = self._runner_session_id()
+        wanted_path = ntpath.normcase(ntpath.normpath(str(executable)))
         deadline = time.monotonic() + 20.0
-        for name in EA_PROCESS_NAMES:
-            self._taskkill(["taskkill", "/IM", name, "/T", "/F"])
-        for pid in sorted(pid for pid in extra_pids if pid):
-            self._taskkill(["taskkill", "/PID", str(pid), "/T", "/F"])
+        empty_polls = 0
         while True:
-            pending = self._listed_ea_pids()
+            pending = self._listed_ea_pids(session_id)
             if not pending:
-                return
+                empty_polls += 1
+                if empty_polls >= 2:
+                    return
+            else:
+                empty_polls = 0
             if time.monotonic() >= deadline:
                 raise EaUiRecoveryExhausted("EA 进程未全部退出，已停止重新启动")
+            # Verify every candidate before killing any of this snapshot.
+            verified = []
             for pid in pending:
+                actual_path = self._process_path(pid)
+                if not actual_path and pid not in self._listed_ea_pids(session_id):
+                    # EA can finish shutting down between tasklist and OpenProcess.
+                    continue
+                if not actual_path or ntpath.normcase(ntpath.normpath(actual_path)) != wanted_path:
+                    raise EaUiRecoveryExhausted("无法核实残留 EA 进程的安装路径，停止重启")
+                verified.append(pid)
+            if verified and any(self._process_running(name) for name in APEX_EXECUTABLES):
+                raise EaUiRecoveryExhausted("Apex 尚未退出，不能重启 EA")
+            for pid in verified:
                 self._taskkill(["taskkill", "/PID", str(pid), "/T", "/F"])
             self.sleep(0.5)
 
     def _restart_ea_process(self):
-        """Relaunch one verified EA Desktop after every EA process has exited.
-
-        Help → Restart app does not exist on login and error pages, and a
-        worker retry only sees the same stuck page (added in 8dbc377). A
-        missing window still has to be reopened from the install path, and
-        that process has to outlive the worker job (7e4127a). Both stay.
-        What does not stay is killing one PID, or launching when no window
-        was found, without waiting until EADesktop and EABackgroundService
-        are actually gone.
-        """
+        """Relaunch once after verified EA Desktop instances have exited."""
 
         if any(self._process_running(name) for name in APEX_EXECUTABLES):
             raise EaUiRecoveryExhausted("Apex 尚未退出，不能重启 EA")
@@ -1549,7 +1547,9 @@ class WindowsEaHybridDriver(EaPasswordRecoveryMixin):
             if executable is None:
                 raise EaUiRecoveryExhausted("EA 窗口已关闭且没有找到已安装的 EADesktop.exe")
         try:
-            self._stop_ea_processes({int(pid.value)} if pid.value else set())
+            self._stop_ea_processes(executable)
+            if any(self._process_running(name) for name in APEX_EXECUTABLES):
+                raise EaUiRecoveryExhausted("Apex 尚未退出，不能重启 EA")
             self.notify("EA 正在从安装目录重新启动")
             self._hwnd = None
             subprocess.Popen(
@@ -2163,15 +2163,16 @@ class WindowsEaHybridDriver(EaPasswordRecoveryMixin):
                 pending_identity = None
                 continue
             identity = self._identity(hwnd)
-            # Badge bands are a tight crop of whichever hwnd we held. When
-            # they read nothing, the signed-in id is often still in the same
-            # window's full OCR pass.
-            if identity is None and expected_ea_account_id:
-                identity = self._matching_identity(
+            # Empty or untrusted badge OCR is not a veto on a trusted match
+            # for the leased account in the same window's full OCR pass.
+            if (identity is None or not identity.verified) and expected_ea_account_id:
+                match = self._matching_identity(
                     observation,
                     expected_ea_account_id,
                     source_prefix="ea-window-text",
                 )
+                if match is not None and match.verified:
+                    identity = match
             if identity is not None and identity.verified:
                 # Unknown/loading pages can contain account-shaped UI text.
                 # Require a signed-in surface or a second consistent reading.
@@ -2552,15 +2553,20 @@ class WindowsEaHybridDriver(EaPasswordRecoveryMixin):
     def restart_app(self) -> EaUiState:
         """Restart EA through its own menu and wait for a readable session."""
 
+        if any(self._process_running(name) for name in APEX_EXECUTABLES):
+            raise EaUiRecoveryExhausted("Apex 尚未退出，不能重启 EA")
         old_hwnd = self._ea_window()
         self._request_restart_app(old_hwnd)
         deadline = time.monotonic() + EA_RESTART_TIMEOUT_S
 
-        # Normally Restart app destroys the window. Give that transition a
-        # bounded head start, but also tolerate an in-process client reload.
+        # A readable unchanged page is not proof that the menu action worked.
+        # Give EA time to leave the old surface; otherwise let bounded UI
+        # recovery use the verified process restart instead of declaring success.
         transition_deadline = min(deadline, time.monotonic() + 15.0)
         while self._alive(old_hwnd) and time.monotonic() < transition_deadline:
             self.sleep(0.5)
+        if self._alive(old_hwnd):
+            raise EaApexStartFailed("EA 重启操作后原窗口仍未退出，无法确认重启")
 
         self._hwnd = None
         last_error: EaAppAutomationError | None = None

@@ -10,7 +10,7 @@ from unittest.mock import Mock, patch
 import numpy as np
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "windows"))
-from apex_automation.ea_app import EaAppAutomationError, EaIdentityFact, EaUiState
+from apex_automation.ea_app import EaAppAutomationError, EaCaptureUnavailable, EaIdentityFact, EaUiState
 from apex_automation.ea_app_win32 import EaObservation, WindowsEaHybridDriver, SW_RESTORE
 from apex_automation.ea_pages import EaPage
 from apex_automation.ocr_obstacles import OcrToken
@@ -29,6 +29,35 @@ class EaWindowRecoveryTest(unittest.TestCase):
         driver.user32.ShowWindow.assert_not_called()
         driver.user32.BringWindowToTop.assert_not_called()
         driver.user32.SetForegroundWindow.assert_not_called()
+
+    def test_same_pid_sibling_is_not_the_requested_window_or_its_popup(self):
+        driver = object.__new__(WindowsEaHybridDriver)
+        driver.user32 = Mock()
+        driver.user32.GetParent.return_value = 0
+        driver.user32.GetWindow.return_value = 0
+        driver.user32.GetWindowThreadProcessId.side_effect = lambda h, p: setattr(p._obj, "value", 42)
+        self.assertFalse(driver._window_belongs_to_ea(7, 8))
+        self.assertTrue(driver._window_belongs_to_ea(7, 7))
+
+    def test_focus_brings_the_requested_sibling_to_the_front(self):
+        driver = object.__new__(WindowsEaHybridDriver)
+        driver._live = lambda hwnd: hwnd
+        foreground = [8]
+        driver.user32 = Mock()
+        driver.kernel32 = Mock()
+        driver.kernel32.GetCurrentThreadId.return_value = 2
+        driver.user32.GetParent.return_value = 0
+        driver.user32.GetWindow.return_value = 0
+        def same_process(_hwnd, pointer):
+            pointer._obj.value = 42
+            return 2
+        driver.user32.GetWindowThreadProcessId.side_effect = same_process
+        driver.user32.GetForegroundWindow.side_effect = lambda: foreground[0]
+        driver.user32.SetForegroundWindow.side_effect = lambda hwnd: foreground.__setitem__(0, hwnd)
+        driver.sleep = Mock()
+        driver._focus(7)
+        self.assertEqual(foreground[0], 7)
+        driver.user32.SetForegroundWindow.assert_called_once_with(7)
 
     def driver(self, windows):
         driver = object.__new__(WindowsEaHybridDriver)
@@ -54,6 +83,10 @@ class EaWindowRecoveryTest(unittest.TestCase):
             IsIconic=lambda hwnd: windows[hwnd]["iconic"], ShowWindow=restore,
         )
         driver._process_name = lambda pid: windows[pid].get("process", "eadesktop.exe")
+        driver._focus = Mock()
+        frame = np.zeros((1800, 2000, 3), np.uint8)
+        frame[400:800, 200:800] = 255
+        driver._frame = lambda: frame
         driver.sleep = lambda seconds: clock.__setitem__(0, clock[0] + seconds)
         self.enterContext(patch("apex_automation.ea_app_win32.time.monotonic", side_effect=lambda: clock[0]))
         # No Windows ABI is needed for a deterministic enumeration fixture.
@@ -79,12 +112,43 @@ class EaWindowRecoveryTest(unittest.TestCase):
             driver._ea_window()
         self.assertEqual(restores, [])
 
-    def test_without_a_capture_the_largest_main_window_is_still_used(self):
+    def test_capture_failure_does_not_select_an_unverified_window(self):
         driver, _restores = self.driver({
             1: {"visible": True, "iconic": False, "rect": (0, 0, 600, 800)},
             2: {"visible": True, "iconic": False, "rect": (0, 0, 1425, 750)},
         })
+        driver._frame = Mock(side_effect=EaCaptureUnavailable("capture unavailable"))
+        with self.assertRaises(EaCaptureUnavailable):
+            driver._ea_window()
+
+    def test_occluded_valid_window_is_sampled_after_focusing_it(self):
+        driver, _ = self.driver({
+            1: {"visible": True, "iconic": False, "rect": (0, 0, 1425, 1000)},
+            2: {"visible": True, "iconic": False, "rect": (100, 100, 660, 900)},
+        })
+        foreground = [1]
+        driver._focus = lambda hwnd: foreground.__setitem__(0, hwnd)
+        black = np.zeros((1080, 1920, 3), np.uint8)
+        content = black.copy()
+        content[300:700, 150:600] = 200
+        driver._frame = lambda: black if foreground[0] == 1 else content
         self.assertEqual(driver._ea_window(), 2)
+        self.assertEqual(foreground[0], 2)
+
+    def test_unfocusable_candidate_cannot_borrow_covering_window_pixels(self):
+        driver, _ = self.driver({
+            1: {"visible": True, "iconic": False, "rect": (0, 0, 1425, 900)},
+            2: {"visible": True, "iconic": False, "rect": (100, 100, 660, 900)},
+        })
+        driver._focus = Mock(side_effect=[EaAppAutomationError("not foreground"), None])
+        self.assertEqual(driver._ea_window(), 2)
+
+    def test_identity_wait_does_not_reuse_a_rejected_blank_handle(self):
+        driver = object.__new__(WindowsEaHybridDriver)
+        driver._ea_window = Mock(side_effect=EaAppAutomationError("only blank windows"))
+        driver._alive = Mock(return_value=True)
+        with self.assertRaises(EaAppAutomationError):
+            driver._ea_window_for_identity(1)
 
     def test_blank_window_loses_to_a_smaller_window_with_content(self):
         frame = np.zeros((1600, 1800, 3), np.uint8)
