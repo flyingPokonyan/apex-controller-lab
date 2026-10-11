@@ -41,6 +41,7 @@ from .ea_app import (
 )
 from .ea_evidence import EaLoginEvidence
 from .ea_password_recovery import EaPasswordRecoveryMixin
+from .ea_process import EaDesktopInstallation, desktop_app_creationflags
 from .ea_onboarding import library_tour_close_point, library_tour_visible
 from .ea_pages import (
     ACCOUNT_BANNED_CLOSE_TERMS,
@@ -253,6 +254,7 @@ class WindowsEaHybridDriver(EaPasswordRecoveryMixin):
         self.evidence = evidence
         self.metrics = PerformanceMetrics(evidence.timing) if evidence is not None else None
         self.notify = notify
+        self._ea_installation = EaDesktopInstallation()
         self.user32 = ctypes.windll.user32
         self.kernel32 = ctypes.windll.kernel32
         self.user32.GetForegroundWindow.restype = wintypes.HWND
@@ -380,6 +382,11 @@ class WindowsEaHybridDriver(EaPasswordRecoveryMixin):
             self.user32.EnumWindows(collect, 0)
             if matches:
                 self._hwnd = max(matches)[1]
+                installation = getattr(self, "_ea_installation", None)
+                if installation is not None:
+                    pid = wintypes.DWORD()
+                    self.user32.GetWindowThreadProcessId(self._hwnd, ctypes.byref(pid))
+                    installation.remember(self._process_path(pid.value))
                 return self._hwnd
             if recoverable:
                 hwnd = max(recoverable)[1]
@@ -1314,20 +1321,32 @@ class WindowsEaHybridDriver(EaPasswordRecoveryMixin):
     def _restart_ea_process(self):
         if any(self._process_running(name) for name in APEX_EXECUTABLES):
             raise EaUiRecoveryExhausted("Apex 尚未退出，不能重启 EA")
-        hwnd = self._ea_window()
+        installation = self._ea_installation
         pid = wintypes.DWORD()
-        self.user32.GetWindowThreadProcessId(hwnd, ctypes.byref(pid))
-        executable = self._process_path(pid.value)
-        if not pid.value or Path(executable).name.lower() != EA_EXECUTABLE:
-            raise EaUiRecoveryExhausted("无法确认 EA 主窗口进程，停止恢复")
         try:
-            result = subprocess.run(["taskkill", "/PID", str(pid.value), "/T", "/F"],
-                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=20, check=False,
-                creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
-            if result.returncode:
-                raise EaUiRecoveryExhausted("EA 主窗口进程未退出")
-            subprocess.Popen([executable], cwd=str(Path(executable).parent),
-                             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            hwnd = self._ea_window()
+        except EaAppAutomationError:
+            hwnd = None
+        if hwnd is not None:
+            self.user32.GetWindowThreadProcessId(hwnd, ctypes.byref(pid))
+            executable = installation.remember(self._process_path(pid.value))
+            if not pid.value or executable is None:
+                raise EaUiRecoveryExhausted("无法确认 EA 主窗口进程，停止恢复")
+        else:
+            executable = installation.resolve()
+            if executable is None:
+                raise EaUiRecoveryExhausted("EA 窗口已关闭且没有找到已安装的 EADesktop.exe")
+        try:
+            if hwnd is not None:
+                result = subprocess.run(["taskkill", "/PID", str(pid.value), "/T", "/F"],
+                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=20, check=False,
+                    creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+                if result.returncode:
+                    raise EaUiRecoveryExhausted("EA 主窗口进程未退出")
+            self.notify("EA 正在从安装目录重新启动")
+            subprocess.Popen([str(executable)], cwd=str(executable.parent),
+                             stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                             stderr=subprocess.DEVNULL, creationflags=desktop_app_creationflags())
         except (OSError, subprocess.TimeoutExpired) as error:
             raise EaUiRecoveryExhausted("EA 进程重启未完成") from error
         self._hwnd = None

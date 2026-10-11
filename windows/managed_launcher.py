@@ -126,7 +126,9 @@ class WorkerJob:
         if not handle:
             raise LauncherError("WORKER_JOB_CREATE_FAILED")
         limits = Limits()
-        limits.basic.flags = 0x2000  # JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE
+        # Keep input children owned, but allow EA Desktop to explicitly escape
+        # so a worker exit/update does not close the app it just recovered.
+        limits.basic.flags = 0x2000 | 0x0800  # KILL_ON_JOB_CLOSE | BREAKAWAY_OK
         if (not api.SetInformationJobObject(handle, 9, c.byref(limits), c.sizeof(limits))
                 or not api.AssignProcessToJobObject(handle, int(process._handle))):
             api.CloseHandle(handle)
@@ -139,12 +141,17 @@ class WorkerJob:
             self.handle = None
 
 
-def terminate_owned(process):
+def terminate_owned(process, job=None):
     if process.poll() is not None:
         return
     if os.name == "nt":
-        subprocess.run(["taskkill", "/PID", str(process.pid), "/T", "/F"],
-                       stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=20)
+        if job is not None and job.handle is not None:
+            # taskkill /T also kills breakaway desktop apps by ancestry.
+            # Closing our job kills only this worker and its owned children.
+            job.close()
+        else:
+            subprocess.run(["taskkill", "/PID", str(process.pid), "/T", "/F"],
+                           stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=20)
     else:
         os.killpg(process.pid, signal.SIGKILL)
     process.wait(timeout=20)
@@ -444,7 +451,7 @@ class Launcher:
                 and phase in {"APEX_STOPPING", "EA_SIGNING_OUT", "LEASE_COMPLETING"}
                 and time.monotonic() - self.requested_at <= 600)
             if not cleanup_responding:
-                terminate_owned(self.worker)
+                terminate_owned(self.worker, self.job)
             # poll() then records a failed attempt on the next iteration.
         if time.monotonic() >= self._next_status:
             self._next_status = time.monotonic() + 10
@@ -458,7 +465,7 @@ class Launcher:
         try:
             self.worker.wait(timeout=90)
         except subprocess.TimeoutExpired:
-            terminate_owned(self.worker)
+            terminate_owned(self.worker, self.job)
         finally:
             if self.job:
                 self.job.close()
@@ -566,7 +573,7 @@ class Launcher:
                 except Exception:
                     pass
             if self.worker is not None:
-                terminate_owned(self.worker)
+                terminate_owned(self.worker, self.job)
             if self.job:
                 self.job.close()
             executor.shutdown(wait=True, cancel_futures=True)
