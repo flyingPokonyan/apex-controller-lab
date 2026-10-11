@@ -126,6 +126,9 @@ class EaPasswordRecoveryMixin:
             "passworddoesnotmeet", "passwordcannotbethesame", "passwordcanotbethesame",
             "passwordmustbedifferent", "invalidpassword", "passwordisnotvalid",
             "passwordhasalreadybeenused", "cantusethesamepassword",
+            "alreadyusedthispassword", "alreadyusedthatpassword",
+            "新密码不能与旧密码相同", "新密码不能与当前密码相同",
+            "已经使用过此密码", "已使用过此密码", "已使用过该密码",
         ))
 
     @staticmethod

@@ -233,6 +233,74 @@ class PasswordRecoveryTest(unittest.TestCase):
         self.recover(driver)
         self.assertEqual(self.typed,[self.credentials.login_identifier,self.credentials.password,candidate.password])
 
+    def test_used_password_notice_from_d163_screenshot_is_a_reset_rejection(self):
+        for text in ("You've already used this password. Try a new one.",
+                     "You’ve already used this password. Try a new one.",
+                     "You have already used this password. Try a new one.",
+                     "新密码不能与旧密码相同", "您已经使用过此密码，请尝试新密码"):
+            with self.subTest(text=text):
+                rejected = replace(self.frames['reset_password_focused'], tokens=
+                    self.frames['reset_password_focused'].tokens + (OcrToken(text, .99),))
+                self.assertTrue(WindowsEaHybridDriver._reset_password_rejected(rejected))
+                self.assertFalse(WindowsEaHybridDriver._reset_password_rejected(
+                    replace(rejected, page=EaPage.PASSWORD)))
+        self.assertFalse(WindowsEaHybridDriver._reset_password_rejected(self.frames['reset_password_focused']))
+
+    def d163_reuse_observation(self):
+        data = json.loads((Path(__file__).parent / 'fixtures' / 'ea-password-reuse-error.json').read_text())
+        tokens = tuple(OcrToken(t['text'], t['confidence'], tuple(t['roi'])) for t in data['tokens'])
+        return EaObservation(tuple(data['rect']), np.zeros((1, 1), np.uint8), tokens,
+                             classify_page(t.normalized for t in tokens))
+
+    def test_actual_d163_rapidocr_result_stops_waiting_on_positive_rejection(self):
+        rejected = self.d163_reuse_observation()
+        self.assertEqual(rejected.page, EaPage.RESET_PASSWORD)
+        driver = self.driver([self.frames['reset_password_focused'], rejected])
+        driver._password_recovery_deadline = float('inf')
+        self.assertIs(driver._reset_result(1), rejected)
+        self.assertEqual(self.remaining, [])
+
+    def test_d163_reuse_error_saves_one_distinct_candidate_then_commits_after_success(self):
+        rejected = self.d163_reuse_observation()
+        flow = self.flow()[:-2] + [rejected, rejected, self.frames['reset_password_focused'],
+                                  self.frames['success'], self.frames['login_account']]
+        driver = self.driver(flow)
+        candidate = replace(self.credentials, password='DistinctFixturePass42!', password_reset_id='reset-reuse')
+        events = []
+        def handler(action, credentials):
+            events.append((action, list(self.typed)))
+            return candidate if action == 'PREPARE' else replace(candidate, password_reset_id=None)
+        driver.configure_password_recovery(handler)
+        self.recover(driver)
+        self.assertEqual(events, [
+            ('PREPARE', [self.credentials.login_identifier, self.credentials.password]),
+            ('COMMIT', [self.credentials.login_identifier, self.credentials.password, candidate.password]),
+        ])
+        self.assertNotEqual(candidate.password, self.credentials.password)
+        # The recovery must refocus the editable field in this actual layout.
+        self.assertIn((1007, 778), self.clicks)
+        self.assertEqual(self.records[-2:], ['password-recovery-success', 'password-recovery-login-ready'])
+        self.assertEqual(self.remaining, [])
+
+    def test_reused_replacement_stops_without_generating_or_committing_more_passwords(self):
+        rejected = replace(self.frames['reset_password_focused'], tokens=
+            self.frames['reset_password_focused'].tokens + (
+                OcrToken("You've already used this password. Try a new one.", .99),))
+        flow = self.flow()[:-2] + [rejected, rejected, self.frames['reset_password_focused'], rejected]
+        driver = self.driver(flow)
+        candidate = replace(self.credentials, password='DistinctFixturePass42!', password_reset_id='reset-reuse')
+        actions = []
+        def handler(action, credentials):
+            actions.append(action)
+            return candidate
+        driver.configure_password_recovery(handler)
+        with self.assertRaisesRegex(EaAppAutomationError, '新密码也未被接受'):
+            self.recover(driver)
+        self.assertEqual(actions, ['PREPARE'])
+        self.assertEqual(len(self.typed), 3)
+        self.assertNotIn('password-recovery-success', self.records)
+        self.assertNotIn('password-recovery-login-ready', self.records)
+
     def test_unknown_result_never_generates_another_password(self):
         driver=self.driver(self.flow())
         calls=[]
