@@ -7,7 +7,9 @@ import unittest
 from unittest.mock import Mock, patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "windows"))
-from apex_automation.ea_process import EaDesktopInstallation, verified_ea_executable
+from apex_automation.ea_process import (
+    EaDesktopInstallation, listed_ea_pids, verified_ea_executable,
+)
 from apex_automation.ea_app import EaAppAutomationError, EaUiRecoveryExhausted, EaUiState
 from apex_automation.ea_app_win32 import WindowsEaHybridDriver
 
@@ -54,6 +56,18 @@ class InstallationTest(unittest.TestCase):
         self.assertEqual(self.installation.resolve(), self.exe)
 
 
+    def test_tasklist_keeps_only_ea_desktop_and_background_service(self):
+        stdout = "\n".join((
+            '"EADesktop.exe","321","Console","1","1 K"',
+            '"EABackgroundService.exe","654","Services","0","1 K"',
+            '"notepad.exe","999","Console","1","1 K"',
+            "INFO: No tasks are running which match the specified criteria.",
+            '"EADesktop.exe","321","Console","1","1 K"',
+        ))
+        self.assertEqual(listed_ea_pids(stdout), [321, 654])
+        self.assertEqual(listed_ea_pids(""), [])
+
+
 class RestartTest(unittest.TestCase):
     def setUp(self):
         self.root = Path(self.enterContext(tempfile.TemporaryDirectory()))
@@ -69,28 +83,86 @@ class RestartTest(unittest.TestCase):
         self.driver.preflight = Mock(return_value=EaUiState.LOGIN)
         self.driver.notify = Mock()
         self.driver.sleep = Mock()
-        self.kill = self.enterContext(patch("apex_automation.ea_app_win32.subprocess.run", return_value=Mock(returncode=0)))
+        self.calls = []
+        self.snapshots = [""]
+        self.enterContext(patch("apex_automation.ea_app_win32.subprocess.run", side_effect=self.subprocess))
         self.launch = self.enterContext(patch("apex_automation.ea_app_win32.subprocess.Popen"))
         self.enterContext(patch("apex_automation.ea_app_win32.desktop_app_creationflags", return_value=0x01000000))
 
-    def test_present_window_restarts_only_verified_pid_and_launches_outside_job(self):
+    def subprocess(self, args, **_kwargs):
+        self.calls.append(list(args))
+        if args[0] == "tasklist":
+            index = min(sum(command[0] == "tasklist" for command in self.calls) - 1, len(self.snapshots) - 1)
+            return Mock(returncode=0, stdout=self.snapshots[index], stderr="")
+        if args[0] == "taskkill":
+            return Mock(returncode=0, stdout="", stderr="")
+        raise AssertionError(args)
+
+    def pids_killed(self):
+        return [int(command[2]) for command in self.calls if command[:2] == ["taskkill", "/PID"]]
+
+    def images_killed(self):
+        return [command[2] for command in self.calls if command[:2] == ["taskkill", "/IM"]]
+
+    def test_present_window_stops_every_ea_process_then_launches_one_outside_job(self):
+        self.snapshots = [
+            '"EADesktop.exe","321","Console","1","1 K"\n"EABackgroundService.exe","654","Services","0","1 K"\n',
+            "",
+        ]
         self.assertEqual(self.driver._restart_ea_process(), EaUiState.LOGIN)
-        self.assertEqual(self.kill.call_args.args[0], ["taskkill", "/PID", "321", "/T", "/F"])
+        self.assertEqual(self.images_killed(), ["EADesktop.exe", "EABackgroundService.exe"])
+        self.assertEqual(self.pids_killed(), [321, 321, 654])
         self.assertEqual(self.launch.call_args.args[0], [str(self.exe)])
         self.assertEqual(self.launch.call_args.kwargs["creationflags"], 0x01000000)
-        self.driver.preflight.assert_called_once()
-
-    def test_closed_window_reopens_installation_without_killing_unknown_processes(self):
-        self.driver._ea_window.side_effect = EaAppAutomationError("window absent")
-        self.assertEqual(self.driver._restart_ea_process(), EaUiState.LOGIN)
-        self.kill.assert_not_called()
         self.launch.assert_called_once()
+        self.driver.preflight.assert_called_once()
+        self.driver._ea_window.assert_called_once_with(require_content=False)
+
+    def test_closed_window_stops_leftovers_without_killing_unrelated_processes(self):
+        self.driver._ea_window.side_effect = EaAppAutomationError("window absent")
+        self.snapshots = [
+            "\n".join((
+                '"EADesktop.exe","321","Console","1","1 K"',
+                '"EABackgroundService.exe","654","Services","0","1 K"',
+                '"notepad.exe","999","Console","1","1 K"',
+            )),
+            "",
+        ]
+        self.assertEqual(self.driver._restart_ea_process(), EaUiState.LOGIN)
+        self.assertEqual(self.pids_killed(), [321, 654])
+        self.assertNotIn(999, self.pids_killed())
+        self.launch.assert_called_once()
+
+    def test_restart_does_not_launch_a_second_instance_while_ea_remains(self):
+        self.snapshots = ['"EADesktop.exe","321","Console","1","1 K"\n']
+        clock = {"now": 0.0}
+
+        def monotonic():
+            clock["now"] += 10
+            return clock["now"]
+
+        with patch("apex_automation.ea_app_win32.time.monotonic", side_effect=monotonic):
+            with self.assertRaisesRegex(EaUiRecoveryExhausted, "未全部退出"):
+                self.driver._restart_ea_process()
+        self.launch.assert_not_called()
+        self.assertIn(321, self.pids_killed())
 
     def test_active_apex_prevents_both_kill_and_launch(self):
         self.driver._process_running.return_value = True
         with self.assertRaises(EaUiRecoveryExhausted):
             self.driver._restart_ea_process()
-        self.kill.assert_not_called()
+        self.assertEqual(self.calls, [])
+        self.launch.assert_not_called()
+
+    def test_unreadable_process_list_does_not_launch_another_instance(self):
+        def broken(args, **_kwargs):
+            if args[0] == "tasklist":
+                return Mock(returncode=1, stdout="", stderr="denied")
+            return Mock(returncode=0, stdout="", stderr="")
+
+        with patch("apex_automation.ea_app_win32.subprocess.run", side_effect=broken):
+            with self.assertRaisesRegex(EaUiRecoveryExhausted, "无法确认"):
+                self.driver._restart_ea_process()
         self.launch.assert_not_called()
 
     def test_unknown_installation_stops_before_launch(self):
@@ -98,12 +170,18 @@ class RestartTest(unittest.TestCase):
         self.driver._ea_installation.resolve = Mock(return_value=None)
         with self.assertRaisesRegex(EaUiRecoveryExhausted, "没有找到"):
             self.driver._restart_ea_process()
-        self.kill.assert_not_called()
+        self.assertEqual(self.calls, [])
         self.launch.assert_not_called()
 
     def test_process_launch_alone_does_not_prove_ea_recovered(self):
         self.driver.preflight.side_effect = EaAppAutomationError("unrecognizable")
-        with patch("apex_automation.ea_app_win32.time.monotonic", side_effect=[0, 1, 61]):
+        clock = {"now": 0.0}
+
+        def monotonic():
+            clock["now"] += 30
+            return clock["now"]
+
+        with patch("apex_automation.ea_app_win32.time.monotonic", side_effect=monotonic):
             with self.assertRaisesRegex(EaUiRecoveryExhausted, "没有可识别页面"):
                 self.driver._restart_ea_process()
         self.launch.assert_called_once()

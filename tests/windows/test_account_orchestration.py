@@ -1482,6 +1482,43 @@ class AccountOrchestratorTest(unittest.TestCase):
             self.assertEqual(log, ["ea.start", "ea.current_identity", "ea.sign_in", "apex.stop"])
             self.assertFalse(store.load().has_lease)
 
+    def test_sign_in_is_given_the_leased_ea_id_for_the_window_fallback(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            now = datetime.now(timezone.utc)
+            lease = replace(
+                FakeAccountProvider.lease("acct_1", now=now),
+                expected_ea_account_id="ea_1",
+            )
+            provider = FakeAccountProvider(
+                [lease],
+                credentials={
+                    "acct_1": SecretCredentials("login@example.test", "password")
+                },
+            )
+            log: list[str] = []
+
+            class BoundDriver(FakeEaDriver):
+                def bind_expected_identity(self, expected):
+                    self.log.append(f"bind:{expected}")
+
+                def sign_in(self, credentials, otp_supplier):
+                    self.log.append("ea.sign_in")
+                    raise EaAccountBanned("EA App 报告账号已封禁")
+
+            result = AccountOrchestrator(
+                provider=provider,
+                ea_driver=BoundDriver(log, "ea_1"),
+                play_session=object(),
+                checkpoint_store=AtomicCheckpointStore(Path(directory) / "account-cycle-status.json"),
+                device_id="device_1",
+                capture_source=object(),
+                operation_id_factory=iter(["claim_1", "renew_1", "credentials_1", "close_1", "extra_1"]).__next__,
+                notify=lambda _: None,
+            ).run_once()
+
+            self.assertEqual(result.error_code, "EA_ACCOUNT_BANNED")
+            self.assertEqual(log, ["ea.start", "ea.current_identity", "bind:ea_1", "ea.sign_in", "apex.stop"])
+
     def test_happy_path_orders_cleanup_before_close_and_clears_lease(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             now = datetime.now(timezone.utc)

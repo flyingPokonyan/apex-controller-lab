@@ -649,6 +649,9 @@ class AccountOrchestrator:
             configure = getattr(self.ea_driver, "configure_password_recovery", None)
             if callable(configure):
                 configure(self._password_recovery_handler(lease))
+            bind = getattr(self.ea_driver, "bind_expected_identity", None)
+            if callable(bind):
+                bind(expected)
             self.ea_driver.sign_in(credentials, self._otp_supplier(lease))
 
         self._update_checkpoint(

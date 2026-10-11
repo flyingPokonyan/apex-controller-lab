@@ -39,9 +39,14 @@ from .ea_app import (
     EaUiRecoveryExhausted,
     OtpChallenge,
 )
-from .ea_evidence import EaLoginEvidence
+from .ea_evidence import EaLoginEvidence, is_sensitive_text
 from .ea_password_recovery import EaPasswordRecoveryMixin
-from .ea_process import EaDesktopInstallation, desktop_app_creationflags
+from .ea_process import (
+    EA_PROCESS_NAMES,
+    EaDesktopInstallation,
+    desktop_app_creationflags,
+    listed_ea_pids,
+)
 from .ea_onboarding import library_tour_close_point, library_tour_visible
 from .ea_pages import (
     ACCOUNT_BANNED_CLOSE_TERMS,
@@ -217,6 +222,8 @@ class EaObservation:
     frame: np.ndarray
     tokens: tuple[OcrToken, ...]
     page: EaPage
+    hwnd: int | None = None
+    title: str = ""
 
     @property
     def normalized(self) -> tuple[str, ...]:
@@ -312,6 +319,14 @@ class WindowsEaHybridDriver(EaPasswordRecoveryMixin):
             ctypes.POINTER(wintypes.RECT),
         ]
         self.user32.GetWindowRect.restype = wintypes.BOOL
+        self.user32.GetWindowTextLengthW.argtypes = [wintypes.HWND]
+        self.user32.GetWindowTextLengthW.restype = ctypes.c_int
+        self.user32.GetWindowTextW.argtypes = [
+            wintypes.HWND,
+            wintypes.LPWSTR,
+            ctypes.c_int,
+        ]
+        self.user32.GetWindowTextW.restype = ctypes.c_int
         self.user32.ShowWindow.argtypes = [wintypes.HWND, ctypes.c_int]
         self.user32.ShowWindow.restype = wintypes.BOOL
         self.user32.SetForegroundWindow.argtypes = [wintypes.HWND]
@@ -343,9 +358,19 @@ class WindowsEaHybridDriver(EaPasswordRecoveryMixin):
         finally:
             self.kernel32.CloseHandle(process)
 
-    def _ea_window(self) -> int:
+    def _ea_window(self, *, require_content: bool = True) -> int:
+        """The visible EA main window.
+
+        A blank EA window is often larger than the login window and survives
+        beside the real one. Area alone was selecting that empty frame, so a
+        content-less interior is never chosen. `require_content=False` is only
+        for reading the executable path off whatever window still exists
+        before a process restart.
+        """
+
         deadline = time.monotonic() + 10.0
         restored: set[int] = set()
+        saw_blank = False
         callback_type = ctypes.WINFUNCTYPE(wintypes.BOOL, wintypes.HWND, wintypes.LPARAM)
         while True:
             matches: list[tuple[int, int]] = []
@@ -381,13 +406,16 @@ class WindowsEaHybridDriver(EaPasswordRecoveryMixin):
 
             self.user32.EnumWindows(collect, 0)
             if matches:
-                self._hwnd = max(matches)[1]
-                installation = getattr(self, "_ea_installation", None)
-                if installation is not None:
-                    pid = wintypes.DWORD()
-                    self.user32.GetWindowThreadProcessId(self._hwnd, ctypes.byref(pid))
-                    installation.remember(self._process_path(pid.value))
-                return self._hwnd
+                chosen = max(matches)[1] if not require_content else self._choose_ea_window(matches)
+                if chosen is not None:
+                    self._hwnd = chosen
+                    installation = getattr(self, "_ea_installation", None)
+                    if installation is not None:
+                        pid = wintypes.DWORD()
+                        self.user32.GetWindowThreadProcessId(self._hwnd, ctypes.byref(pid))
+                        installation.remember(self._process_path(pid.value))
+                    return self._hwnd
+                saw_blank = True
             if recoverable:
                 hwnd = max(recoverable)[1]
                 restored.add(hwnd)
@@ -395,8 +423,120 @@ class WindowsEaHybridDriver(EaPasswordRecoveryMixin):
                 self.sleep(0.5)
                 continue
             if time.monotonic() >= deadline:
+                if saw_blank:
+                    raise EaAppAutomationError("EA 可见窗口没有可识别内容，已忽略空白窗口")
                 raise EaAppAutomationError("恢复窗口后仍没有发现可见的 EA App 主窗口")
             self.sleep(0.5)
+
+    def _choose_ea_window(self, matches: list[tuple[int, int]]) -> int | None:
+        """Topmost EA window with a real interior, never a flat empty frame.
+
+        `matches` is already in EnumWindows order, front to back. A blank
+        window is often larger than the login or library window and can sit
+        in front of it, so area is not the choice. When the capture cannot
+        be sampled, the previous largest-window rule remains.
+        """
+
+        frame = None
+        try:
+            frame = self._frame()
+        except Exception:
+            frame = None
+        unsampled: list[tuple[int, int]] = []
+        for area, hwnd in matches:
+            if frame is None:
+                unsampled.append((area, hwnd))
+                continue
+            try:
+                blank = self._interior_is_blank(frame, self._rect(hwnd))
+            except Exception:
+                blank = None
+            if blank is False:
+                return hwnd
+            if blank is None:
+                unsampled.append((area, hwnd))
+        if not unsampled:
+            return None
+        return max(unsampled)[1]
+
+    @staticmethod
+    def _luma(pixel: object) -> int:
+        if isinstance(pixel, np.ndarray) and pixel.shape:
+            channels = [int(pixel[index]) for index in range(min(3, int(pixel.shape[0])))]
+            if len(channels) >= 3:
+                blue, green, red = channels[:3]
+                return (red * 30 + green * 59 + blue * 11) // 100
+            return channels[0] if channels else 0
+        return int(pixel)  # type: ignore[arg-type]
+
+    @staticmethod
+    def _interior_is_blank(
+        frame: np.ndarray,
+        rect: tuple[int, int, int, int],
+    ) -> bool | None:
+        """True when the window interior is one flat color. None if unreadable.
+
+        The title bar is inset on purpose: a blank EA frame still has a white
+        caption, and that strip must not count as content.
+        """
+
+        left, top, right, bottom = rect
+        height, width = frame.shape[:2]
+        window_w = right - left
+        window_h = bottom - top
+        if window_w < 32 or window_h < 32:
+            return None
+        x1 = max(0, left + max(8, window_w // 25))
+        x2 = min(width, right - max(8, window_w // 25))
+        y1 = max(0, top + max(56, window_h // 8))
+        y2 = min(height, bottom - max(8, window_h // 25))
+        if x2 - x1 < 16 or y2 - y1 < 16:
+            return None
+        crop = frame[y1:y2, x1:x2]
+        crop_h, crop_w = crop.shape[:2]
+        samples: list[int] = []
+        for row in range(6):
+            for col in range(6):
+                y = min(crop_h - 1, row * crop_h // 6 + crop_h // 12)
+                x = min(crop_w - 1, col * crop_w // 6 + crop_w // 12)
+                samples.append(WindowsEaHybridDriver._luma(crop[y, x]))
+        if len(samples) < 8:
+            return None
+        return max(samples) - min(samples) <= 12
+
+    def _ea_window_for_identity(self, previous: int) -> int:
+        """Select again. The hwnd that survived login may now be a blank frame."""
+
+        # Unit fixtures build the driver without a Win32 binding and without
+        # replacing discovery. Production always has user32 from __init__.
+        if "_ea_window" not in self.__dict__ and "user32" not in self.__dict__:
+            return previous
+        try:
+            return self._ea_window()
+        except EaAppAutomationError:
+            if "user32" in self.__dict__ and self._alive(previous):
+                return previous
+            if "user32" not in self.__dict__:
+                return previous
+            raise
+
+    def _safe_window_title(self, hwnd: int) -> str:
+        user32 = getattr(self, "user32", None)
+        if user32 is None or not hasattr(user32, "GetWindowTextW"):
+            return ""
+        try:
+            length = int(user32.GetWindowTextLengthW(hwnd) or 0)
+            if length <= 0:
+                return ""
+            length = min(length, 200)
+            buffer = ctypes.create_unicode_buffer(length + 1)
+            user32.GetWindowTextW(hwnd, buffer, len(buffer))
+            title = " ".join(buffer.value.split())
+        except Exception:
+            return ""
+        if not title or len(title) > 80 or is_sensitive_text(title):
+            return ""
+        return title
 
     def _alive(self, hwnd: int | None) -> bool:
         return bool(
@@ -969,6 +1109,8 @@ class WindowsEaHybridDriver(EaPasswordRecoveryMixin):
                 frame=frame,
                 tokens=tokens,
                 page=classify_page(token.normalized for token in tokens),
+                hwnd=int(hwnd),
+                title=self._safe_window_title(hwnd),
             )
             self._last_observation = observation
             # The CEF surface hands back a fully blank OCR pass while it is
@@ -1003,6 +1145,11 @@ class WindowsEaHybridDriver(EaPasswordRecoveryMixin):
                     frame = None
                 self.evidence.step(step, page="NONE", frame=frame, **detail)
             else:
+                payload = dict(detail)
+                if isinstance(observation.hwnd, int) and observation.hwnd > 0:
+                    payload["hwnd"] = observation.hwnd
+                if observation.title:
+                    payload["title"] = observation.title
                 self.evidence.step(
                     step,
                     page=observation.page.value,
@@ -1010,7 +1157,7 @@ class WindowsEaHybridDriver(EaPasswordRecoveryMixin):
                     frame=observation.frame,
                     tokens=observation.tokens,
                     rect=observation.rect,
-                    **detail,
+                    **payload,
                 )
         except Exception as error:  # pragma: no cover - diagnostics only
             self.notify(f"EA 登录证据写入失败：{type(error).__name__}")
@@ -1138,6 +1285,8 @@ class WindowsEaHybridDriver(EaPasswordRecoveryMixin):
         self,
         observation: EaObservation,
         expected: str,
+        *,
+        source_prefix: str = "ea-window-ocr",
     ) -> EaIdentityFact | None:
         """Find the expected account id anywhere in the window.
 
@@ -1159,7 +1308,7 @@ class WindowsEaHybridDriver(EaPasswordRecoveryMixin):
                     self.evidence.protect(expected)
                 return EaIdentityFact(
                     ea_account_id=expected,
-                    source=f"ea-window-ocr:{token.confidence:.3f}",
+                    source=f"{source_prefix}:{token.confidence:.3f}",
                     verified=token.confidence >= 0.70,
                 )
         return None
@@ -1313,18 +1462,81 @@ class WindowsEaHybridDriver(EaPasswordRecoveryMixin):
         except (EaCaptchaRequired, EaAccountBanned, EaUiRecoveryExhausted):
             raise
         except EaAppAutomationError:
-            # Login/error pages do not expose Help -> Restart app. Reopen only
-            # the verified EA desktop executable; never clear cached sessions.
+            # Login/error pages do not expose Help -> Restart app. Reopen the
+            # verified EA desktop executable without clearing cached sessions.
             self._restart_ea_process()
         self._record("ui-recovery-ready", self._observe(self._ea_window()))
 
+    def _taskkill(self, args: list[str]) -> None:
+        subprocess.run(
+            args,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            timeout=20,
+            check=False,
+            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+        )
+
+    def _listed_ea_pids(self) -> list[int]:
+        try:
+            result = subprocess.run(
+                ["tasklist", "/FO", "CSV", "/NH"],
+                capture_output=True,
+                text=True,
+                timeout=20,
+                check=False,
+                creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+            )
+        except (OSError, subprocess.TimeoutExpired) as error:
+            raise EaUiRecoveryExhausted("无法确认 EA 进程是否已退出") from error
+        if result.returncode not in (0,):
+            raise EaUiRecoveryExhausted("无法确认 EA 进程是否已退出")
+        return listed_ea_pids(result.stdout or "")
+
+    def _stop_ea_processes(self, extra_pids: set[int]) -> None:
+        """End every EA desktop process and do not return while one remains.
+
+        A single window PID plus an immediate relaunch left EADesktop and
+        EABackgroundService alive, so the new process showed up as a second
+        blank "EA" window. Image kills cover instances tasklist has not listed
+        yet; the following poll is what decides that it is safe to start one.
+        """
+
+        deadline = time.monotonic() + 20.0
+        for name in EA_PROCESS_NAMES:
+            self._taskkill(["taskkill", "/IM", name, "/T", "/F"])
+        for pid in sorted(pid for pid in extra_pids if pid):
+            self._taskkill(["taskkill", "/PID", str(pid), "/T", "/F"])
+        while True:
+            pending = self._listed_ea_pids()
+            if not pending:
+                return
+            if time.monotonic() >= deadline:
+                raise EaUiRecoveryExhausted("EA 进程未全部退出，已停止重新启动")
+            for pid in pending:
+                self._taskkill(["taskkill", "/PID", str(pid), "/T", "/F"])
+            self.sleep(0.5)
+
     def _restart_ea_process(self):
+        """Relaunch one verified EA Desktop after every EA process has exited.
+
+        Help → Restart app does not exist on login and error pages, and a
+        worker retry only sees the same stuck page (added in 8dbc377). A
+        missing window still has to be reopened from the install path, and
+        that process has to outlive the worker job (7e4127a). Both stay.
+        What does not stay is killing one PID, or launching when no window
+        was found, without waiting until EADesktop and EABackgroundService
+        are actually gone.
+        """
+
         if any(self._process_running(name) for name in APEX_EXECUTABLES):
             raise EaUiRecoveryExhausted("Apex 尚未退出，不能重启 EA")
         installation = self._ea_installation
         pid = wintypes.DWORD()
         try:
-            hwnd = self._ea_window()
+            # A blank window is still a real EADesktop process. Read its
+            # path even when it must not be used for clicks.
+            hwnd = self._ea_window(require_content=False)
         except EaAppAutomationError:
             hwnd = None
         if hwnd is not None:
@@ -1337,16 +1549,19 @@ class WindowsEaHybridDriver(EaPasswordRecoveryMixin):
             if executable is None:
                 raise EaUiRecoveryExhausted("EA 窗口已关闭且没有找到已安装的 EADesktop.exe")
         try:
-            if hwnd is not None:
-                result = subprocess.run(["taskkill", "/PID", str(pid.value), "/T", "/F"],
-                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=20, check=False,
-                    creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
-                if result.returncode:
-                    raise EaUiRecoveryExhausted("EA 主窗口进程未退出")
+            self._stop_ea_processes({int(pid.value)} if pid.value else set())
             self.notify("EA 正在从安装目录重新启动")
-            subprocess.Popen([str(executable)], cwd=str(executable.parent),
-                             stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
-                             stderr=subprocess.DEVNULL, creationflags=desktop_app_creationflags())
+            self._hwnd = None
+            subprocess.Popen(
+                [str(executable)],
+                cwd=str(executable.parent),
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                creationflags=desktop_app_creationflags(),
+            )
+        except EaUiRecoveryExhausted:
+            raise
         except (OSError, subprocess.TimeoutExpired) as error:
             raise EaUiRecoveryExhausted("EA 进程重启未完成") from error
         self._hwnd = None
@@ -1633,6 +1848,11 @@ class WindowsEaHybridDriver(EaPasswordRecoveryMixin):
         self._record("signin-account-reset-failed", observation)
         raise EaAppAutomationError("EA 未能返回清晰账号输入页，已停止输入新密码")
 
+    def bind_expected_identity(self, expected_ea_account_id: str | None) -> None:
+        """Keep the lease EA ID for the whole-window sign-in fallback."""
+
+        self._expected_ea_account_id = expected_ea_account_id or None
+
     def sign_in(
         self,
         credentials: SecretCredentials,
@@ -1866,6 +2086,7 @@ class WindowsEaHybridDriver(EaPasswordRecoveryMixin):
         otp_methods: tuple[OtpMethod, ...],
         initial_challenge_started_at: datetime,
         timeout_s: float = 90.0,
+        expected_ea_account_id: str | None = None,
     ) -> EaIdentityFact:
         deadline = time.monotonic() + timeout_s
         observation: EaObservation | None = None
@@ -1874,8 +2095,11 @@ class WindowsEaHybridDriver(EaPasswordRecoveryMixin):
         selected_method: OtpMethod | None = None
         pending_identity = None
         challenge_started_at = initial_challenge_started_at
+        if not expected_ea_account_id:
+            expected_ea_account_id = getattr(self, "_expected_ea_account_id", None) or None
         while time.monotonic() < deadline:
             self.sleep(2.0)
+            hwnd = self._ea_window_for_identity(hwnd)
             observation = self._observe(hwnd)
             observation = self._dismiss_library_tour(hwnd, observation)
             self._raise_if_account_banned(hwnd, observation)
@@ -1939,6 +2163,15 @@ class WindowsEaHybridDriver(EaPasswordRecoveryMixin):
                 pending_identity = None
                 continue
             identity = self._identity(hwnd)
+            # Badge bands are a tight crop of whichever hwnd we held. When
+            # they read nothing, the signed-in id is often still in the same
+            # window's full OCR pass.
+            if identity is None and expected_ea_account_id:
+                identity = self._matching_identity(
+                    observation,
+                    expected_ea_account_id,
+                    source_prefix="ea-window-text",
+                )
             if identity is not None and identity.verified:
                 # Unknown/loading pages can contain account-shaped UI text.
                 # Require a signed-in surface or a second consistent reading.

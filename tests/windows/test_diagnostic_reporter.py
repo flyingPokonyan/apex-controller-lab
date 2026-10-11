@@ -173,6 +173,36 @@ class DiagnosticReporterTest(unittest.TestCase):
         self.worker.process_once()
         self.assertEqual(len(self.transport.requests[-1]["events"]), 1)
 
+    def test_local_window_fields_are_not_forwarded_to_forge(self):
+        evidence = EaLoginEvidence(self.root / "ea-login", save_screenshots=False)
+        evidence.step("signin-timeout", page="SIGNED_IN", hwnd=4242, title="EA", rect=(10, 20, 1435, 770))
+        local = json.loads(next((self.root / "ea-login" / "timings").glob("*.jsonl")).read_text().splitlines()[-1])
+        self.assertEqual(local["hwnd"], 4242)
+        self.assertEqual(local["title"], "EA")
+        self.assertEqual(local["rect"], [10, 20, 1435, 770])
+        self.assertEqual(self.worker.process_once(), 0)
+        payload = next(event["payload"] for event in self.transport.requests[0]["events"] if event["type"] == "EA_STEP")
+        self.assertNotIn("window", payload)
+        self.assertNotIn("hwnd", payload)
+        uploaded = json.dumps(self.transport.requests)
+        self.assertNotIn("4242", uploaded)
+        self.assertNotIn("1435", uploaded)
+
+    def test_sensitive_window_title_is_not_uploaded(self):
+        path = self.root / "ea-login" / "timings"
+        path.mkdir(parents=True)
+        record = {"at": "2026-10-11T12:00:01+08:00", "type": "EA_STEP", "leaseId": None,
+                  "step": "signin-timeout", "page": "SIGNED_IN", "previousStep": None,
+                  "previousStepElapsedMs": 15, "hwnd": 7, "title": "user@example.test",
+                  "rect": [0, 0, 10, 10]}
+        (path / "2026-10-11.jsonl").write_text(json.dumps(record) + "\n")
+        self.worker.process_once()
+        self.assertNotIn("example.test", json.dumps(self.transport.requests))
+        payload = self.transport.requests[-1]["events"][-1]["payload"]
+        self.assertNotIn("window", payload)
+        self.assertNotIn("title", payload)
+        self.assertNotIn("hwnd", payload)
+
     def test_unknown_step_is_redacted_and_raw_text_is_never_forwarded(self):
         self.ea()
         path = next((self.root / "ea-login" / "timings").glob("*.jsonl"))

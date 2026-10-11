@@ -187,11 +187,26 @@ class EaLoginEvidence:
                 sum(token.confidence for token in tokens) / len(tokens), 3
             )
         record.update({key: value for key, value in detail.items() if value is not None})
+        if rect is not None:
+            record["rect"] = [int(value) for value in rect]
         self._reject_sensitive_values(record)
         now = time.monotonic()
+        timing_payload: dict[str, Any] = {
+            "step": name,
+            "page": page,
+            "previousStep": self._previous_step,
+            "previousStepElapsedMs": round((now - self._last_step_at) * 1000),
+        }
+        hwnd = record.get("hwnd")
+        if type(hwnd) is int and hwnd > 0:
+            timing_payload["hwnd"] = hwnd
+        title = record.get("title")
+        if isinstance(title, str) and title:
+            timing_payload["title"] = title
+        if isinstance(record.get("rect"), list):
+            timing_payload["rect"] = record["rect"]
         try:
-            self.timing("EA_STEP", step=name, page=page, previousStep=self._previous_step,
-                        previousStepElapsedMs=round((now - self._last_step_at) * 1000))
+            self.timing("EA_STEP", **timing_payload)
         except OSError:
             pass
         self._last_step_at, self._previous_step = now, name

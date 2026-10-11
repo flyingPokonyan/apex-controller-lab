@@ -12,7 +12,8 @@ import numpy as np
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2] / 'windows'))
 from apex_automation.ea_evidence import EaLoginEvidence
-from apex_automation.ea_app_win32 import WindowsEaHybridDriver
+from apex_automation.ea_app_win32 import EaObservation, WindowsEaHybridDriver
+from apex_automation.ea_pages import EaPage
 from apex_automation.ea_screenshot_outbox import EaScreenshotUploader, MAX_PENDING
 from apex_automation.ocr_obstacles import OcrToken
 
@@ -85,6 +86,23 @@ class EaScreenshotTest(unittest.TestCase):
             self.capture()
         self.assertIn('account-typed', self.evidence.steps_path.read_text())
         self.assertEqual(len(list(self.evidence.dir.glob('*.png'))), 1)
+
+    def test_observed_window_stays_in_the_local_step_log(self):
+        driver = object.__new__(WindowsEaHybridDriver)
+        driver.evidence = self.evidence
+        driver.notify = Mock()
+        frame = np.full((40, 40, 3), 180, dtype=np.uint8)
+        driver._record("signin-timeout", EaObservation(
+            (1, 2, 30, 40), frame, (), EaPage.SIGNED_IN, hwnd=15, title="EA",
+        ))
+        line = json.loads(self.evidence.steps_path.read_text().splitlines()[-1])
+        self.assertEqual(line["hwnd"], 15)
+        self.assertEqual(line["title"], "EA")
+        self.assertEqual(line["rect"], [1, 2, 30, 40])
+        pending = json.loads(next((self.root / "diagnostics/ea-evidence").glob("*.json")).read_text())
+        self.assertNotIn("hwnd", pending["details"])
+        self.assertNotIn("title", pending["details"])
+        self.assertNotIn("rect", pending["details"])
 
     def test_failure_before_window_observation_still_captures_the_desktop(self):
         driver = object.__new__(WindowsEaHybridDriver)

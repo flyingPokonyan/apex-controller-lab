@@ -1,6 +1,7 @@
 """Locate the installed EA desktop and keep it outside the input worker's job."""
 from __future__ import annotations
 
+import csv
 import json
 import os
 from pathlib import Path
@@ -8,7 +9,26 @@ from pathlib import Path
 from .atomic_files import replace_with_retry
 
 EA_EXECUTABLE = "eadesktop.exe"
+# Every process that can keep an EA window or respawn one. Child processes of
+# these images are taken with taskkill /T; names outside this list are left
+# alone.
+EA_PROCESS_NAMES = ("EADesktop.exe", "EABackgroundService.exe")
 CREATE_BREAKAWAY_FROM_JOB = 0x01000000
+
+
+def listed_ea_pids(tasklist_csv: str) -> list[int]:
+    """PIDs from `tasklist /FO CSV` whose image is an EA desktop process."""
+
+    names = {name.casefold() for name in EA_PROCESS_NAMES}
+    found: list[int] = []
+    for row in csv.reader(tasklist_csv.splitlines()):
+        if len(row) < 2 or not row[1].isdigit():
+            continue
+        if row[0].casefold() in names:
+            pid = int(row[1])
+            if pid not in found:
+                found.append(pid)
+    return found
 
 
 def desktop_app_creationflags() -> int:

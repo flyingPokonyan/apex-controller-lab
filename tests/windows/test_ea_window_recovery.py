@@ -79,6 +79,50 @@ class EaWindowRecoveryTest(unittest.TestCase):
             driver._ea_window()
         self.assertEqual(restores, [])
 
+    def test_without_a_capture_the_largest_main_window_is_still_used(self):
+        driver, _restores = self.driver({
+            1: {"visible": True, "iconic": False, "rect": (0, 0, 600, 800)},
+            2: {"visible": True, "iconic": False, "rect": (0, 0, 1425, 750)},
+        })
+        self.assertEqual(driver._ea_window(), 2)
+
+    def test_blank_window_loses_to_a_smaller_window_with_content(self):
+        frame = np.zeros((1600, 1800, 3), np.uint8)
+        frame[1000:1400, 80:400] = (30, 180, 220)
+        driver, restores = self.driver({
+            1: {"visible": True, "iconic": False, "rect": (0, 0, 1425, 750)},
+            2: {"visible": True, "iconic": False, "rect": (0, 800, 560, 1600)},
+        })
+        driver._frame = lambda: frame
+        self.assertEqual(driver._ea_window(), 2)
+        self.assertEqual(restores, [])
+
+    def test_front_window_with_content_beats_a_larger_window_behind_it(self):
+        frame = np.zeros((1600, 1800, 3), np.uint8)
+        frame[200:700, 80:600] = (10, 20, 200)
+        frame[1000:1400, 80:400] = (200, 180, 20)
+        driver, _restores = self.driver({
+            2: {"visible": True, "iconic": False, "rect": (0, 800, 560, 1600)},
+            1: {"visible": True, "iconic": False, "rect": (0, 0, 1425, 900)},
+        })
+        driver._frame = lambda: frame
+        self.assertEqual(driver._ea_window(), 2)
+
+    def test_only_blank_ea_windows_are_not_selected(self):
+        driver, _restores = self.driver({
+            1: {"visible": True, "iconic": False, "rect": (0, 0, 1425, 750)},
+        })
+        driver._frame = lambda: np.zeros((1600, 1800, 3), np.uint8)
+        with self.assertRaisesRegex(EaAppAutomationError, "空白窗口"):
+            driver._ea_window()
+
+    def test_flat_interior_is_blank_and_a_varied_interior_is_not(self):
+        flat = np.zeros((200, 200, 3), np.uint8)
+        varied = flat.copy()
+        varied[80:150, 40:160] = (20, 200, 240)
+        self.assertTrue(WindowsEaHybridDriver._interior_is_blank(flat, (0, 0, 200, 200)))
+        self.assertFalse(WindowsEaHybridDriver._interior_is_blank(varied, (0, 0, 200, 200)))
+
 
 class EaUpdateBannerTest(unittest.TestCase):
     def setUp(self):

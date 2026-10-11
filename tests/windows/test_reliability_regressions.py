@@ -16,7 +16,10 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "windows"))
 import managed_launcher as launcher
 from apex_automation.account_orchestrator import AccountOrchestrator, AccountCycleOutcome, AccountCycleResult
 from apex_automation.account_provider import FakeAccountProvider, OtpMethod
-from apex_automation.ea_app import EaIdentityFact, EaIdentityMismatch, EaIdentityUnconfirmed
+from apex_automation.ea_app import (
+    EaAppAutomationError, EaIdentityFact, EaIdentityMismatch, EaIdentityUnconfirmed,
+)
+from apex_automation.ocr_obstacles import OcrToken
 from apex_automation.ea_app_win32 import EaObservation, WindowsEaHybridDriver
 from apex_automation.ea_pages import EaPage
 from apex_automation.managed_runtime import ManagedRuntime, RETRY_EXIT
@@ -79,6 +82,59 @@ class IdentityEvidenceTest(unittest.TestCase):
                                        initial_challenge_started_at=datetime.now(timezone.utc))
         self.assertEqual(result.ea_account_id, "wanted")
         self.assertEqual(driver._identity.call_count, 2)
+
+    def test_identity_wait_reselects_the_window_on_every_poll(self):
+        driver = self.driver(None)
+        selected = []
+
+        def ea_window():
+            selected.append(10 + len(selected))
+            return selected[-1]
+
+        def identity(hwnd):
+            return self.fact("wanted") if hwnd == 11 else None
+
+        driver._ea_window = ea_window
+        driver._identity = identity
+        result = driver._await_identity(
+            1, Mock(), otp_methods=(OtpMethod.TOTP,),
+            initial_challenge_started_at=datetime.now(timezone.utc),
+        )
+        self.assertEqual(result.ea_account_id, "wanted")
+        self.assertEqual(selected, [10, 11])
+        self.assertEqual([call.args[0] for call in driver._observe.call_args_list], [10, 11])
+
+    def test_identity_wait_reads_expected_id_when_badge_bands_are_empty(self):
+        driver = self.driver(None)
+        driver.evidence = None
+        del driver._matching_identity
+        token = OcrToken("PLgQzAT14Z34", 0.93, (400, 400, 700, 440))
+        signed = EaObservation((0, 0, 1920, 1080), np.zeros((1, 1)), (token,), EaPage.SIGNED_IN)
+        driver._observe = Mock(side_effect=[replace(signed, page=EaPage.PASSWORD), signed])
+        driver.bind_expected_identity("PLgQzAT14Z34")
+        result = driver._await_identity(
+            1, Mock(), otp_methods=(OtpMethod.TOTP,),
+            initial_challenge_started_at=datetime.now(timezone.utc),
+        )
+        self.assertEqual(result.ea_account_id, "PLgQzAT14Z34")
+        self.assertTrue(result.verified)
+        self.assertTrue(result.source.startswith("ea-window-text:"))
+        self.assertEqual(driver._observe.call_count, 2)
+
+    def test_low_confidence_window_text_does_not_finish_sign_in(self):
+        driver = self.driver(None)
+        driver.evidence = None
+        del driver._matching_identity
+        driver._observe.return_value = EaObservation(
+            (0, 0, 1920, 1080), np.zeros((1, 1)),
+            (OcrToken("PLgQzAT14Z34", 0.40),), EaPage.SIGNED_IN,
+        )
+        driver.bind_expected_identity("PLgQzAT14Z34")
+        with self.assertRaises(EaAppAutomationError):
+            driver._await_identity(
+                1, Mock(), otp_methods=(OtpMethod.TOTP,),
+                initial_challenge_started_at=datetime.now(timezone.utc),
+            )
 
 
 class ManagedRecoveryTest(unittest.TestCase):

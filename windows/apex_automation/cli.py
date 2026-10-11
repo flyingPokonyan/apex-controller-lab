@@ -1088,6 +1088,9 @@ def run_ea_login_check(
                         challenge.method,
                     )
 
+                bind = getattr(driver, "bind_expected_identity", None)
+                if callable(bind):
+                    bind(expected)
                 driver.sign_in(credentials, supply_otp)
                 identity = driver.verify_identity(expected)
                 print(
