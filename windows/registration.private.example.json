@@ -1,8 +1,6 @@
 {
   "bitbrowserUrl": "http://127.0.0.1:54345",
   "bitbrowserApiKey": "",
-  "proxyUrl": "",
-  "steamCaptchaKey": "",
   "forgeProxy": "direct",
   "timeoutSeconds": 1800
 }

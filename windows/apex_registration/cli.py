@@ -153,6 +153,13 @@ def write_steam_account(directory: Path, username: str, password: str, email: st
 
 def apply_bundle(output_dir: Path, payload: dict) -> str:
     """Write the pool and Steam file. Return ``inventory`` or ``register``."""
+    runtime = payload.get('registration')
+    if runtime is not None:
+        if not isinstance(runtime, dict) or not runtime.get('proxyUrl'):
+            raise RuntimeError('Forge 下发的注册代理不完整')
+        # This task's assigned vendor takes precedence over machine overrides.
+        os.environ['EA_PROXY'] = str(runtime['proxyUrl'])
+        os.environ['CAPTCHALY_KEY'] = str(runtime.get('steamCaptchaKey') or '')
     ea_mailbox = payload["ea_mailbox"]
     steam_mailbox = payload["steam_mailbox"]
     mailboxes = [ea_mailbox]
@@ -427,7 +434,7 @@ def proxy_vendor(proxy_url: str) -> str:
 def configured_proxy() -> str:
     proxy = (os.environ.get("EA_PROXY") or os.environ.get("GAME_ACCOUNTS_REGISTER_PROXY") or "").strip()
     if not proxy:
-        raise RuntimeError("请在 registration.private.json 配置 proxyUrl")
+        raise RuntimeError("Forge 尚未下发注册代理，请确认两端已更新")
     return proxy
 
 
@@ -537,10 +544,6 @@ def main(argv=None) -> int:
     )
     os.environ["ACCOUNT_FLOW_OUTPUT_DIR"] = str(output_dir)
 
-    # Browser and Steam captcha solver must use the same reachable signup exit.
-    proxy = configured_proxy()
-    os.environ["EA_PROXY"] = proxy
-
     from apex_registration.utils.bitbrowser import BitBrowserClient, uses_bitbrowser
 
     desktop = os.environ.get("GAME_ACCOUNTS_DESKTOP_BROWSER", "").strip().lower()
@@ -567,6 +570,7 @@ def main(argv=None) -> int:
 
     try:
         source = prepare_bundle(output_dir)
+        os.environ["EA_PROXY"] = configured_proxy()
         from .utils.proxy_probe import probe_exit_country as _probe_exit_country
 
         chooser = choose_resin_proxy if uses_resin_proxy(os.environ["EA_PROXY"]) else choose_region_proxy

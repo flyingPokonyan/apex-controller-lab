@@ -16,7 +16,7 @@ class RegistrationWorkerTests(unittest.TestCase):
         self.root = Path(self.enterContext(tempfile.TemporaryDirectory()))
         config = self.root / 'runner.json'
         config.write_text('{}')
-        (self.root / 'registration.private.json').write_text(json.dumps({'proxyUrl': 'http://fixture:secret@proxy.example:8080'}))
+        (self.root / 'registration.private.json').write_text('{}')
         self.provider = HttpAccountProvider('https://forge.example/v1/runner/account-leases', 'provider-token', client_version='test')
         self.worker = RegistrationWorker(self.provider, SimpleNamespace(config_path=config), self.root,
                                          notify=Mock(), sleep=lambda _: None)
@@ -135,17 +135,18 @@ class RegistrationWorkerTests(unittest.TestCase):
         self.assertFalse(self.worker.before_game(self.ea))
         self.ea.ensure_started.assert_called_once()
 
-    def test_missing_proxy_reports_not_ready_and_keeps_game_available(self):
+    def test_no_local_registration_file_is_needed_for_dispatch(self):
         self.worker.config_path.unlink()
         self.worker.configure()
         self.worker.bit = Mock()
+        self.worker.bit.pids.return_value = {}
         self.worker.request.side_effect = [{'batch': None}, {'action': 'game'}]
         self.assertFalse(self.worker.before_game(self.ea))
         body = self.worker.request.call_args.args[2]
-        self.assertFalse(body['ready'])
-        self.assertFalse(body['canRegisterSteam'])
-        self.assertIn('proxyUrl', body['error'])
-        self.worker.bit.pids.assert_not_called()
+        self.assertTrue(body['ready'])
+        self.assertEqual(body['registrationConfigVersion'], 1)
+        self.assertNotIn('canRegisterSteam', body)
+        self.assertIsNone(body['error'])
         self.ea.ensure_started.assert_called_once()
 
     def test_old_forge_without_registration_keeps_existing_game_loop(self):

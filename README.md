@@ -29,16 +29,16 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\install.ps1 -RepoUrl "<仓
 注册、Steam 关联和 2FA 的 Windows 执行器随 Controller 一起更新；Windows 无需安装
 ApexForge 仓库。Forge 负责注册开关、动态任务分配、库存与结果入库。
 
-1. 更新 Controller，安装并登录 BitBrowser，启用 Local API。
-2. 双击 `windows\registration-setup.cmd`，设置注册代理；BitBrowser 接口默认
-   `http://127.0.0.1:54345`，启用鉴权时填写 API Token。需要新注册 Steam 时填写 Captchaly Key；
-   留空则只用 Forge 已有 Steam 库存。
-3. 启动 `windows\account-cycle.cmd`，在 Forge 的 **Apex → Runner** 开启“允许注册”，
-   首次可把每轮上限设为 1。
+1. 更新 Controller，安装并登录 BitBrowser，保持默认 Local API 可用。
+2. 启动 `windows\account-cycle.cmd`，在 Forge 的 **Apex → Runner** 开启“允许注册”。
 
-本机设置位于 `windows/registration.private.json`（示例见同名 `.example.json`），
-与设备身份文件分开，自动更新和重新下载身份不会覆盖。未设置注册代理或 BitBrowser 未就绪时，
-Runner 继续原游戏循环。日后代码和依赖自动更新，不需要手工安装另一套 Python 或注册脚本。
+不需要填写代理、验证码 Key，也不需要运行设置脚本。Forge 每项任务随机选用已有的
+1024 或 711 代理，并下发执行所需配置；重试沿用原任务选择。BitBrowser API 默认
+`http://127.0.0.1:54345`，未开启鉴权时无需 Token。
+
+仅在主动修改本机 API 地址或开启鉴权时，才使用可选的
+`windows/registration.private.json`（示例见同名 `.example.json`）。日常代码和依赖随
+自动更新取得，不需要另一套 Python 或 Forge 仓库。未打开 BitBrowser 时可继续原游戏循环。
 
 **Apex → 任务与租约 → Windows 注册** 显示批次、阶段、错误和心跳；任务文件在
 `windows/runs/registrations/<batch_id>/<task_id>/`。注册与游戏互斥，结果回传、窗口关闭和

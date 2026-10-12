@@ -136,10 +136,7 @@ class RegistrationWorker:
             self.config_error = str(exc)
         self.environment = environment(config)
         self.timeout = config['timeoutSeconds']
-        self.can_register_steam = bool(config['steamCaptchaKey'])
         self.bit = BitBrowser(config['bitbrowserUrl'], config['bitbrowserApiKey'])
-        if not config['proxyUrl'] and not self.config_error:
-            self.config_error = '请在 registration.private.json 配置注册代理 proxyUrl'
 
     def request(self, method, suffix, payload=None, key=None):
         return self.api._request(method, suffix, payload=payload, operation_id=key)[0]
@@ -177,7 +174,7 @@ class RegistrationWorker:
         pending = read_json(pending_path)
         # Persist both the key and body so a lost response recovers the same round.
         if not pending:
-            pending = {'key': uuid.uuid4().hex, 'body': {'ready': ready, 'capacity': capacity, 'error': error, 'canRegisterSteam': self.can_register_steam}}
+            pending = {'key': uuid.uuid4().hex, 'body': {'ready': ready, 'capacity': capacity, 'error': error, 'registrationConfigVersion': 1}}
             write_json(pending_path, pending)
         plan = self.request('POST', '/dispatch', pending['body'], pending['key'])
         pending_path.unlink(missing_ok=True)

@@ -163,12 +163,26 @@ class WindowsCheckoutTests(unittest.TestCase):
         self.assertIn("-region-US-", url)
         self.assertEqual(len(seen), 2)
 
+    def test_assigned_runtime_overrides_old_machine_proxy_and_survives_restart(self):
+        payload = self.bundle()
+        payload['registration'] = {'proxyVendor': '711', 'proxyUrl': 'http://fixture:secret@proxy.trustsource.live:10000',
+                                   'steamCaptchaKey': 'fixture-captcha'}
+        with tempfile.TemporaryDirectory() as directory, patch.dict(windows.os.environ, {'EA_PROXY': 'old', 'CAPTCHALY_KEY': 'old'}):
+            output = Path(directory)
+            windows.apply_bundle(output, payload)
+            self.assertEqual(windows.os.environ['EA_PROXY'], payload['registration']['proxyUrl'])
+            self.assertEqual(windows.os.environ['CAPTCHALY_KEY'], 'fixture-captcha')
+            windows.os.environ['EA_PROXY'] = 'different'
+            with patch.object(windows, 'checkout_bundle', side_effect=AssertionError('must reuse assigned task')):
+                windows.prepare_bundle(output)
+            self.assertEqual(windows.os.environ['EA_PROXY'], payload['registration']['proxyUrl'])
+
     def test_proxy_is_explicit_and_does_not_randomly_switch_vendor(self):
         configured = 'http://configured:secret@proxy.example:8080'
         with patch.dict(windows.os.environ, {'EA_PROXY': configured, 'EA_PROXY_VENDOR': '711'}, clear=True):
             self.assertEqual(windows.configured_proxy(), configured)
         with patch.dict(windows.os.environ, {}, clear=True):
-            with self.assertRaisesRegex(RuntimeError, 'proxyUrl'):
+            with self.assertRaisesRegex(RuntimeError, 'Forge'):
                 windows.configured_proxy()
 
     def test_resin_proxy_uses_the_matching_ytoo_platform(self):

@@ -6,8 +6,6 @@ from urllib.parse import urlparse
 DEFAULTS = {
     'bitbrowserUrl': 'http://127.0.0.1:54345',
     'bitbrowserApiKey': '',
-    'proxyUrl': '',
-    'steamCaptchaKey': '',
     'forgeProxy': 'direct',
     'timeoutSeconds': 1800,
 }
@@ -28,17 +26,13 @@ def load_config(path):
         if not isinstance(supplied, dict):
             raise ValueError('registration.private.json 必须是 JSON 对象')
         data.update(supplied)
-    for key in ('bitbrowserUrl', 'bitbrowserApiKey', 'proxyUrl', 'steamCaptchaKey', 'forgeProxy'):
+    for key in ('bitbrowserUrl', 'bitbrowserApiKey', 'forgeProxy'):
         if not isinstance(data[key], str):
             raise ValueError('注册配置字段类型错误：' + key)
         data[key] = data[key].strip()
     api = urlparse(data['bitbrowserUrl'])
     if api.scheme not in ('http', 'https') or not api.hostname:
         raise ValueError('bitbrowserUrl 必须为完整的 HTTP 接口地址')
-    if data['proxyUrl']:
-        proxy = urlparse(data['proxyUrl'])
-        if proxy.scheme not in ('http', 'https', 'socks5', 'socks5h') or not proxy.hostname:
-            raise ValueError('proxyUrl 必须为完整的 HTTP 或 SOCKS5 代理地址')
     if data['forgeProxy'] and data['forgeProxy'].lower() != 'direct':
         transport = urlparse(data['forgeProxy'])
         if transport.scheme not in ('http', 'https') or not transport.hostname:
@@ -53,7 +47,5 @@ def environment(data):
     return {
         'GAME_ACCOUNTS_BIT_API': data['bitbrowserUrl'],
         'GAME_ACCOUNTS_BIT_API_KEY': data['bitbrowserApiKey'],
-        'EA_PROXY': data['proxyUrl'],
-        'CAPTCHALY_KEY': data['steamCaptchaKey'],
         'FORGE_PROXY': data['forgeProxy'] or 'direct',
     }
