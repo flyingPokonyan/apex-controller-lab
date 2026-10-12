@@ -2590,5 +2590,40 @@ class AccountOrchestratorTest(unittest.TestCase):
             self.assertEqual(sleeps, [1.0])
 
 
+class PausedClaimRegistrationTest(unittest.TestCase):
+    def test_rejected_claim_returns_to_registration_but_uncertain_claim_replays(self):
+        from unittest.mock import Mock
+        for code in ("RUNNER_PAUSED", "PROVIDER_UNREACHABLE"):
+            with self.subTest(code=code), tempfile.TemporaryDirectory() as directory:
+                provider = FakeAccountProvider()
+                provider.claim = Mock(side_effect=LeaseProviderError(
+                    "claim unavailable", code=code, retryable=code != "RUNNER_PAUSED"))
+                store = AtomicCheckpointStore(Path(directory) / "status.json")
+                # Recover the exact stale claim left by an older worker.
+                store.save(OrchestrationCheckpoint(
+                    device_id="device_1", workflow_phase=WorkflowPhase.CLAIMING,
+                    pending_operation=PendingOperation.CLAIM,
+                    claim_request_id="old-claim", operation_id="old-claim"))
+                registration = Mock()
+                registration.before_game.return_value = True
+                cycle = AccountOrchestrator(
+                    provider=provider, registration=registration, ea_driver=object(),
+                    play_session=object(), checkpoint_store=store,
+                    device_id="device_1", capture_source=object(), notify=lambda _: None)
+                self.assertEqual(cycle.run_once().outcome, AccountCycleOutcome.PAUSED)
+                registration.before_game.assert_not_called()
+                cycle.resume()
+                result = cycle.run_once()
+                if code == "RUNNER_PAUSED":
+                    self.assertIsNone(store.load().pending_operation)
+                    self.assertEqual(result.outcome, AccountCycleOutcome.NO_ACCOUNT)
+                    registration.before_game.assert_called_once()
+                    self.assertEqual(provider.claim.call_count, 1)
+                else:
+                    self.assertEqual(store.load().claim_request_id, "old-claim")
+                    self.assertEqual(provider.claim.call_count, 2)
+                    registration.before_game.assert_not_called()
+
+
 if __name__ == "__main__":
     unittest.main()

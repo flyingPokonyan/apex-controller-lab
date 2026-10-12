@@ -421,7 +421,19 @@ class AccountOrchestrator:
             pending_operation=PendingOperation.CLAIM,
             operation_id=claim_request_id,
         )
-        lease = self.provider.claim(claim_request_id, self.task_type)
+        try:
+            lease = self.provider.claim(claim_request_id, self.task_type)
+        except LeaseProviderError as error:
+            if error.code == "RUNNER_PAUSED":
+                # A definitive rejection created no lease. Keeping this claim
+                # pending would skip registration dispatch on every retry,
+                # so a held device could never receive its next manual test.
+                self._update_checkpoint(
+                    claim_request_id=None,
+                    pending_operation=None,
+                    operation_id=None,
+                )
+            raise
         if lease is None:
             self._update_checkpoint(
                 claim_request_id=None,
