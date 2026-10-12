@@ -53,3 +53,5 @@ next-env.d.ts
 /calibration/tutorial/raw/
 __pycache__/
 *.py[cod]
+
+/windows/registration.private.json

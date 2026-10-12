@@ -548,7 +548,7 @@ class GitUpdateTest(unittest.TestCase):
         with patch.object(launcher, "run_command", return_value="") as command:
             self.repo.install({"dependencies": digest})
         self.assertEqual(command.call_count, 1)
-        self.assertEqual(command.call_args.args[0][-1], "import apex_automation.cli")
+        self.assertEqual(command.call_args.args[0][-1], "import apex_automation.cli; from apex_registration import check_runtime; check_runtime()")
 
 
 if __name__ == "__main__":

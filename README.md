@@ -24,6 +24,27 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\install.ps1 -RepoUrl "<仓
 游戏主循环有响应时等待其恢复或安全收口；EA 故障暂停可提前更新，由新版先恢复遗留任务。首次手工启动会登记当前用户登录后自动启动。
 `windows\update.cmd` 可立即请求检查更新；已有 Runner 运行时不会原地覆盖它的代码。
 
+## 可选：让这台 Runner 执行 EA 注册
+
+注册、Steam 关联和 2FA 的 Windows 执行器随 Controller 一起更新；Windows 无需安装
+ApexForge 仓库。Forge 负责注册开关、动态任务分配、库存与结果入库。
+
+1. 更新 Controller，安装并登录 BitBrowser，启用 Local API。
+2. 双击 `windows\registration-setup.cmd`，设置注册代理；BitBrowser 接口默认
+   `http://127.0.0.1:54345`，启用鉴权时填写 API Token。需要新注册 Steam 时填写 Captchaly Key；
+   留空则只用 Forge 已有 Steam 库存。
+3. 启动 `windows\account-cycle.cmd`，在 Forge 的 **Apex → Runner** 开启“允许注册”，
+   首次可把每轮上限设为 1。
+
+本机设置位于 `windows/registration.private.json`（示例见同名 `.example.json`），
+与设备身份文件分开，自动更新和重新下载身份不会覆盖。未设置注册代理或 BitBrowser 未就绪时，
+Runner 继续原游戏循环。日后代码和依赖自动更新，不需要手工安装另一套 Python 或注册脚本。
+
+**Apex → 任务与租约 → Windows 注册** 显示批次、阶段、错误和心跳；任务文件在
+`windows/runs/registrations/<batch_id>/<task_id>/`。注册与游戏互斥，结果回传、窗口关闭和
+EA App 预检完成后才切回游戏；重启只恢复原批次，不重复创建已尝试的账号。
+两端需同时提供注册调度接口与内置执行器；首次真实 Windows 完整运行仍需现场确认。
+
 ## GitHub 与 Windows 更新
 
 一键安装默认通过 HTTPS 克隆私有仓库，Git 会在第一次访问时打开 GitHub 登录。已经配置

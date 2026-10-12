@@ -3,3 +3,9 @@ numpy>=2.0,<3
 opencv-python>=4.12,<5
 onnxruntime==1.27.0
 rapidocr==3.9.2
+
+# Controller-owned desktop registration (BitBrowser supplies Chromium over CDP).
+requests[socks]>=2.31,<3
+beautifulsoup4>=4.12,<5
+playwright>=1.50,<2
+curl_cffi>=0.7,<1

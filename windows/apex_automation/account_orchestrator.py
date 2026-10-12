@@ -126,6 +126,7 @@ class AccountOrchestrator:
         notify: Callable[[str], None] = print,
         diagnostic: Callable[..., None] | None = None,
         maintenance=None,
+        registration=None,
     ) -> None:
         self.provider = provider
         self.ea_driver = ea_driver
@@ -142,6 +143,7 @@ class AccountOrchestrator:
         self.notify = notify
         self.diagnostic = diagnostic
         self.maintenance = maintenance
+        self.registration = registration
         self._phase_started_at = time.monotonic()
         self._checkpoint_lock = threading.Lock()
         self._provider_operation_lock = threading.RLock()
@@ -1088,6 +1090,9 @@ class AccountOrchestrator:
                 error_code=self._checkpoint.last_error_code,
             )
         try:
+            if self.registration is not None and not self._checkpoint.has_lease and self._checkpoint.pending_operation is None:
+                if self.registration.before_game(self.ea_driver):
+                    return AccountCycleResult(AccountCycleOutcome.NO_ACCOUNT)
             lease = self._obtain_lease()
             if lease is None:
                 if self._checkpoint.has_lease:

@@ -237,7 +237,7 @@ class Repository:
             write_json(marker, {"requirements": digest})
         # Import only. Do not invoke account-cycle or its EA preflight here.
         env = dict(os.environ, PYTHONPATH=str(self.root / "windows"))
-        run_command([str(python), "-c", "import apex_automation.cli"], cwd=self.root, env=env, timeout=120)
+        run_command([str(python), "-c", "import apex_automation.cli; from apex_registration import check_runtime; check_runtime()"], cwd=self.root, env=env, timeout=120)
         return digest
 
 

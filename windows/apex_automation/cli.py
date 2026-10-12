@@ -10,7 +10,7 @@ import uuid
 
 import json
 
-from . import __version__
+from . import __version__, account_provider
 from .account_orchestrator import AccountCycleOutcome, AccountOrchestrator
 from .account_provider import (
     DEFAULT_TASK_TYPE,
@@ -860,8 +860,14 @@ def run_account_cycle(
                             raise
                         maintenance.pulse("PROVIDER_RETRY", blocked=False, reason=error.code)
                         maintenance.sleep(30)
+            registration = None
+            if isinstance(provider, account_provider.HttpAccountProvider):
+                from .registration_worker import RegistrationWorker
+                registration = RegistrationWorker(provider, settings, runs_root, maintenance=maintenance,
+                    **({'sleep': maintenance.sleep} if maintenance is not None else {}))
             orchestrator = AccountOrchestrator(
                 provider=provider,
+                registration=registration,
                 ea_driver=ea_driver,
                 play_session=play_session,
                 checkpoint_store=AtomicCheckpointStore(
@@ -876,7 +882,7 @@ def run_account_cycle(
             )
             if resume:
                 orchestrator.resume()
-            if callable(preflight) and not recovering:
+            if callable(preflight) and not recovering and registration is None:
                 state = preflight()
                 print(f"EA 领号前预检通过：{state.value}")
             if once:
