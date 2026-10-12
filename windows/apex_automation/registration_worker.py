@@ -128,6 +128,7 @@ class RegistrationWorker:
         self.root = Path(root) / 'registrations'
         self.maintenance, self.notify, self.sleep = maintenance, notify, sleep
         self.available = True
+        self.release_version = os.environ.get('APEX_CONTROLLER_COMMIT') or provider.client_version
 
     def configure(self):
         self.config_error = None
@@ -272,7 +273,7 @@ class RegistrationWorker:
                     message = operation.get('message', '注册执行中')
                     events.append({'id': task_id, 'stage': operation.get('stage', 'checkout'),
                                    'message': message, 'name': operation.get('name'),
-                                   'seconds': operation.get('seconds'), 'clientVersion': self.api.client_version})
+                                   'seconds': operation.get('seconds'), 'clientVersion': self.release_version})
                     now = time.monotonic()
                     if child.poll() is None and (now - started_at > self.timeout or
                             (operation.get('deadline') and now > operation['deadline'] + 45)):
@@ -362,7 +363,7 @@ class RegistrationWorker:
                             break
                         try:
                             item = json.loads(line)
-                            item.update(taskId=task['id'], clientVersion=self.api.client_version)
+                            item.update(taskId=task['id'], clientVersion=self.release_version)
                             events.append(item)
                         except (ValueError, AttributeError):
                             pass

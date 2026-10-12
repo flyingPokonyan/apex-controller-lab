@@ -343,7 +343,7 @@ class Launcher:
         self.requested_at = self.request_mode = None
         env = dict(os.environ, PYTHONPATH=str(self.repo.root / "windows"),
                    PYTHONUNBUFFERED="1", APEX_MANAGED_ROOT=str(self.root),
-                   APEX_MANAGED_SESSION=self.session)
+                   APEX_MANAGED_SESSION=self.session, APEX_CONTROLLER_COMMIT=commit)
         # A retry of the same revision must retain the checkpoint's pause and
         # EA recovery budget. Explicit operator resume or a new revision gets
         # one recovery attempt, still subject to remote lease fences.
