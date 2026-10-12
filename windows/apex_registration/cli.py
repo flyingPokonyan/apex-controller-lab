@@ -5,6 +5,7 @@ import argparse
 import json
 import os
 import random
+import re
 import sys
 import tempfile
 import urllib.error
@@ -300,6 +301,10 @@ def sync_result(output_dir: Path, *, finished: bool, exit_code: int | None = Non
                "exit_code": exit_code, "steam_hold_task_id": bundle.get("steam_hold_task_id"),
                "mailbox_updates": bundle.get("mailbox_updates", [])}
     write_private_json(output_dir / "forge_pending_result.json", payload)
+    if finished:
+        # Keep the final result after acknowledgement so the parent cannot
+        # overwrite a concrete failure with a generic process interruption.
+        write_private_json(output_dir / "forge_final_result.json", payload)
     api_base = bundle.get("forge_api_url") or forge_api_url()
     _use_local_proxy()
     token = os.environ.get("FORGE_TOKEN", "").strip() or login_token(api_base)
@@ -333,6 +338,31 @@ def try_sync_result(output_dir: Path, *, finished: bool, exit_code: int | None =
     except (RuntimeError, ValueError, OSError) as exc:
         sys.stderr.write(str(exc) + "\n")
         return False
+
+
+def save_failure(output_dir: Path, stage: str, error: Exception) -> str:
+    """Retain a useful, credential-free failure even before checkout finishes."""
+    message = str(error) if isinstance(error, RuntimeError) else type(error).__name__
+    bundle = read_json(output_dir, "windows_trial.json")
+    def secrets(value):
+        if isinstance(value, dict):
+            for key, item in value.items():
+                if any(word in key.lower() for word in ('password', 'token', 'secret', 'key')) and isinstance(item, str) and item:
+                    yield item
+                yield from secrets(item)
+        elif isinstance(value, list):
+            for item in value:
+                yield from secrets(item)
+    values = [*secrets(bundle), *(os.environ.get(key, '') for key in ('FORGE_TOKEN', 'FORGE_PASSWORD', 'CAPTCHALY_KEY'))]
+    for value in sorted(filter(None, values), key=len, reverse=True):
+        message = message.replace(value, '[REDACTED]')
+    message = re.sub(r'(?i)(?:https?|socks5h?)://\S+', '[地址已隐藏]', message)
+    message = re.sub(r'[\w.+-]+@[\w.-]+', '[邮箱已隐藏]', message)[:1000]
+    result = read_json(output_dir, 'ea_full_setup_result.json')
+    if not result.get('error_code'):
+        result.update(stage=stage, error_code=f'{stage}_failed', error_message=message)
+    write_private_json(output_dir / 'ea_full_setup_result.json', result)
+    return message
 
 
 def capture_mailbox_refresh(module, output_dir: Path) -> None:
@@ -438,7 +468,7 @@ def configured_proxy() -> str:
     return proxy
 
 
-def choose_region_proxy(proxy_url: str, seed: str, *, probe, attempts: int = 6) -> str:
+def choose_region_proxy(proxy_url: str, seed: str, *, probe, attempts: int = 6, progress=None) -> str:
     """Pick HK, US, or JP and keep the exit only when the country matches.
 
     ``probe`` returns ``(country_code, error)``. A 1024 region label is not
@@ -453,6 +483,8 @@ def choose_region_proxy(proxy_url: str, seed: str, *, probe, attempts: int = 6) 
     errors: list[str] = []
     for attempt in range(max(1, attempts)):
         region = pinned or random.choice(WINDOWS_PROXY_REGIONS)
+        if progress:
+            progress(region, attempt + 1, max(1, attempts))
         sticky = with_sticky_session(
             proxy_url,
             f"{seed}:{region}:{attempt}:{random.randrange(1 << 16)}",
@@ -467,7 +499,7 @@ def choose_region_proxy(proxy_url: str, seed: str, *, probe, attempts: int = 6) 
     raise RuntimeError("注册出口不在抽中的国家：" + "；".join(errors))
 
 
-def choose_resin_proxy(proxy_url: str, seed: str, *, probe, attempts: int = 6) -> str:
+def choose_resin_proxy(proxy_url: str, seed: str, *, probe, attempts: int = 6, progress=None) -> str:
     """Pick a Ytoo HK, US, or JP platform and keep it when the exit matches.
 
     Resin selects the node from the platform name. The account suffix keeps
@@ -479,6 +511,8 @@ def choose_resin_proxy(proxy_url: str, seed: str, *, probe, attempts: int = 6) -
     errors: list[str] = []
     for attempt in range(max(1, attempts)):
         region = random.choice(WINDOWS_PROXY_REGIONS)
+        if progress:
+            progress(region, attempt + 1, max(1, attempts))
         task_id = f"ea{region.lower()}{attempt}{random.randrange(1 << 20):x}"
         sticky = _resin_task_proxy(
             proxy_url,
@@ -545,6 +579,10 @@ def main(argv=None) -> int:
     os.environ["ACCOUNT_FLOW_OUTPUT_DIR"] = str(output_dir)
 
     from apex_registration.utils.bitbrowser import BitBrowserClient, uses_bitbrowser
+    from apex_registration.utils.flow_runtime import FlowRuntime
+
+    runtime = FlowRuntime(output_dir)
+    runtime.start('browser_check', 'browser_check', '检查本机浏览器接口', 45)
 
     desktop = os.environ.get("GAME_ACCOUNTS_DESKTOP_BROWSER", "").strip().lower()
     if desktop in {"chrome", "chrome-incognito", "incognito"}:
@@ -552,32 +590,36 @@ def main(argv=None) -> int:
     elif uses_bitbrowser():
         client = BitBrowserClient()
         if not client.health():
-            sys.stderr.write(
-                "本机 BitBrowser 接口不可达。先打开 BitBrowser，并确认 API 在 "
-                f"{client.base_url}。\n"
-            )
+            sys.stderr.write(save_failure(output_dir, 'browser_check', RuntimeError(
+                '本机 BitBrowser 接口不可达，请打开 BitBrowser 并确认 Local API 已启用')) + '\n')
+            runtime.close()
             return 2
     else:
         from apex_registration.utils.roxybrowser import RoxyBrowserClient
 
         client = RoxyBrowserClient()
         if not client.health():
-            sys.stderr.write(
-                "本机 Roxy Local API 不可达。先打开桌面版 Roxy，登录，并确认 API 在 "
-                f"{client.base_url}。\n"
-            )
+            sys.stderr.write(save_failure(output_dir, 'browser_check', RuntimeError(
+                '本机 Roxy Local API 不可达，请打开并登录 Roxy')) + '\n')
+            runtime.close()
             return 2
 
     try:
+        runtime.start('checkout', 'checkout', '领取本次任务的邮箱和代理', 90)
         source = prepare_bundle(output_dir)
         os.environ["EA_PROXY"] = configured_proxy()
         from .utils.proxy_probe import probe_exit_country as _probe_exit_country
 
         chooser = choose_resin_proxy if uses_resin_proxy(os.environ["EA_PROXY"]) else choose_region_proxy
+        def proxy_progress(region, attempt, total):
+            message = f"检查 {proxy_vendor(os.environ['EA_PROXY'])} 出口 {region}（第 {attempt}/{total} 次）"
+            runtime.start('proxy_check', 'proxy_check', message, 120)
+            sys.stderr.write(message + '\n')
         sticky = chooser(
             os.environ["EA_PROXY"],
             os.environ.get("EA_EMAIL", "windows"),
             probe=_probe_exit_country,
+            progress=proxy_progress,
         )
         os.environ["EA_PROXY"] = sticky
         os.environ["STEAM_PROXY"] = sticky
@@ -590,13 +632,16 @@ def main(argv=None) -> int:
             f"代理 {proxy_vendor(os.environ.get('EA_PROXY', ''))}。\n"
         )
         if source == "register":
+            runtime.start('steam_register', 'steam_register', '创建 Steam 账号', 600)
             register_steam_then_record(output_dir)
             try_sync_result(output_dir, finished=False)
-    except RuntimeError as exc:
-        sys.stderr.write(str(exc) + "\n")
+    except Exception as exc:
+        sys.stderr.write(save_failure(output_dir, runtime.operation.get('stage', 'checkout'), exc) + "\n")
         if (output_dir / "windows_trial.json").exists():
             try_sync_result(output_dir, finished=True, exit_code=2)
         return 2
+    finally:
+        runtime.close()
 
     from .flows.ea import ea_pw_full_setup as module
     capture_mailbox_refresh(module.protocol, output_dir)

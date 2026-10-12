@@ -185,6 +185,26 @@ class WindowsCheckoutTests(unittest.TestCase):
             with self.assertRaisesRegex(RuntimeError, 'Forge'):
                 windows.configured_proxy()
 
+    def test_proxy_failure_is_saved_before_final_upload(self):
+        from unittest.mock import Mock
+        from apex_registration.utils import bitbrowser, proxy_probe
+        with tempfile.TemporaryDirectory() as directory, patch.dict(windows.os.environ,
+                {'EA_PROXY': 'socks5://user:secret@us.1024proxy.io:3000', 'EA_REGISTER_REGION': 'US'}, clear=True):
+            output = Path(directory)
+            windows.write_private_json(output / 'windows_trial.json', self.bundle())
+            with patch.object(windows, '_refuse_unless_windows'), patch.object(windows, 'acquire_game_lock'), \
+                    patch.object(bitbrowser.BitBrowserClient, 'health', return_value=True), \
+                    patch.object(windows, 'prepare_bundle', return_value='inventory'), \
+                    patch.object(proxy_probe, 'probe_exit_country', return_value=(None, 'ipinfo.io: ConnectTimeout')), \
+                    patch.object(windows, 'try_sync_result', return_value=True) as sync:
+                self.assertEqual(windows.main(['--output-dir', directory]), 2)
+            result = windows.read_json(output, 'ea_full_setup_result.json')
+            self.assertEqual(result['stage'], 'proxy_check')
+            self.assertEqual(result['error_code'], 'proxy_check_failed')
+            self.assertIn('ConnectTimeout', result['error_message'])
+            self.assertNotIn('secret', result['error_message'])
+            sync.assert_called_once_with(output, finished=True, exit_code=2)
+
     def test_resin_proxy_uses_the_matching_ytoo_platform(self):
         seen = []
 

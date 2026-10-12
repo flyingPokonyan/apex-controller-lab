@@ -2906,8 +2906,12 @@ class WindowsEaHybridDriver(EaPasswordRecoveryMixin):
             self.notify("正在等待 Apex 启动请求结束，确认游戏退出后再清理 EA")
         attempts: dict[str, float] = {}
         empty_since = None
+        next_notice = now + 15.0
         while True:
             now = time.monotonic()
+            if now < settle_until and now >= next_notice:
+                self.notify(f"正在确认旧 Apex 启动请求已结束，还需等待约 {max(1, int(settle_until - now))} 秒")
+                next_notice = now + 15.0
             running = [name for name in APEX_EXECUTABLES if self._process_running(name)]
             if not running:
                 empty_since = now if empty_since is None else empty_since

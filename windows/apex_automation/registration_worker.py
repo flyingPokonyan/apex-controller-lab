@@ -217,10 +217,15 @@ class RegistrationWorker:
             log.close()
 
     def mark_interrupted(self, task, directory):
-        payload = read_json(directory / 'forge_pending_result.json')
+        payload = read_json(directory / 'forge_pending_result.json') or read_json(directory / 'forge_final_result.json')
         if not payload:
-            payload = {'finished': True, 'exit_code': 1, 'result': {'error_code': 'runner_interrupted',
-                       'error_message': '执行中断，已有成果保留，请复核后继续'}, 'steam_result': {}}
+            result = read_json(directory / 'ea_full_setup_result.json')
+            operation = read_json(directory / 'flow_operation.json')
+            if not result.get('error_code'):
+                result.update(error_code='runner_interrupted', error_message='注册进程中断，已保存本机已有成果')
+            result.setdefault('stage', operation.get('stage') or 'checkout')
+            payload = {'finished': True, 'exit_code': 1, 'result': result,
+                       'steam_result': read_json(directory / 'steam_register_result.json')}
         payload['finished'] = True
         payload['exit_code'] = payload.get('exit_code') if payload.get('exit_code') is not None else 1
         client = HttpAccountProvider(self.base + '/v1/runner/registration-tasks', self.token,
@@ -257,8 +262,12 @@ class RegistrationWorker:
                 events = []
                 for task_id, (child, started_at, work, task) in list(processes.items()):
                     operation = read_json(work / 'flow_operation.json')
+                    message = operation.get('message', '注册执行中')
+                    if operation.get('started') is not None:
+                        elapsed = max(0, int(time.monotonic() - operation['started']))
+                        message += f' · 本步骤已用 {elapsed} 秒'
                     events.append({'id': task_id, 'stage': operation.get('stage', 'checkout'),
-                                   'message': operation.get('message', '注册执行中')})
+                                   'message': message})
                     now = time.monotonic()
                     if child.poll() is None and (now - started_at > self.timeout or
                             (operation.get('deadline') and now > operation['deadline'] + 45)):

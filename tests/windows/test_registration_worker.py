@@ -135,6 +135,27 @@ class RegistrationWorkerTests(unittest.TestCase):
         self.assertFalse(self.worker.before_game(self.ea))
         self.ea.ensure_started.assert_called_once()
 
+    def test_parent_preserves_acknowledged_child_failure(self):
+        work = self.root / 'finished'
+        payload = {'finished': True, 'exit_code': 2, 'result': {'stage': 'proxy_check',
+            'error_code': 'proxy_check_failed', 'error_message': 'ipinfo.io: ConnectTimeout'}, 'steam_result': {}}
+        write_json(work / 'forge_final_result.json', payload)
+        transport = Mock()
+        transport.request.return_value = ProviderHttpResponse(200, {}, b'{"state":"needs_review"}')
+        self.worker.api.transport = transport
+        self.worker.mark_interrupted({'id': 'task-0'}, work)
+        self.assertEqual(json.loads(transport.request.call_args.args[3]), payload)
+
+    def test_failure_before_checkout_is_uploaded_with_stage(self):
+        work = self.root / 'preflight'
+        result = {'stage': 'browser_check', 'error_code': 'browser_check_failed', 'error_message': 'Local API unavailable'}
+        write_json(work / 'ea_full_setup_result.json', result)
+        transport = Mock()
+        transport.request.return_value = ProviderHttpResponse(200, {}, b'{"state":"needs_review"}')
+        self.worker.api.transport = transport
+        self.worker.mark_interrupted({'id': 'task-0'}, work)
+        self.assertEqual(json.loads(transport.request.call_args.args[3])['result'], result)
+
     def test_no_local_registration_file_is_needed_for_dispatch(self):
         self.worker.config_path.unlink()
         self.worker.configure()
