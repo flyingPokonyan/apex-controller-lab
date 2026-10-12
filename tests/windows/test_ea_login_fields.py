@@ -173,6 +173,8 @@ class ForegroundCaptureTest(unittest.TestCase):
         driver._focus = lambda _: events.append("focus")
         driver._frame = lambda: events.append("capture") or np.zeros((900, 600, 3), np.uint8)
         driver._clip_rect = lambda *_args: (0, 0, 600, 900)
+        driver._observation_source = lambda _: (42, 1, (0, 0, 600, 900))
+        driver._token_belongs_to_window = lambda *_: True
         driver.ocr = SimpleNamespace(read_with_boxes=lambda _: (
             OcrToken("BACK", .99, (30, 80, 100, 100)),
             OcrToken("PASSWORD", .99, (40, 400, 160, 420)),
