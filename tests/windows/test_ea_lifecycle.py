@@ -65,7 +65,7 @@ class Session:
         assert self.account is not None and not self.current_page_is_banned()
         self.game_running = True
 
-    def stop_apex(self):
+    def stop_apex(self, *, settle_launch=False):
         self.game_running = False
         return ApexExitEvidence(True, True)
 
@@ -139,6 +139,29 @@ class LifecycleTest(unittest.TestCase):
         result = runner.run_once()
         self.assertEqual(result.outcome, AccountCycleOutcome.COMPLETED)
         self.assertIsNone(result.error_code)
+
+    def test_incomplete_game_exit_keeps_original_ban_and_prevents_next_claim(self):
+        from unittest.mock import Mock
+        from apex_automation.ea_app import ApexExitEvidence
+        runner = self.fixture(["banned0001", "healthy002"], ["banned0001"])
+        self.session.stop_apex = Mock(side_effect=[ApexExitEvidence(True, False), ApexExitEvidence(True, True)])
+        self.assertEqual(runner.run_once().error_code, "APEX_EXIT_TIMEOUT")
+        self.assertEqual(self.store.load().result_error_code, "EA_ACCOUNT_BANNED")
+        self.assertFalse(any(name == "close" for name, _ in self.provider.calls))
+        result = self.orchestrator().run_once()
+        self.assertEqual(result.error_code, "EA_ACCOUNT_BANNED")
+        self.assertEqual(result.outcome, AccountCycleOutcome.COMPLETED)
+        self.assertEqual(sum(name == "claim" for name, _ in self.provider.calls), 1)
+
+    def test_ban_during_game_launch_requests_settling_before_session_cleanup(self):
+        from unittest.mock import Mock
+        runner = self.fixture(["healthy002"])
+        self.session.start_apex = Mock(side_effect=EaAccountBanned("explicit dialog after Play"))
+        self.session.stop_apex = Mock(wraps=self.session.stop_apex)
+        result = runner.run_once()
+        self.assertEqual(result.error_code, "EA_ACCOUNT_BANNED")
+        self.session.stop_apex.assert_called_once_with(settle_launch=True)
+        self.assertIsNone(self.session.account)
 
     def exhausted_checkpoint(self):
         self.fixture(["banned0001", "healthy002"], ["banned0001"])

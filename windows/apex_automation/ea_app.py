@@ -131,7 +131,7 @@ class EaAppDriver(Protocol):
 
     def start_apex(self) -> None: ...
 
-    def stop_apex(self) -> ApexExitEvidence: ...
+    def stop_apex(self, *, settle_launch=False) -> ApexExitEvidence: ...
 
     def sign_out(self) -> bool: ...
 
@@ -178,7 +178,7 @@ class UnavailableEaAppDriver:
     def start_apex(self) -> None:
         self._unavailable()
 
-    def stop_apex(self) -> ApexExitEvidence:
+    def stop_apex(self, *, settle_launch=False) -> ApexExitEvidence:
         self._unavailable()
         raise AssertionError("unreachable")
 

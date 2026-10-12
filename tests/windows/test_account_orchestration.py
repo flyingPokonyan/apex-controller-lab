@@ -465,7 +465,7 @@ class FakeEaDriver:
     def start_apex(self) -> None:
         self.log.append("apex.start")
 
-    def stop_apex(self) -> ApexExitEvidence:
+    def stop_apex(self, *, settle_launch=False) -> ApexExitEvidence:
         self.log.append("apex.stop")
         return ApexExitEvidence(True, True)
 
@@ -616,7 +616,7 @@ class AccountOrchestratorTest(unittest.TestCase):
                 class RecoveringEa(FakeEaDriver):
                     attempts = 0
 
-                    def stop_apex(self):
+                    def stop_apex(self, *, settle_launch=False):
                         if failure != "signout-error":
                             self.attempts += 1
                             if self.attempts <= 4:

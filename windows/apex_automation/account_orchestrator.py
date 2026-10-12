@@ -785,22 +785,29 @@ class AccountOrchestrator:
         lease: AccountLease,
         reason_code: str,
     ) -> AccountCycleResult:
+        # Preserve the account failure even if game/EA cleanup is interrupted.
+        self._update_checkpoint(result_status="FAILED", result_error_code=reason_code)
         try:
-            exit_evidence = self.ea_driver.stop_apex()
+            # A pending Play request can create the game after the first
+            # empty process snapshot. Recover the barrier from the checkpoint
+            # after a worker restart, before allowing EA sign-out or a claim.
+            exit_evidence = self.ea_driver.stop_apex(settle_launch=(
+                self._checkpoint.workflow_phase in {
+                    WorkflowPhase.APEX_STARTING, WorkflowPhase.EA_SIGNING_OUT,
+                }
+            ))
         except EaAppAutomationError:
             return self._pause("CLEANUP_UNCONFIRMED", manual=True)
         if not exit_evidence.all_processes_exited:
             return self._pause("APEX_EXIT_TIMEOUT", manual=True)
-        # Persist the original account failure before cleanup. If cleanup is
-        # interrupted, its retry must not convert a ban into RESTART_RECOVERY
-        # or claim another account while the old session is still logged in.
-        self._update_checkpoint(workflow_phase=WorkflowPhase.EA_SIGNING_OUT,
-                                result_status="FAILED", result_error_code=reason_code)
+        self._update_checkpoint(workflow_phase=WorkflowPhase.EA_SIGNING_OUT)
         try:
             signed_out = self.ea_driver.sign_out()
         except EaUiRecoveryExhausted as error:
+            self.notify(f"EA 清理失败：{error.reason_code}：{error}")
             return self._pause(error.reason_code, manual=True)
-        except EaAppAutomationError:
+        except EaAppAutomationError as error:
+            self.notify(f"EA 清理失败：{error.reason_code}：{error}")
             return self._pause("EA_SIGNOUT_FAILED", manual=True)
         cleanup = CleanupEvidence(True, True, signed_out)
         if not cleanup.complete:
@@ -1104,7 +1111,7 @@ class AccountOrchestrator:
                     self.notify("程序曾在任务中途退出，自动释放旧租约")
                     recovery = self._cleanup_and_close_preplay_failure(
                         lease,
-                        "RESTART_RECOVERY",
+                        self._checkpoint.result_error_code or "RESTART_RECOVERY",
                     )
                 if recovery.outcome is not AccountCycleOutcome.PAUSED:
                     self._restart_recovery_pending = False
@@ -1299,11 +1306,13 @@ class AccountOrchestrator:
             result = self.run_once()
             if result.outcome is AccountCycleOutcome.PAUSED:
                 if self._checkpoint.run_state is OrchestratorRunState.PAUSED_MANUAL:
+                    if self.maintenance is not None:
+                        self.maintenance.pulse(blocked=True, reason=result.error_code, boundary=True)
                     cleanup_retryable = self._checkpoint.has_lease and (
                         result.error_code == "APEX_EXIT_TIMEOUT"
                         or (result.error_code == "CLEANUP_UNCONFIRMED"
                             and self._checkpoint.active_play_run_id is None
-                            and self._checkpoint.result_status is None)
+                            and self._checkpoint.result_status in {None, "FAILED"})
                     )
                     if self.maintenance is not None and (
                         result.error_code in RECOVERABLE_EA_FAILURES or cleanup_retryable

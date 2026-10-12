@@ -405,7 +405,10 @@ class Launcher:
                 self.save("UPDATE_READY", pid=None, error=None)
             else:
                 self.failure(commit)
-                self.save("WAITING_RETRY", pid=None, error=f"WORKER_EXIT_{code}")
+                reason = final_status.get("reason")
+                suffix = (f": {reason}" if isinstance(reason, str)
+                          and re.fullmatch(r"[A-Z][A-Z0-9_]{1,64}", reason) else "")
+                self.save("WAITING_RETRY", pid=None, error=f"WORKER_EXIT_{code}{suffix}")
             return
         status = self.worker_status()
         if status:

@@ -219,9 +219,11 @@ class PageClassificationTest(unittest.TestCase):
         self.assertIs(classify_page(tokens("Error code", "EC:107")), EaPage.BANNED)
         self.assertIs(classify_page(tokens("账号已封禁")), EaPage.BANNED)
 
-    def test_empty_library_after_the_ban_dialog_is_still_banned(self) -> None:
-        self.assertIs(classify_page(EMPTY_LIBRARY), EaPage.BANNED)
-        self.assertIn("banned", page_markers(EMPTY_LIBRARY))
+    def test_empty_library_is_a_session_not_proof_of_a_ban(self) -> None:
+        self.assertIs(classify_page(EMPTY_LIBRARY), EaPage.SIGNED_IN)
+        self.assertNotIn("banned", page_markers(EMPTY_LIBRARY))
+        self.assertIs(classify_page(tokens("Looking for something?")), EaPage.UNKNOWN)
+        self.assertIs(classify_page(tokens("游戏库为空")), EaPage.SIGNED_IN)
 
     def test_expired_session_is_its_own_page(self) -> None:
         self.assertIs(
@@ -679,7 +681,7 @@ class EaLaunchRecoveryTest(unittest.TestCase):
         self.assertIn("account-banned", records)
         self.assertIn("account-banned-close", records)
 
-    def test_empty_library_fails_as_banned_without_a_close_button(self) -> None:
+    def test_empty_library_does_not_reject_an_already_started_game(self) -> None:
         empty = self.observation(
             ("Library", 80, 40),
             ("Your library is empty", 960, 360),
@@ -692,13 +694,10 @@ class EaLaunchRecoveryTest(unittest.TestCase):
         records: list[str] = []
         driver = self.driver([empty], clicks, records)
 
-        with self.assertRaises(EaAccountBanned) as caught:
-            driver.start_apex()
-
-        self.assertEqual(caught.exception.reason_code, "EA_ACCOUNT_BANNED")
+        driver._process_running = lambda _name: True
+        driver.start_apex()
         self.assertEqual(clicks, [])
-        self.assertEqual(records, ["account-banned"])
-        self.assertNotIn("apex-entry", records)
+        self.assertNotIn("account-banned", records)
 
     def test_ban_overlay_still_fails_as_banned_when_close_click_fails(self) -> None:
         clicks: list[tuple[int, int]] = []

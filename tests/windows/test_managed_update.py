@@ -161,6 +161,13 @@ class LauncherTest(unittest.TestCase):
         self.app.started = self.app.phase_started = time.time()
         return self.app.worker
 
+    def test_worker_failure_keeps_the_structured_cleanup_reason(self):
+        self.worker(code=1)
+        launcher.write_json(self.app.root / "worker.json", {
+            "session": "current", "pid": 123, "reason": "EA_RECOVERY_EXHAUSTED"})
+        self.app.monitor("old")
+        self.assertEqual(self.app.state["error"], "WORKER_EXIT_1: EA_RECOVERY_EXHAUSTED")
+
     def test_failure_budget_survives_restart_and_new_commit_can_run(self):
         for _ in range(3):
             self.app.failure("bad")

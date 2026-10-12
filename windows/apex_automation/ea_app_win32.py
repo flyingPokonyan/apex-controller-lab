@@ -2637,13 +2637,16 @@ class WindowsEaHybridDriver(EaPasswordRecoveryMixin):
 
     @staticmethod
     def _process_running(executable: str) -> bool:
-        result = subprocess.run(
-            ["tasklist", "/FI", f"IMAGENAME eq {executable}", "/FO", "CSV", "/NH"],
-            capture_output=True,
-            text=True,
-            check=False,
-            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
-        )
+        try:
+            result = subprocess.run(
+                ["tasklist", "/FI", f"IMAGENAME eq {executable}", "/FO", "CSV", "/NH"],
+                capture_output=True, text=True, errors="replace", timeout=10, check=False,
+                creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+            )
+        except (OSError, subprocess.TimeoutExpired) as error:
+            raise EaAppAutomationError("无法查询游戏进程，不能确认游戏已经退出") from error
+        if result.returncode != 0:
+            raise EaAppAutomationError("无法查询游戏进程，不能确认游戏已经退出")
         return executable.lower() in result.stdout.lower()
 
     def start_apex(self) -> None:
@@ -2655,6 +2658,7 @@ class WindowsEaHybridDriver(EaPasswordRecoveryMixin):
             observation = self._observe(hwnd)
             observation = self._dismiss_library_tour(hwnd, observation)
             self._raise_if_account_banned(hwnd, observation)
+            self._apex_launch_pending_until = 0.0
             return
         # The orchestrator verifies the stable EA identity immediately before
         # entering this method.  Do not repeat that check here: the CEF surface
@@ -2690,6 +2694,7 @@ class WindowsEaHybridDriver(EaPasswordRecoveryMixin):
 
         while True:
             if any(self._process_running(name) for name in APEX_EXECUTABLES):
+                self._apex_launch_pending_until = 0.0
                 return
             now = time.monotonic()
             if update_deadline is not None and now >= update_deadline:
@@ -2733,8 +2738,7 @@ class WindowsEaHybridDriver(EaPasswordRecoveryMixin):
                     attempt=cloud_recovery_clicks,
                 )
                 self.notify("EA 云存档不可用，选择本地数据继续启动 Apex")
-                self._click_point(hwnd, *local_data)
-                launch_deadline = time.monotonic() + APEX_LAUNCH_TIMEOUT_S
+                launch_deadline = self._request_apex_launch(hwnd, local_data)
                 self.sleep(2.0)
                 continue
 
@@ -2773,9 +2777,8 @@ class WindowsEaHybridDriver(EaPasswordRecoveryMixin):
                 self._record(step, observation)
                 if updated:
                     self.notify("Apex 更新已完成，正在启动游戏")
-                self._click_point(hwnd, *point)
+                launch_deadline = self._request_apex_launch(hwnd, point)
                 update_deadline = None
-                launch_deadline = time.monotonic() + APEX_LAUNCH_TIMEOUT_S
                 self.sleep(2.0)
                 continue
 
@@ -2799,8 +2802,7 @@ class WindowsEaHybridDriver(EaPasswordRecoveryMixin):
             library_play = self._installed_library_play_point(observation)
             if library_play is not None and launch_deadline is None:
                 self._record("apex-library-play", observation)
-                self._click_point(hwnd, *library_play)
-                launch_deadline = time.monotonic() + APEX_LAUNCH_TIMEOUT_S
+                launch_deadline = self._request_apex_launch(hwnd, library_play)
                 self.sleep(2.0)
                 continue
 
@@ -2809,23 +2811,53 @@ class WindowsEaHybridDriver(EaPasswordRecoveryMixin):
                 update_wait_notice_at = now + 300.0
             self.sleep(2.0)
 
-    def stop_apex(self) -> ApexExitEvidence:
+    def _request_apex_launch(self, hwnd: int, point: tuple[int, int]) -> float:
+        # Record before input: a partially successful click can start EA's
+        # asynchronous launcher even if observing the next frame fails.
+        self._apex_launch_pending_until = time.monotonic() + APEX_LAUNCH_TIMEOUT_S
+        self._click_point(hwnd, *point)
+        return self._apex_launch_pending_until
+
+    def stop_apex(self, *, settle_launch: bool = False) -> ApexExitEvidence:
         requested = False
-        for executable in APEX_EXECUTABLES:
-            if self._process_running(executable):
+        now = time.monotonic()
+        settle_until = max(float(getattr(self, "_apex_launch_pending_until", 0.0)),
+                           now + (APEX_LAUNCH_TIMEOUT_S if settle_launch else 0.0))
+        deadline = max(now, settle_until) + 30.0
+        if settle_until > now:
+            self.notify("正在等待 Apex 启动请求结束，确认游戏退出后再清理 EA")
+        attempts: dict[str, float] = {}
+        empty_since = None
+        while True:
+            now = time.monotonic()
+            running = [name for name in APEX_EXECUTABLES if self._process_running(name)]
+            if not running:
+                empty_since = now if empty_since is None else empty_since
+                if now >= settle_until and now - empty_since >= 2.0:
+                    self._apex_launch_pending_until = 0.0
+                    return ApexExitEvidence(requested, True)
+            else:
+                empty_since = None
+            if now >= deadline:
+                return ApexExitEvidence(requested, False)
+            for name in APEX_EXECUTABLES:
+                if name not in running:
+                    attempts.pop(name, None)
+                    continue
+                previous = attempts.get(name)
+                if previous is not None and now - previous < 5.0:
+                    continue
+                command = ["taskkill", "/IM", name, "/T"]
+                if previous is not None:
+                    command.append("/F")
+                try:
+                    subprocess.run(command, capture_output=True, check=False, timeout=10,
+                        creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+                except (OSError, subprocess.TimeoutExpired) as error:
+                    raise EaAppAutomationError("关闭 Apex 进程的命令未完成") from error
                 requested = True
-                subprocess.run(
-                    ["taskkill", "/IM", executable, "/T"],
-                    capture_output=True,
-                    check=False,
-                    creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
-                )
-        deadline = time.monotonic() + 30.0
-        while time.monotonic() < deadline:
-            if not any(self._process_running(name) for name in APEX_EXECUTABLES):
-                return ApexExitEvidence(requested, True)
+                attempts[name] = now
             self.sleep(1.0)
-        return ApexExitEvidence(requested, False)
 
     def _account_menu_triggers(
         self,

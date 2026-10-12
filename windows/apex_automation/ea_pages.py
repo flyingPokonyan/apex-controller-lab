@@ -142,10 +142,9 @@ BACK_TO_SIGN_IN_PHRASES = (
     "回到登录",
 )
 
-# Overlay on the signed-in Library, and the empty-library shell that remains
-# after the overlay is dismissed. Both mean this EA session cannot go online.
-# They must outrank nav words like "Library" or the driver keeps hunting for
-# Play. EC:107 is the code on the current English client.
+# Only explicit restriction evidence may ban an account. Empty libraries and
+# promotional headings also appear on healthy/loading clients; they establish
+# UI state, never account eligibility. EC:107 accompanies the known ban dialog.
 ACCOUNT_BANNED_TERMS = (
     "youraccounthasbeenbanned",
     "accounthasbeenbanned",
@@ -154,9 +153,6 @@ ACCOUNT_BANNED_TERMS = (
     "beenbanned",
     "errorcodeec107",
     "ec107",
-    "yourlibraryisempty",
-    "libraryisempty",
-    "lookingforsomething",
     "账号已被封禁",
     "帐户已被封禁",
     "你的账号已被封禁",
@@ -164,10 +160,9 @@ ACCOUNT_BANNED_TERMS = (
     "账号已封禁",
     "帐户已封禁",
     "已被封禁",
-    "你的游戏库是空的",
-    "游戏库是空的",
-    "游戏库为空",
 )
+
+EMPTY_LIBRARY_TERMS = ("yourlibraryisempty", "libraryisempty", "你的游戏库是空的", "游戏库是空的", "游戏库为空")
 
 ACCOUNT_BANNED_CLOSE_TERMS = ("close", "关闭")
 
@@ -291,6 +286,8 @@ def classify_page(normalized_tokens: Iterable[str]) -> EaPage:
         return EaPage.EMAIL
     if has_password_field(compact):
         return EaPage.PASSWORD
+    if has_any(compact, EMPTY_LIBRARY_TERMS):
+        return EaPage.SIGNED_IN
     if len(set(matched_terms(compact, SIGNED_IN_TERMS))) >= 2:
         return EaPage.SIGNED_IN
     return EaPage.UNKNOWN
