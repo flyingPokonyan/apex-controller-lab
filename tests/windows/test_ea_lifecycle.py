@@ -15,10 +15,10 @@ import numpy as np
 sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "windows"))
 from apex_automation.account_orchestrator import AccountCycleOutcome, AccountOrchestrator
 from apex_automation.account_provider import FakeAccountProvider, SecretCredentials
-from apex_automation.ea_app import ApexExitEvidence, EaAccountBanned, EaIdentityFact, EaUiState
+from apex_automation.ea_app import ApexExitEvidence, EaAccountBanned, EaIdentityFact, EaUiState, EaUiRecoveryExhausted
 from apex_automation.ea_app_win32 import EaObservation, WindowsEaHybridDriver
 from apex_automation.ea_pages import EaPage
-from apex_automation.orchestration_state import AtomicCheckpointStore
+from apex_automation.orchestration_state import AtomicCheckpointStore, OrchestratorRunState, WorkflowPhase
 from test_account_orchestration import FakeDrain, FakeManagedSession, ScriptedLeaseKeeper
 
 
@@ -139,6 +139,44 @@ class LifecycleTest(unittest.TestCase):
         result = runner.run_once()
         self.assertEqual(result.outcome, AccountCycleOutcome.COMPLETED)
         self.assertIsNone(result.error_code)
+
+    def exhausted_checkpoint(self):
+        self.fixture(["banned0001", "healthy002"], ["banned0001"])
+        lease = self.provider.claim("fixture-claim", "LEVEL_TO_TARGET")
+        self.session.account = "banned0001"
+        self.store.save(self.store.load().evolve(
+            lease_id=lease.lease_id, lease_fence=lease.lease_fence,
+            account_id=lease.account_id, workflow_phase=WorkflowPhase.EA_STARTING,
+            run_state=OrchestratorRunState.PAUSED_MANUAL,
+            last_error_code="EA_RECOVERY_EXHAUSTED", ea_recovery_steps=("preflight",)))
+        return lease
+
+    def test_release_resume_cleans_old_exhausted_lease_before_claiming_again(self):
+        lease = self.exhausted_checkpoint()
+        runner = self.orchestrator()
+        # The managed launcher passes --resume once on a new commit. The
+        # CLI invokes this method; a same-commit worker retry must not do so.
+        self.assertTrue(runner.resume())
+        self.assertEqual(self.store.load().lease_id, lease.lease_id)
+        self.assertEqual(self.store.load().ea_recovery_steps, ())
+        self.assertEqual(runner.run_once().outcome, AccountCycleOutcome.COMPLETED)
+        self.assertIsNone(self.session.account)
+        self.assertEqual(sum(name == "claim" for name, _ in self.provider.calls), 1)
+        self.assertEqual(runner.run_once().outcome, AccountCycleOutcome.COMPLETED)
+
+    def test_worker_retry_after_release_does_not_reset_another_failed_cleanup(self):
+        self.exhausted_checkpoint()
+        from unittest.mock import Mock
+        self.session.sign_out = Mock(side_effect=EaUiRecoveryExhausted("still broken"))
+        runner = self.orchestrator()
+        runner.resume()
+        self.assertTrue(runner._reserve_ui_recovery("signout"))
+        self.assertEqual(runner.run_once().error_code, "EA_RECOVERY_EXHAUSTED")
+        runner = self.orchestrator()
+        self.assertFalse(runner._reserve_ui_recovery("signout"))
+        self.assertEqual(runner.run_once().error_code, "EA_RECOVERY_EXHAUSTED")
+        self.session.sign_out.assert_called_once()
+        self.assertEqual(sum(name == "claim" for name, _ in self.provider.calls), 1)
 
     def test_legacy_leftover_banned_page_without_readable_identity_is_signed_out_first(self):
         runner = self.fixture(["healthy002"], ["oldbanned1"])
