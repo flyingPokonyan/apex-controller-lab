@@ -41,7 +41,8 @@ def enqueue(root: Path, frame, record, lease_id):
     root.mkdir(parents=True, exist_ok=True)
     event_id = secrets.token_hex(32)
     details = {key: record[key] for key in (
-        "identifierVerified", "identifierEchoed", "fieldTarget", "submitTarget", "trigger", "attempt"
+        "identifierVerified", "identifierEchoed", "fieldTarget", "submitTarget", "trigger", "attempt",
+        "hwnd", "processId", "foregroundHwnd", "sourceVerified", "rect"
     ) if key in record}
     payload = {"schemaVersion": 1, "eventId": event_id, "leaseId": lease_id,
                "step": record["step"], "page": record["page"], "details": details,

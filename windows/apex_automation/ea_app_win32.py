@@ -26,6 +26,7 @@ from .diagnostics import PerformanceMetrics
 from .ea_app import (
     ApexExitEvidence,
     EaAccountBanned,
+    EaRestrictionUnconfirmed,
     EaAppAutomationError,
     EaApexDownloadRequired,
     EaApexStartFailed,
@@ -50,6 +51,7 @@ from .ea_process import (
 )
 from .ea_onboarding import library_tour_close_point, library_tour_visible
 from .ea_windows import EaWindowRole, window_role
+from .ea_ban_evidence import ban_dialog_visible
 from .ea_pages import (
     ACCOUNT_BANNED_CLOSE_TERMS,
     ACCOUNT_FIELD_TERMS,
@@ -227,6 +229,9 @@ class EaObservation:
     page: EaPage
     hwnd: int | None = None
     title: str = ""
+    process_id: int = 0
+    foreground_hwnd: int = 0
+    source_verified: bool = False
 
     @property
     def normalized(self) -> tuple[str, ...]:
@@ -338,6 +343,8 @@ class WindowsEaHybridDriver(EaPasswordRecoveryMixin):
         self.user32.GetClassNameW.restype = ctypes.c_int
         self.user32.GetWindowLongW.argtypes = [wintypes.HWND, ctypes.c_int]
         self.user32.GetWindowLongW.restype = ctypes.c_long
+        self.user32.WindowFromPoint.argtypes = [wintypes.POINT]
+        self.user32.WindowFromPoint.restype = wintypes.HWND
         self.user32.ShowWindow.argtypes = [wintypes.HWND, ctypes.c_int]
         self.user32.ShowWindow.restype = wintypes.BOOL
         self.user32.SetForegroundWindow.argtypes = [wintypes.HWND]
@@ -554,6 +561,7 @@ class WindowsEaHybridDriver(EaPasswordRecoveryMixin):
             hwnd
             and self.user32.IsWindow(hwnd)
             and self.user32.IsWindowVisible(hwnd)
+            and not self.user32.IsIconic(hwnd)
         )
 
     def _live(self, hwnd: int) -> int:
@@ -1074,14 +1082,18 @@ class WindowsEaHybridDriver(EaPasswordRecoveryMixin):
                 # Capture is the desktop, so a console covering EA otherwise
                 # hides BACK, the account badge and the sign-out menu.
                 self._focus(hwnd)
+                source = self._observation_source(hwnd)
                 frame = self._frame()
                 left, top, right, bottom = self._clip_rect(hwnd, frame)
+                if self._observation_source(hwnd) != source:
+                    raise EaCaptureUnavailable("EA 窗口在截图过程中发生变化")
             except EaAppAutomationError:
                 # The window can die between the liveness check and the rect
                 # read. Drop the handle and let the next attempt re-find it.
                 if attempt + 1 >= max(1, retries):
                     raise
                 self._hwnd = None
+                hwnd = 0
                 self.sleep(1.0)
                 continue
             crop = np.ascontiguousarray(frame[top:bottom, left:right])
@@ -1110,6 +1122,21 @@ class WindowsEaHybridDriver(EaPasswordRecoveryMixin):
                     frame,
                     Region("eaWindow", (left, top, right, bottom)),
                 )
+            # Focus can change during OCR or while EA minimizes itself to
+            # start Apex. IsWindowVisible only tests WS_VISIBLE, not whether
+            # those desktop pixels belong to that window (Microsoft Win32).
+            try:
+                if self._observation_source(hwnd) != source:
+                    raise EaCaptureUnavailable("EA 窗口在识别过程中发生变化")
+            except EaAppAutomationError:
+                if attempt + 1 >= max(1, retries):
+                    raise
+                self._hwnd = None
+                hwnd = 0
+                self.sleep(1.0)
+                continue
+            tokens = tuple(t for t in tokens if t.roi is not None
+                           and self._token_belongs_to_window(hwnd, t))
             if metrics:
                 metrics.add("eaOcr", (time.monotonic() - ocr_started) * 1000)
                 metrics.flush(page=classify_page(token.normalized for token in tokens).value)
@@ -1120,6 +1147,9 @@ class WindowsEaHybridDriver(EaPasswordRecoveryMixin):
                 page=classify_page(token.normalized for token in tokens),
                 hwnd=int(hwnd),
                 title=self._safe_window_title(hwnd),
+                process_id=source[0],
+                foreground_hwnd=source[1],
+                source_verified=True,
             )
             self._last_observation = observation
             # The CEF surface hands back a fully blank OCR pass while it is
@@ -1130,6 +1160,26 @@ class WindowsEaHybridDriver(EaPasswordRecoveryMixin):
                 self.sleep(1.0)
         assert observation is not None
         return observation
+
+    def _observation_source(self, hwnd: int):
+        pid = wintypes.DWORD()
+        self.user32.GetWindowThreadProcessId(hwnd, ctypes.byref(pid))
+        foreground = int(self.user32.GetForegroundWindow() or 0)
+        if (not self._alive(hwnd)
+                or self._process_name(pid.value) != EA_EXECUTABLE
+                or self._window_role(hwnd) is not EaWindowRole.SURFACE
+                or not self._window_belongs_to_ea(hwnd, foreground)):
+            raise EaCaptureUnavailable("当前画面不属于可确认的 EA 主窗口")
+        return int(pid.value), foreground, self._rect(hwnd)
+
+    def _token_belongs_to_window(self, hwnd: int, token: OcrToken) -> bool:
+        x1, y1, x2, y2 = token.roi
+        # Check more than the centre: a console line can cross into EA's
+        # rectangle while most of its text still belongs to a covering app.
+        y = (y1 + y2) // 2
+        return all(self._window_belongs_to_ea(hwnd, int(
+            self.user32.WindowFromPoint(wintypes.POINT(x, y)) or 0
+        )) for x in (x1 + 1, (x1 + x2) // 2, x2 - 1))
 
     def _record(
         self,
@@ -1159,6 +1209,9 @@ class WindowsEaHybridDriver(EaPasswordRecoveryMixin):
                     payload["hwnd"] = observation.hwnd
                 if observation.title:
                     payload["title"] = observation.title
+                payload.update(processId=observation.process_id,
+                               foregroundHwnd=observation.foreground_hwnd,
+                               sourceVerified=observation.source_verified)
                 self.evidence.step(
                     step,
                     page=observation.page.value,
@@ -1205,7 +1258,9 @@ class WindowsEaHybridDriver(EaPasswordRecoveryMixin):
     def _account_ban_close_point(
         self, observation: EaObservation,
     ) -> tuple[int, int] | None:
-        if observation.page is not EaPage.BANNED:
+        if (observation.page is not EaPage.BANNED
+                or not observation.source_verified
+                or not ban_dialog_visible(observation.tokens, observation.rect)):
             return None
         return self._anchor(
             observation,
@@ -1231,6 +1286,7 @@ class WindowsEaHybridDriver(EaPasswordRecoveryMixin):
     ) -> EaObservation:
         if observation.page is not EaPage.BANNED:
             return observation
+        observation = self._confirm_account_ban(hwnd, observation)
         self._record("account-banned", observation)
         self.notify("EA App 报告当前账号已封禁，正在退出并换号")
         point = self._account_ban_close_point(observation)
@@ -1242,6 +1298,20 @@ class WindowsEaHybridDriver(EaPasswordRecoveryMixin):
             except EaAppAutomationError:
                 self._record("account-banned-close-failed", observation)
         raise EaAccountBanned("EA App 报告账号已封禁")
+
+    def _confirm_account_ban(self, hwnd: int, observation: EaObservation) -> EaObservation:
+        def supported(item):
+            return (item.source_verified and item.page is EaPage.BANNED
+                    and ban_dialog_visible(item.tokens, item.rect))
+        if supported(observation):
+            self.sleep(.5)
+            confirmed = self._observe(hwnd)
+            if (supported(confirmed) and confirmed.hwnd == observation.hwnd
+                    and confirmed.process_id == observation.process_id
+                    and confirmed.rect == observation.rect):
+                return confirmed
+        self._record("account-restriction-unconfirmed", observation)
+        raise EaRestrictionUnconfirmed("EA 限制提示缺少稳定弹窗证据，留待复核")
 
     def _identity(self, hwnd: int) -> EaIdentityFact | None:
         """Read the signed-in badge from its own tight crop.
@@ -1441,7 +1511,7 @@ class WindowsEaHybridDriver(EaPasswordRecoveryMixin):
                     return result
                 raise EaAppAutomationError("EA 未确认退出登录")
             except (EaUiRecoveryExhausted, EaCaptureUnavailable, EaLoginRejected,
-                    EaCaptchaRequired, EaAccountBanned, EaOtpUnavailable):
+                    EaCaptchaRequired, EaAccountBanned, EaRestrictionUnconfirmed, EaOtpUnavailable):
                 raise
             except EaAppAutomationError as error:
                 if attempt == 0:
@@ -1465,7 +1535,7 @@ class WindowsEaHybridDriver(EaPasswordRecoveryMixin):
                 try:
                     self._recover_ui_surface(operation)
                 except (EaUiRecoveryExhausted, EaCaptureUnavailable, EaLoginRejected,
-                        EaCaptchaRequired, EaAccountBanned, EaOtpUnavailable):
+                        EaCaptchaRequired, EaAccountBanned, EaRestrictionUnconfirmed, EaOtpUnavailable):
                     raise
                 except EaAppAutomationError as recovery_error:
                     self._record("ui-recovery-exhausted", getattr(self, "_last_observation", None))
@@ -1656,7 +1726,15 @@ class WindowsEaHybridDriver(EaPasswordRecoveryMixin):
         hwnd = self._ea_window()
         observation = self._observe(hwnd)
         observation = self._dismiss_library_tour(hwnd, observation)
-        return observation.page is EaPage.BANNED
+        if observation.page is not EaPage.BANNED:
+            return False
+        try:
+            self._confirm_account_ban(hwnd, observation)
+        except EaRestrictionUnconfirmed:
+            # This may still be the previous session. Never assign an
+            # unconfirmed preflight screen to a newly claimed account.
+            return False
+        return True
 
     def _submit(
         self,
@@ -1933,7 +2011,7 @@ class WindowsEaHybridDriver(EaPasswordRecoveryMixin):
             if observation.page is EaPage.BANNED:
                 observation = self._dismiss_account_ban(hwnd, observation)
             if observation.page is EaPage.BANNED:
-                self._raise_if_account_banned(hwnd, observation)
+                raise EaAppAutomationError("EA 仍显示旧会话限制弹窗，无法确认新账号登录")
             observation = self._return_to_account_page(hwnd, observation)
             if observation.page is EaPage.EMAIL:
                 observation = self._submit_login_identifier(

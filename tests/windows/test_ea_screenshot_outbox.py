@@ -100,9 +100,10 @@ class EaScreenshotTest(unittest.TestCase):
         self.assertEqual(line["title"], "EA")
         self.assertEqual(line["rect"], [1, 2, 30, 40])
         pending = json.loads(next((self.root / "diagnostics/ea-evidence").glob("*.json")).read_text())
-        self.assertNotIn("hwnd", pending["details"])
+        self.assertEqual(pending["details"]["hwnd"], 15)
         self.assertNotIn("title", pending["details"])
-        self.assertNotIn("rect", pending["details"])
+        self.assertEqual(pending["details"]["rect"], [1, 2, 30, 40])
+        self.assertFalse(pending["details"]["sourceVerified"])
 
     def test_failure_before_window_observation_still_captures_the_desktop(self):
         driver = object.__new__(WindowsEaHybridDriver)

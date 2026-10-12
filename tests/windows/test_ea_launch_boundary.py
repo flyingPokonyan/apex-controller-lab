@@ -73,8 +73,7 @@ class LaunchCleanupTest(unittest.TestCase):
                 stopped = []
                 entry = Fixture.observation(("Apex Legends", 120, 460))
                 play = Fixture.observation(("Apex Legends", 800, 280), ("PLAY", 1150, 700))
-                after = Fixture.observation(("Your account has been banned" if explicit_ban
-                    else "Your library is empty", 960, 360))
+                after = Fixture().banned_overlay() if explicit_ban else Fixture.observation(("Your library is empty", 960, 360))
                 frames = [entry, play, after]
                 clicks, records = [], []
                 driver = Fixture.driver(frames, clicks, records)
@@ -87,14 +86,16 @@ class LaunchCleanupTest(unittest.TestCase):
                         with self.assertRaises(EaAccountBanned):
                             driver.start_apex()
                         self.assertTrue(driver.stop_apex().all_processes_exited)
-                        self.assertEqual(stopped, [12.0])
+                        self.assertEqual(len(stopped), 1)
+                        self.assertGreaterEqual(stopped[0], 12.0)
+                        self.assertLess(stopped[0], 15.0)
                         self.assertGreaterEqual(now[0], 90)
                     else:
                         driver.start_apex()
                         self.assertEqual(now[0], 12)
                         self.assertNotIn("account-banned", records)
                         self.assertEqual(stopped, [])
-                self.assertEqual(clicks, [(120, 460), (1150, 700)])
+                self.assertEqual(clicks, [(120, 460), (1150, 700)] + ([(1100, 700)] if explicit_ban else []))
 
     def test_unreadable_process_list_cannot_prove_no_game(self):
         for failure in (Mock(returncode=1, stdout=""), subprocess.TimeoutExpired("tasklist", 10)):

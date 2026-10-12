@@ -36,6 +36,12 @@ class EaAccountBanned(EaAppAutomationError):
     reason_code = "EA_ACCOUNT_BANNED"
 
 
+class EaRestrictionUnconfirmed(EaAppAutomationError):
+    """A UI restriction candidate lacks confirmed account evidence."""
+
+    reason_code = "EA_RESTRICTION_UNCONFIRMED"
+
+
 def is_account_ban_reason(reason_code: str | None) -> bool:
     return "BANNED" in str(reason_code or "").upper()
 

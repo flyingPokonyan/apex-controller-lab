@@ -1,0 +1,91 @@
+{
+  "source": "2026-10-12 incident screenshots; only OCR ban-hit lines, no account credentials. Crop rectangles were a replay assumption, not recorded runtime HWND bounds.",
+  "samples": [
+    {
+      "shot": 1301,
+      "scope": "desktop",
+      "text": [
+        "当前账号已封禁，正在退出并换号",
+        "败： EA_ACCOUNT BANNED @ EA_SIGNING_IN: EA"
+      ]
+    },
+    {
+      "shot": 1301,
+      "scope": "visible_ea_bounds",
+      "text": [
+        "当前账号已封禁，正在退出并换号",
+        "化失败： EA_ACCOUNT_ BANNED @ EA_SIGNING_ IN: EA",
+        "号因 EA ACCOUNT_BANNED 收口；Runner 等待 1 秒后"
+      ]
+    },
+    {
+      "shot": 1306,
+      "scope": "desktop",
+      "text": [
+        "长号因EA ACCOUNT_BANNED 收口；Runner 等待 1 秒后再领号",
+        "当前账号已封禁，正在退出并换号",
+        "账号因 EA_ACCOUNT_BANNED 收□；Runner 等待 1 秒后再领号"
+      ]
+    },
+    {
+      "shot": 1306,
+      "scope": "visible_ea_bounds",
+      "text": []
+    },
+    {
+      "shot": 1311,
+      "scope": "desktop",
+      "text": [
+        "EA 自动化失败：EA ACCOUNT BANNED @ EA IDENTITY_VERIFYING： EA App 报告账号已封禁",
+        "当前账号已封禁，正在退出并换号",
+        "长号因 EA_ACCOUNT_BANNED 收口；Runner 等待1 秒后再领号"
+      ]
+    },
+    {
+      "shot": 1311,
+      "scope": "visible_ea_bounds",
+      "text": [
+        "T BANNED @ EA_IDENTITY_VERIFYING: EA App 报告账号已封禁"
+      ]
+    },
+    {
+      "shot": 1327,
+      "scope": "desktop",
+      "text": [
+        "自动化失败：EA ACCOUNT BANNED @ APEX_STARTING：EA App 报告账号已封禁",
+        "自前账号已封禁，正在退出并换号",
+        "败： EA_ACCOUNT BANNED @ APEX_STARTING: EA",
+        "EA ACCOUNT_BANNED 收口；Runner 等待 1 秒后",
+        "败： EA ACCOUNT BANNED @ APEX_STARTING: EA",
+        "因 EA ACCOUNT BANNED 收口；Runner 等待 1 秒后"
+      ]
+    },
+    {
+      "shot": 1327,
+      "scope": "visible_ea_bounds",
+      "text": [
+        "化：EA ACCOUNT BANNED @APEX STARTING：EA APP 报告账号已封禁",
+        "前账号已封禁，正在退出并换号",
+        "因 EA ACCOUNT_BANNED 收口；Runner 等待 1 秒后再领号",
+        "当前账号已封禁，正在退出并换号",
+        "化失败： EA ACCOUNT BANNED @ APEX STARTING: EA"
+      ]
+    },
+    {
+      "shot": 1361,
+      "scope": "desktop",
+      "text": [
+        "前账号已封禁，正在退出并换号",
+        "因 EA ACCOUNT BANNED 收口；Runner 等待 1 秒后"
+      ]
+    },
+    {
+      "shot": 1361,
+      "scope": "visible_ea_bounds",
+      "text": [
+        "号因 EA ACCOUNT_BANNED 收口；Runner 等待 1 秒后再领号",
+        "号因 EA ACCOUNT_BANNED 收口；Runner 等待 1 秒后"
+      ]
+    }
+  ]
+}

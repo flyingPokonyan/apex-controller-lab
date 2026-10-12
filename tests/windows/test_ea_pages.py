@@ -602,6 +602,7 @@ class EaLaunchRecoveryTest(unittest.TestCase):
             frame=np.zeros((1, 1), dtype=np.uint8),
             tokens=tokens,
             page=classify_page(token.normalized for token in tokens),
+            hwnd=1, process_id=42, source_verified=True,
         )
 
     @staticmethod
@@ -670,7 +671,7 @@ class EaLaunchRecoveryTest(unittest.TestCase):
         )
         clicks: list[tuple[int, int]] = []
         records: list[str] = []
-        driver = self.driver([banned], clicks, records)
+        driver = self.driver([banned, banned], clicks, records)
         driver.notify = lambda _message: None
 
         with self.assertRaises(EaAccountBanned) as caught:
@@ -702,7 +703,7 @@ class EaLaunchRecoveryTest(unittest.TestCase):
     def test_ban_overlay_still_fails_as_banned_when_close_click_fails(self) -> None:
         clicks: list[tuple[int, int]] = []
         records: list[str] = []
-        driver = self.driver([self.banned_overlay()], clicks, records)
+        driver = self.driver([self.banned_overlay(), self.banned_overlay()], clicks, records)
         driver.notify = lambda _message: None
 
         def boom(_hwnd, _x, _y) -> None:
@@ -788,25 +789,14 @@ class EaLaunchRecoveryTest(unittest.TestCase):
         self.assertEqual(calls["n"], 2)
         self.assertEqual(records, ["signin-start", "signin-start"])
 
-    def test_sign_in_ban_overlay_before_credentials_is_the_signed_in_session(self) -> None:
-        # If identity was unreadable, sign-in still sees the overlay of the
-        # session that is actually signed in. Closing it and reporting banned
-        # is what lets the orchestrator mark this lease and claim another.
-        clicks: list[tuple[int, int]] = []
-        records: list[str] = []
-        driver = self.driver(
-            [self.banned_overlay(), self.banned_overlay()],
-            clicks,
-            records,
-        )
+    def test_precredential_overlay_cannot_be_attributed_to_the_new_account(self) -> None:
+        clicks, records = [], []
+        driver = self.driver([self.banned_overlay(), self.banned_overlay()], clicks, records)
         credentials = SecretCredentials("login@example.test", "password")
-
-        with self.assertRaises(EaAccountBanned) as caught:
-            driver.sign_in(credentials, lambda _challenge: None)
-
-        self.assertEqual(caught.exception.reason_code, "EA_ACCOUNT_BANNED")
-        self.assertEqual(clicks, [(1100, 700), (1100, 700)])
-        self.assertIn("account-banned", records)
+        with self.assertRaises(EaAppAutomationError) as caught:
+            driver._sign_in_once(credentials, lambda _challenge: None)
+        self.assertNotIsInstance(caught.exception, EaAccountBanned)
+        self.assertNotIn("account-banned", records)
 
     def test_sign_in_ban_overlay_after_password_fails_as_banned(self) -> None:
         email = self.observation(("Email or EA ID", 400, 500))
@@ -816,7 +806,7 @@ class EaLaunchRecoveryTest(unittest.TestCase):
         )
         clicks: list[tuple[int, int]] = []
         records: list[str] = []
-        driver = self.driver([email, self.banned_overlay()], clicks, records)
+        driver = self.driver([email, self.banned_overlay(), self.banned_overlay()], clicks, records)
         driver._submit_login_identifier = lambda *_args, **_kwargs: password
         driver._submit_password = lambda *_args, **_kwargs: "enter"
         driver._identity = lambda _hwnd: EaIdentityFact(
@@ -833,7 +823,7 @@ class EaLaunchRecoveryTest(unittest.TestCase):
     def test_identity_wait_ban_overlay_fails_even_when_badge_is_readable(self) -> None:
         clicks: list[tuple[int, int]] = []
         records: list[str] = []
-        driver = self.driver([self.banned_overlay()], clicks, records)
+        driver = self.driver([self.banned_overlay(), self.banned_overlay()], clicks, records)
         driver._identity = lambda _hwnd: EaIdentityFact(
             "BlazeCobra_670", "ea-window-ocr:0.990", True
         )
@@ -852,7 +842,7 @@ class EaLaunchRecoveryTest(unittest.TestCase):
     def test_verify_identity_ban_overlay_fails_even_when_badge_is_readable(self) -> None:
         clicks: list[tuple[int, int]] = []
         records: list[str] = []
-        driver = self.driver([self.banned_overlay()], clicks, records)
+        driver = self.driver([self.banned_overlay(), self.banned_overlay()], clicks, records)
 
         self.assert_raises_account_banned(
             lambda: driver.verify_identity("BlazeCobra_670"),
@@ -863,7 +853,7 @@ class EaLaunchRecoveryTest(unittest.TestCase):
     def test_start_apex_ban_overlay_is_not_skipped_when_apex_already_running(self) -> None:
         clicks: list[tuple[int, int]] = []
         records: list[str] = []
-        driver = self.driver([self.banned_overlay()], clicks, records)
+        driver = self.driver([self.banned_overlay(), self.banned_overlay()], clicks, records)
         driver._process_running = lambda _name: True
 
         self.assert_raises_account_banned(driver.start_apex, clicks, records)

@@ -148,9 +148,6 @@ BACK_TO_SIGN_IN_PHRASES = (
 ACCOUNT_BANNED_TERMS = (
     "youraccounthasbeenbanned",
     "accounthasbeenbanned",
-    "hasbeenbanned",
-    "accountbanned",
-    "beenbanned",
     "errorcodeec107",
     "ec107",
     "账号已被封禁",
@@ -159,7 +156,6 @@ ACCOUNT_BANNED_TERMS = (
     "你的帐户已被封禁",
     "账号已封禁",
     "帐户已封禁",
-    "已被封禁",
 )
 
 EMPTY_LIBRARY_TERMS = ("yourlibraryisempty", "libraryisempty", "你的游戏库是空的", "游戏库是空的", "游戏库为空")
@@ -256,9 +252,23 @@ def is_login_error(compact: str) -> bool:
     return has_any(compact, LOGIN_ERROR_TERMS)
 
 
+def has_ban_message(normalized_tokens: Iterable[str]) -> bool:
+    """A complete UI heading/code, never a substring of Runner console output.
+
+    Normalizing EA_ACCOUNT_BANNED removes underscores. The old substring
+    matcher then accepted our own failure log as evidence about the next user.
+    Keep split OCR headings, but require the whole heading rather than prose
+    containing it. A positioned dialog is verified separately before reporting.
+    """
+    words = tuple(normalized_tokens)
+    return any("".join(words[start:start + size]) in ACCOUNT_BANNED_TERMS
+               for start in range(len(words)) for size in range(1, 8))
+
+
 def classify_page(normalized_tokens: Iterable[str]) -> EaPage:
+    normalized_tokens = tuple(normalized_tokens)
     compact = compact_text(normalized_tokens)
-    if has_any(compact, ACCOUNT_BANNED_TERMS):
+    if has_ban_message(normalized_tokens):
         return EaPage.BANNED
     if has_any(compact, CAPTCHA_TERMS):
         return EaPage.CAPTCHA
@@ -320,6 +330,7 @@ def phrase_point(
     *,
     x_range: tuple[float, float] = (0.0, 1.0),
     y_range: tuple[float, float] = (0.0, 1.0),
+    exact: bool = False,
 ) -> tuple[int, int] | None:
     """Centre of the on-screen run of tokens that spells `phrase`.
 
@@ -348,7 +359,7 @@ def phrase_point(
                 parts.append(token.normalized)
                 end = token.roi
             compact = "".join(parts)
-            if phrase not in compact:
+            if (compact != phrase) if exact else (phrase not in compact):
                 if len(compact) > len(phrase):
                     break
                 continue
@@ -365,6 +376,7 @@ def phrase_point(
 def page_markers(normalized_tokens: Iterable[str]) -> tuple[str, ...]:
     """Known UI markers seen in this frame, for redaction-safe evidence."""
 
+    normalized_tokens = tuple(normalized_tokens)
     compact = compact_text(normalized_tokens)
     seen: list[str] = []
     for name, terms in (
@@ -375,7 +387,6 @@ def page_markers(normalized_tokens: Iterable[str]) -> tuple[str, ...]:
         ("otp", OTP_TERMS),
         ("captcha", CAPTCHA_TERMS),
         ("expired", EXPIRED_SESSION_TERMS),
-        ("banned", ACCOUNT_BANNED_TERMS),
         ("submit", SUBMIT_TERMS),
         ("error", LOGIN_ERROR_TERMS),
         ("nav", SIGNED_IN_TERMS),
@@ -385,6 +396,8 @@ def page_markers(normalized_tokens: Iterable[str]) -> tuple[str, ...]:
     ):
         if has_any(compact, terms):
             seen.append(name)
+    if has_ban_message(normalized_tokens):
+        seen.append("banned")
     if has_password_field(compact):
         seen.append("password")
     if has_any(compact, PASSWORD_LINK_TERMS):
