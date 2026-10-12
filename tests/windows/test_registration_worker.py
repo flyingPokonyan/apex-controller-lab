@@ -36,6 +36,35 @@ class RegistrationWorkerTests(unittest.TestCase):
     def finishes(self):
         return [c for c in self.worker.request.call_args_list if c.args[1].endswith('/finish')]
 
+    def test_idle_test_mode_obeys_update_boundary_before_dispatch(self):
+        from apex_automation.managed_runtime import ManagedUpdateRequested
+        self.worker.maintenance = Mock()
+        self.worker.request.return_value = {'batch': None}
+        self.worker.maintenance.boundary.side_effect = ManagedUpdateRequested()
+        with self.assertRaises(ManagedUpdateRequested):
+            self.worker.before_game(self.ea)
+        self.assertEqual(self.worker.request.call_count, 1)
+        self.assertEqual(self.worker.request.call_args.args, ('GET', '/current'))
+
+    def test_diagnostic_cursor_advances_only_after_ack_and_replay_uses_same_event(self):
+        batch = self.batch()
+        directory = self.worker.root / batch['batchId']
+        work = directory / 'task-0'
+        work.mkdir(parents=True)
+        self.worker.local_event(work, 'process_exit', exitCode=1)
+        self.worker.request.side_effect = LeaseProviderError('offline', code='NETWORK', retryable=True)
+        with self.assertRaises(LeaseProviderError):
+            self.worker.flush_diagnostics(batch, directory)
+        original = self.worker.request.call_args.args[2]['events'][0]
+        self.assertFalse((work / 'worker_diagnostics.jsonl.cursor.json').exists())
+        self.worker.request.side_effect = None
+        self.worker.request.return_value = {'accepted': True}
+        self.worker.flush_diagnostics(batch, directory)
+        self.assertEqual(original, self.worker.request.call_args.args[2]['events'][0])
+        calls = self.worker.request.call_count
+        self.worker.flush_diagnostics(batch, directory)
+        self.assertEqual(calls, self.worker.request.call_count)
+
     def test_game_starts_only_after_verified_browser_cleanup_and_ea_preflight(self):
         order = []
         self.worker.bit.cleanup.side_effect = lambda *a: order.append('cleanup')

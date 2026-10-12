@@ -398,6 +398,31 @@ class LauncherTest(unittest.TestCase):
         self.assertEqual(self.app.state["installed"], "fixed")
         self.assertFalse(self.app.state["installPending"])
 
+    def test_resume_never_starts_old_worker_while_initial_fetch_is_pending(self):
+        future = Future()
+        executor = Mock()
+        executor.submit.return_value = future
+        self.app.state['installed'] = 'old'
+        self.repo.head.return_value = 'old'
+        self.app.start = Mock()
+        with patch.object(launcher, 'ThreadPoolExecutor', return_value=executor), patch.object(launcher.time, 'sleep', side_effect=KeyboardInterrupt):
+            self.app.run(resume=True)
+        self.app.start.assert_not_called()
+
+    def test_resume_does_not_claim_work_when_update_check_fails(self):
+        future = Future()
+        future.set_exception(launcher.LauncherError('git.exe: fetch failed (128) DNS'))
+        executor = Mock()
+        executor.submit.return_value = future
+        self.app.state['installed'] = 'old'
+        self.repo.head.return_value = 'old'
+        self.app.start = Mock()
+        with patch.object(launcher, 'ThreadPoolExecutor', return_value=executor), patch.object(launcher.time, 'sleep', side_effect=KeyboardInterrupt):
+            self.app.run(resume=True)
+        self.app.start.assert_not_called()
+        self.assertIn('DNS', self.app.state['checkError'])
+        self.assertIsNotNone(self.app.state['lastCheckedAt'])
+
     def test_update_only_waits_for_fetch_instead_of_reporting_old_version_as_current(self):
         future = Future()
         executor = Mock()

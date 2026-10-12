@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 from contextlib import contextmanager
+import datetime as dt
+import uuid
 import faulthandler
 import json
 import os
@@ -52,8 +54,15 @@ class FlowRuntime:
             remaining = max(0.1, operation["deadline"] - time.monotonic())
             faulthandler.dump_traceback_later(remaining, file=self.trace)
 
+    def event(self, kind, **data):
+        self.workspace.mkdir(parents=True, exist_ok=True)
+        record = dict(data, kind=kind, occurredAt=dt.datetime.now(dt.timezone.utc).isoformat(), eventId=uuid.uuid4().hex + uuid.uuid4().hex)
+        with (self.workspace / 'diagnostics.jsonl').open('a', encoding='utf-8') as stream:
+            stream.write(json.dumps(record, ensure_ascii=False) + '\n')
+
     def start(self, name: str, stage: str, message: str, seconds: float = 90) -> None:
         now = time.monotonic()
+        self.event('step_start', name=name, stage=stage, message=message, seconds=seconds)
         self._publish({"name": name, "stage": stage, "message": message,
                        "started": now, "deadline": now + seconds, "seconds": seconds})
 
@@ -63,6 +72,11 @@ class FlowRuntime:
         self.start(name, stage, message, seconds)
         try:
             yield
+        except BaseException as exc:
+            self.event('step_error', name=name, stage=stage, errorType=type(exc).__name__)
+            raise
+        else:
+            self.event('step_end', name=name, stage=stage)
         finally:
             self._publish(previous)
 

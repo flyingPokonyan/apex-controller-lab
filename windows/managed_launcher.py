@@ -163,14 +163,25 @@ def run_command(args, *, cwd, timeout=120, env=None):
                                creationflags=subprocess.CREATE_NEW_PROCESS_GROUP if os.name == "nt" else 0,
                                start_new_session=os.name != "nt")
     try:
-        stdout, _ = process.communicate(timeout=timeout)
+        stdout, stderr = process.communicate(timeout=timeout)
     except BaseException:
         terminate_owned(process)
         raise
     if process.returncode:
-        # Git/pip exceptions can contain authenticated remote URLs. Keep them out
-        # of shared state and console output; the operation name is sufficient.
-        raise LauncherError(f"{Path(str(args[0])).name}: command failed ({process.returncode})")
+        import re
+        raw = stderr.decode('utf-8', errors='replace')
+        patterns = [('DNS', 'could not resolve|name or service not known'),
+                    ('PROXY', 'proxy|socks'), ('TLS', 'certificate|ssl|tls'),
+                    ('AUTH', 'authentication|permission denied|could not read username'),
+                    ('NETWORK', 'connect|timed out|timeout|reset|early eof|remote end hung'),
+                    ('LOCAL_CHANGES', 'local changes|untracked working tree'),
+                    ('REPOSITORY', 'not a git repository|repository not found|dubious ownership'),
+                    ('DIVERGED', 'not possible to fast-forward|divergent')]
+        category = next((code for code, pattern in patterns if re.search(pattern, raw, re.I)), 'COMMAND')
+        # Never forward arbitrary stderr: git credential helpers may echo secrets.
+        operation = next((str(a) for a in args[1:] if str(a) in ('fetch','merge','rev-parse','status','install')), 'command')
+        raise LauncherError(f"{Path(str(args[0])).name}: {operation} failed ({process.returncode}) {category}")
+
     return stdout.decode("utf-8", errors="replace").strip()
 
 
@@ -510,13 +521,14 @@ class Launcher:
                         self.next_start = 0
                     check_now.unlink(missing_ok=True)
                     next_fetch = 0
+                    checked = False
                 if future is None and now >= next_fetch:
                     future = executor.submit(self.repo.fetch)
                     next_fetch = now + 60
                 if future is not None and future.done():
-                    checked = True
                     try:
                         fetched = future.result()
+                        checked = True
                         if fetched != target:
                             next_install = 0
                             if fetched != self.state.get("installed"):
@@ -525,7 +537,8 @@ class Launcher:
                         self.save(self.state["stage"], target=target, lastCheckedAt=time.time(), checkError=None)
                     except Exception as error:
                         reason = str(error) if isinstance(error, LauncherError) else type(error).__name__
-                        self.save(self.state["stage"], checkError="UPDATE_CHECK_FAILED: " + reason)
+                        checked = False
+                        self.save(self.state["stage"] if self.worker else "UPDATE_FAILED", lastCheckedAt=time.time(), checkError="UPDATE_CHECK_FAILED: " + reason)
                         if update_only:
                             return 1
                     future = None
@@ -555,7 +568,7 @@ class Launcher:
                         if update_only:
                             if checked and future is None:
                                 return 0
-                        elif self.can_start(head):
+                        elif checked and future is None and target == head and self.can_start(head):
                             try:
                                 self.start(head)
                             except Exception as error:

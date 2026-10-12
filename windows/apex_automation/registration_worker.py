@@ -2,6 +2,8 @@
 from __future__ import annotations
 
 import json
+import hashlib
+import datetime as dt
 import os
 from pathlib import Path
 import subprocess
@@ -161,6 +163,9 @@ class RegistrationWorker:
         if current:
             self.run_batch(current, ea_driver)
             return True
+        if self.maintenance:
+            # A paused/test-idle desktop is also a safe update boundary.
+            self.maintenance.boundary()
         ready, capacity, error = False, 0, self.config_error
         if self.script.is_file() and not error:
             try:
@@ -231,6 +236,7 @@ class RegistrationWorker:
         client = HttpAccountProvider(self.base + '/v1/runner/registration-tasks', self.token,
                                     client_version=self.api.client_version, transport=self.api.transport)
         client._request('PUT', f"/{task['id']}/result", payload=payload)
+        self.local_event(directory, 'result_upload', message='已有结果已回传', stage=payload.get('result', {}).get('stage'))
 
     def run_batch(self, batch, ea_driver):
         batch_id = batch['batchId']
@@ -239,7 +245,7 @@ class RegistrationWorker:
         try:
             if not self.script.is_file():
                 raise RuntimeError('恢复注册批次需要更新 Controller 注册运行模块')
-            self.notify(f"注册批次 {batch_id[:8]}：{len(batch['tasks'])} 项，完成后切回游戏")
+            self.notify(f"注册批次 {batch_id[:8]}：{len(batch['tasks'])} 项，完成后按测试或自动模式继续")
             for task in batch['tasks']:
                 work = directory / task['id']
                 work.mkdir(parents=True, exist_ok=True)
@@ -250,6 +256,7 @@ class RegistrationWorker:
                     raise RuntimeError('原注册进程仍在运行，等待它退出后回收成果')
                 # Do not repeat a possibly successful account creation after a crash.
                 if started and not (work / 'windows_trial.json').exists():
+                    self.local_event(work, 'recovery', message='恢复已有成果，不重复创建账号')
                     self.mark_interrupted(task, work)
                     continue
                 write_json(work / 'started.json', {'started': True})
@@ -263,14 +270,13 @@ class RegistrationWorker:
                 for task_id, (child, started_at, work, task) in list(processes.items()):
                     operation = read_json(work / 'flow_operation.json')
                     message = operation.get('message', '注册执行中')
-                    if operation.get('started') is not None:
-                        elapsed = max(0, int(time.monotonic() - operation['started']))
-                        message += f' · 本步骤已用 {elapsed} 秒'
                     events.append({'id': task_id, 'stage': operation.get('stage', 'checkout'),
-                                   'message': message})
+                                   'message': message, 'name': operation.get('name'),
+                                   'seconds': operation.get('seconds'), 'clientVersion': self.api.client_version})
                     now = time.monotonic()
                     if child.poll() is None and (now - started_at > self.timeout or
                             (operation.get('deadline') and now > operation['deadline'] + 45)):
+                        self.local_event(work, 'timeout', stage=operation.get('stage'), name=operation.get('name'))
                         child.terminate()
                         try:
                             child.wait(timeout=10)
@@ -279,17 +285,24 @@ class RegistrationWorker:
                             child.wait(timeout=10)
                         self.mark_interrupted(task, work)
                     if child.poll() is not None:
+                        self.local_event(work, 'process_exit', exitCode=child.returncode, stage=operation.get('stage'))
                         if child.returncode != 0:
                             self.mark_interrupted(task, work)
+                        receipt = read_json(work / 'forge_receipt.json')
+                        self.local_event(work, 'result_upload', outcome=receipt.get('state', 'pending'), message='成果回传已确认' if receipt else '等待确认成果回传')
                         del processes[task_id]
                 if time.monotonic() >= next_heartbeat:
                     try:
                         self.heartbeat(batch_id, 'running', events)
+                        self.flush_diagnostics(batch, directory)
                     except LeaseProviderError:
                         self.notify('注册心跳暂未送达，本地继续执行并保留成果')
                     next_heartbeat = time.monotonic() + 15
                 if processes:
                     self.sleep(1)
+            for _ in range(10):
+                if not self.flush_diagnostics(batch, directory):
+                    break
             self.heartbeat(batch_id, 'cleaning')
             self.pulse('REGISTRATION_CLEANUP')
             ids = []
@@ -323,3 +336,53 @@ class RegistrationWorker:
                     except subprocess.TimeoutExpired:
                         child.kill()
                         child.wait(timeout=10)
+
+    def local_event(self, work, kind, **data):
+        with (Path(work) / 'worker_diagnostics.jsonl').open('a', encoding='utf-8') as stream:
+            stream.write(json.dumps(dict(data, kind=kind, occurredAt=dt.datetime.now(dt.timezone.utc).isoformat(),
+                eventId=uuid.uuid4().hex + uuid.uuid4().hex)) + '\n')
+
+    def flush_diagnostics(self, batch, directory):
+        # Persist an offset only after acknowledgement. Replays are deduplicated by Forge.
+        sent = False
+        for task in batch['tasks']:
+            work = directory / task['id']
+            for name in ('diagnostics.jsonl', 'worker_diagnostics.jsonl'):
+                path = work / name
+                if not path.exists():
+                    continue
+                cursor_path = work / (name + '.cursor.json')
+                offset = read_json(cursor_path).get('offset', 0)
+                events = []
+                with path.open('rb') as stream:
+                    stream.seek(offset)
+                    for _ in range(100):
+                        line = stream.readline()
+                        if not line or not line.endswith(b'\n'):
+                            break
+                        try:
+                            item = json.loads(line)
+                            item.update(taskId=task['id'], clientVersion=self.api.client_version)
+                            events.append(item)
+                        except (ValueError, AttributeError):
+                            pass
+                        offset = stream.tell()
+                if events:
+                    self.request('POST', f"/{batch['batchId']}/diagnostics", {'events': events})
+                    write_json(cursor_path, {'offset': offset})
+                    sent = True
+            for path in sorted(work.glob('*.support.png'))[-5:]:
+                if path.stat().st_size > 512 * 1024:
+                    continue
+                png = path.read_bytes()
+                identity = hashlib.sha256(png).hexdigest()
+                receipt = path.with_suffix('.uploaded.json')
+                if read_json(receipt).get('id') == identity:
+                    continue
+                response = self.api.transport.request('PUT',
+                    f"{self.base}/v1/runner/registration-batches/{batch['batchId']}/evidence/{task['id']}/{identity}",
+                    {'Authorization': 'Bearer ' + self.token, 'Content-Type': 'image/png'}, png, 10)
+                if response.status != 200:
+                    raise LeaseProviderError('截图等待回传', code='EVIDENCE_UPLOAD_PENDING', retryable=True)
+                write_json(receipt, {'id': identity})
+        return sent

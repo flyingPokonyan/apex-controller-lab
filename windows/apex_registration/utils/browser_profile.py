@@ -274,6 +274,15 @@ def save_page_screenshot(
     ``fonts loaded``. CDP ``Page.captureScreenshot`` does not wait.
     """
     dest = os.fspath(path)
+    # Only explicitly masked failure captures are eligible for remote diagnostics.
+    # Fail closed: no CDP fallback can bypass the mask.
+    if re.search(r'fail|error|timeout|blocked|captcha', os.path.basename(dest), re.I):
+        try:
+            page.screenshot(path=dest + '.support.png', full_page=False, timeout=timeout,
+                mask=[page.locator('input,textarea,[contenteditable],img,canvas,svg,code,pre,[class*="code"],[id*="code"],[class*="secret"],[id*="secret"]'),
+                      page.get_by_text(re.compile(r'[\w.+-]+@[\w.-]+|\b[0-9]{6,}\b|\b[A-Z2-7]{16,}\b'))])
+        except Exception:
+            pass
     try:
         page.screenshot(path=dest, full_page=full_page, timeout=timeout)
         return True
