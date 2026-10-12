@@ -1204,9 +1204,9 @@ class AccountOrchestratorTest(unittest.TestCase):
             self.assertEqual(close_call[1][3], "FAILED")
             self.assertEqual(close_call[1][6], "EA_ACCOUNT_BANNED")
             self.assertIn("apex.stop", log)
-            self.assertNotIn("ea.sign_out", log)
+            self.assertIn("ea.sign_out", log)
 
-    def test_ea_ban_still_closes_when_sign_out_fails(self) -> None:
+    def test_ea_ban_keeps_lease_until_sign_out_is_confirmed(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             lease = replace(
                 FakeAccountProvider.lease("acct_1"),
@@ -1256,13 +1256,12 @@ class AccountOrchestratorTest(unittest.TestCase):
                 notify=lambda _: None,
             ).run_once()
 
-            self.assertEqual(result.outcome, AccountCycleOutcome.COMPLETED)
-            self.assertEqual(result.error_code, "EA_ACCOUNT_BANNED")
-            close_call = [item for item in provider.calls if item[0] == "close"][-1]
-            self.assertEqual(close_call[1][3], "FAILED")
-            self.assertEqual(close_call[1][6], "EA_ACCOUNT_BANNED")
-            self.assertTrue(close_call[1][7].ea_signed_out)
-            self.assertFalse(store.load().has_lease)
+            self.assertEqual(result.outcome, AccountCycleOutcome.PAUSED)
+            self.assertEqual(result.error_code, "EA_SIGNOUT_FAILED")
+            self.assertFalse(any(item[0] == "close" for item in provider.calls))
+            self.assertTrue(store.load().has_lease)
+            self.assertEqual(store.load().result_error_code, "EA_ACCOUNT_BANNED")
+            self.assertIn("ea.sign_out", log)
 
     def test_matching_ban_overlay_before_login_closes_as_banned(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -1479,7 +1478,7 @@ class AccountOrchestratorTest(unittest.TestCase):
             close_call = [item for item in provider.calls if item[0] == "close"][-1]
             self.assertEqual(close_call[1][3], "FAILED")
             self.assertEqual(close_call[1][6], "EA_ACCOUNT_BANNED")
-            self.assertEqual(log, ["ea.start", "ea.current_identity", "ea.sign_in", "apex.stop"])
+            self.assertEqual(log, ["ea.start", "ea.current_identity", "ea.sign_in", "apex.stop", "ea.sign_out"])
             self.assertFalse(store.load().has_lease)
 
     def test_sign_in_is_given_the_leased_ea_id_for_the_window_fallback(self) -> None:
@@ -1517,7 +1516,7 @@ class AccountOrchestratorTest(unittest.TestCase):
             ).run_once()
 
             self.assertEqual(result.error_code, "EA_ACCOUNT_BANNED")
-            self.assertEqual(log, ["ea.start", "ea.current_identity", "bind:ea_1", "ea.sign_in", "apex.stop"])
+            self.assertEqual(log, ["ea.start", "ea.current_identity", "bind:ea_1", "ea.sign_in", "apex.stop", "ea.sign_out"])
 
     def test_happy_path_orders_cleanup_before_close_and_clears_lease(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

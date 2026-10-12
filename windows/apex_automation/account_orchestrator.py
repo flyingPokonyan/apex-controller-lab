@@ -787,34 +787,21 @@ class AccountOrchestrator:
     ) -> AccountCycleResult:
         try:
             exit_evidence = self.ea_driver.stop_apex()
-        except EaAccountBanned as error:
-            reason_code = error.reason_code
-            exit_evidence = ApexExitEvidence(True, True)
         except EaAppAutomationError:
             return self._pause("CLEANUP_UNCONFIRMED", manual=True)
-        if not exit_evidence.all_processes_exited and not is_account_ban_reason(
-            reason_code
-        ):
+        if not exit_evidence.all_processes_exited:
             return self._pause("APEX_EXIT_TIMEOUT", manual=True)
-        self._update_checkpoint(workflow_phase=WorkflowPhase.EA_SIGNING_OUT)
-        signed_out = False
-        if is_account_ban_reason(reason_code):
-            # Ban overlays and empty-library shells do not reliably expose
-            # Sign out. Waiting here used to pause the cycle instead of 换号.
-            # The next claim signs out the leftover session before login.
-            signed_out = True
-        else:
-            try:
-                signed_out = self.ea_driver.sign_out()
-            except EaAccountBanned as error:
-                reason_code = error.reason_code
-                signed_out = True
-            except EaUiRecoveryExhausted as error:
-                return self._pause(error.reason_code, manual=True)
-            except EaAppAutomationError:
-                return self._pause("EA_SIGNOUT_FAILED", manual=True)
-            if is_account_ban_reason(reason_code):
-                signed_out = True
+        # Persist the original account failure before cleanup. If cleanup is
+        # interrupted, its retry must not convert a ban into RESTART_RECOVERY
+        # or claim another account while the old session is still logged in.
+        self._update_checkpoint(workflow_phase=WorkflowPhase.EA_SIGNING_OUT,
+                                result_status="FAILED", result_error_code=reason_code)
+        try:
+            signed_out = self.ea_driver.sign_out()
+        except EaUiRecoveryExhausted as error:
+            return self._pause(error.reason_code, manual=True)
+        except EaAppAutomationError:
+            return self._pause("EA_SIGNOUT_FAILED", manual=True)
         cleanup = CleanupEvidence(True, True, signed_out)
         if not cleanup.complete:
             return self._pause("EA_SIGNOUT_FAILED", manual=True)
@@ -960,7 +947,7 @@ class AccountOrchestrator:
             self.notify("旧运行报告无法恢复，自动清理并释放旧租约")
             return self._cleanup_and_close_preplay_failure(
                 lease,
-                "RESTART_RECOVERY",
+                self._checkpoint.result_error_code or "RESTART_RECOVERY",
             )
         self._report_drain = result.report_drain
         evidence = self._completion_evidence(result)

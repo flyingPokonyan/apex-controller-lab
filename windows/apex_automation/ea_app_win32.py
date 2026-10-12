@@ -49,6 +49,7 @@ from .ea_process import (
     listed_ea_pids,
 )
 from .ea_onboarding import library_tour_close_point, library_tour_visible
+from .ea_windows import EaWindowRole, window_role
 from .ea_pages import (
     ACCOUNT_BANNED_CLOSE_TERMS,
     ACCOUNT_FIELD_TERMS,
@@ -87,6 +88,7 @@ from .ocr_obstacles import (
 EA_EXECUTABLE = "eadesktop.exe"
 APEX_EXECUTABLES = ("r5apex.exe", "r5apex_dx12.exe")
 SW_RESTORE = 9
+SW_HIDE = 0
 INPUT_MOUSE = 0
 INPUT_KEYBOARD = 1
 KEYEVENTF_KEYUP = 0x0002
@@ -332,6 +334,10 @@ class WindowsEaHybridDriver(EaPasswordRecoveryMixin):
             ctypes.c_int,
         ]
         self.user32.GetWindowTextW.restype = ctypes.c_int
+        self.user32.GetClassNameW.argtypes = [wintypes.HWND, wintypes.LPWSTR, ctypes.c_int]
+        self.user32.GetClassNameW.restype = ctypes.c_int
+        self.user32.GetWindowLongW.argtypes = [wintypes.HWND, ctypes.c_int]
+        self.user32.GetWindowLongW.restype = ctypes.c_long
         self.user32.ShowWindow.argtypes = [wintypes.HWND, ctypes.c_int]
         self.user32.ShowWindow.restype = wintypes.BOOL
         self.user32.SetForegroundWindow.argtypes = [wintypes.HWND]
@@ -380,6 +386,7 @@ class WindowsEaHybridDriver(EaPasswordRecoveryMixin):
         while True:
             matches: list[tuple[int, int]] = []
             recoverable: list[tuple[int, int]] = []
+            windows: dict[int, tuple[int, EaWindowRole, int]] = {}
 
             @callback_type
             def collect(hwnd, _lparam):
@@ -391,6 +398,11 @@ class WindowsEaHybridDriver(EaPasswordRecoveryMixin):
                         hwnd, ctypes.byref(process_id)
                     )
                     if self._process_name(process_id.value) == EA_EXECUTABLE:
+                        role = self._window_role(hwnd)
+                        windows[int(hwnd)] = (int(process_id.value), role,
+                            int(self.user32.GetWindowLongW(hwnd, -20)))
+                        if role is not EaWindowRole.SURFACE:
+                            return True
                         rect = wintypes.RECT()
                         if self.user32.GetWindowRect(hwnd, ctypes.byref(rect)):
                             width = rect.right - rect.left
@@ -401,9 +413,8 @@ class WindowsEaHybridDriver(EaPasswordRecoveryMixin):
                             if visible and not iconic and main_sized:
                                 matches.append((width * height, int(hwnd)))
                             elif int(hwnd) not in restored and (iconic or main_sized):
-                                # Minimized windows have icon-sized rectangles;
-                                # hidden tray windows retain their full size.
-                                # Restore before applying the main-window gate.
+                                # Restore only an identified user surface.
+                                # Hidden internal windows never reach this gate.
                                 recoverable.append((width * height, int(hwnd)))
                 except Exception:
                     return True
@@ -414,6 +425,8 @@ class WindowsEaHybridDriver(EaPasswordRecoveryMixin):
                 chosen = max(matches)[1] if not require_content else self._choose_ea_window(matches)
                 if chosen is not None:
                     self._hwnd = chosen
+                    if require_content:
+                        self._present_ea_surface(chosen, windows)
                     installation = getattr(self, "_ea_installation", None)
                     if installation is not None:
                         pid = wintypes.DWORD()
@@ -455,16 +468,6 @@ class WindowsEaHybridDriver(EaPasswordRecoveryMixin):
         return None
 
     @staticmethod
-    def _luma(pixel: object) -> int:
-        if isinstance(pixel, np.ndarray) and pixel.shape:
-            channels = [int(pixel[index]) for index in range(min(3, int(pixel.shape[0])))]
-            if len(channels) >= 3:
-                blue, green, red = channels[:3]
-                return (red * 30 + green * 59 + blue * 11) // 100
-            return channels[0] if channels else 0
-        return int(pixel)  # type: ignore[arg-type]
-
-    @staticmethod
     def _interior_is_blank(
         frame: np.ndarray,
         rect: tuple[int, int, int, int],
@@ -488,16 +491,40 @@ class WindowsEaHybridDriver(EaPasswordRecoveryMixin):
         if x2 - x1 < 16 or y2 - y1 < 16:
             return None
         crop = frame[y1:y2, x1:x2]
-        crop_h, crop_w = crop.shape[:2]
-        samples: list[int] = []
-        for row in range(6):
-            for col in range(6):
-                y = min(crop_h - 1, row * crop_h // 6 + crop_h // 12)
-                x = min(crop_w - 1, col * crop_w // 6 + crop_w // 12)
-                samples.append(WindowsEaHybridDriver._luma(crop[y, x]))
-        if len(samples) < 8:
-            return None
-        return max(samples) - min(samples) <= 12
+        # Sparse text on a dark page (notably the empty-library shell) can
+        # fall between every point in a sampling grid. Inspect the entire
+        # interior. This only rejects flat frames; OCR still establishes state.
+        if crop.ndim == 3 and crop.shape[2] >= 3:
+            channels = crop[..., :3].astype(np.uint16)
+            luma = (channels[..., 2] * 30 + channels[..., 1] * 59 + channels[..., 0] * 11) // 100
+        else:
+            luma = crop
+        return int(luma.max()) - int(luma.min()) <= 12
+
+    def _window_role(self, hwnd: int) -> EaWindowRole:
+        title = self._safe_window_title(hwnd)
+        class_name = ctypes.create_unicode_buffer(256)
+        self.user32.GetClassNameW(hwnd, class_name, len(class_name))
+        return window_role(title, class_name.value, self.user32.GetWindowLongW(hwnd, -20))
+
+    def _present_ea_surface(self, chosen: int, windows: dict[int, tuple[int, EaWindowRole, int]]) -> None:
+        """One EA root surface; preserve its owned menus and login dialogs.
+
+        Hide peer roots from the same process, including windows exposed by
+        older runners. This never kills a process or closes a session. A
+        later login/main transition can restore its positively identified UI.
+        """
+        pid = windows[chosen][0]
+        for hwnd, (other_pid, role, ex_style) in windows.items():
+            if hwnd == chosen or other_pid != pid or not self.user32.IsWindowVisible(hwnd):
+                continue
+            if role is EaWindowRole.AUXILIARY:
+                self.user32.ShowWindow(hwnd, SW_HIDE)
+            elif not ex_style & (0x80 | 0x08000000) and not (
+                self._window_belongs_to_ea(chosen, hwnd)
+                or self._window_belongs_to_ea(hwnd, chosen)
+            ):
+                self.user32.ShowWindow(hwnd, SW_HIDE)
 
     def _ea_window_for_identity(self, previous: int) -> int:
         """Select again. The hwnd that survived login may now be a blank frame."""
@@ -1311,7 +1338,10 @@ class WindowsEaHybridDriver(EaPasswordRecoveryMixin):
         # to sign out of a session that was never there.
         if page in PRE_LOGIN_PAGES:
             return EaUiState.LOGIN
-        if page is EaPage.SIGNED_IN or self._identity(hwnd) is not None:
+        # A ban/empty-library page is a readable existing session. The
+        # orchestrator must inspect its identity and sign it out, even when
+        # badge OCR is unavailable; restarting cannot clear that session.
+        if page in (EaPage.SIGNED_IN, EaPage.BANNED) or self._identity(hwnd) is not None:
             return EaUiState.SIGNED_IN
         return EaUiState.UNKNOWN
 
@@ -1402,21 +1432,40 @@ class WindowsEaHybridDriver(EaPasswordRecoveryMixin):
         self._reserve_ui_recovery = reserve
 
     def _with_ui_recovery(self, operation, action):
-        for attempt in range(2):
+        # Escalate by layer: reacquire UI once, then at most one process
+        # restart. A failed OCR/input confirmation is not a crashed EA app.
+        for attempt in range(3):
             try:
                 result = action()
                 if result is not False:
                     return result
                 raise EaAppAutomationError("EA 未确认退出登录")
-            except (EaUiRecoveryExhausted, EaLoginRejected, EaCaptchaRequired, EaAccountBanned, EaOtpUnavailable):
+            except (EaUiRecoveryExhausted, EaCaptureUnavailable, EaLoginRejected,
+                    EaCaptchaRequired, EaAccountBanned, EaOtpUnavailable):
                 raise
             except EaAppAutomationError as error:
-                if attempt:
+                if attempt == 0:
+                    self._hwnd = None
+                    self.sleep(0.5)
+                    continue
+                if attempt == 2:
                     self._record("ui-recovery-exhausted", getattr(self, "_last_observation", None))
                     raise EaUiRecoveryExhausted("EA 页面恢复后仍无法完成当前操作，保留租约等待处理") from error
+                if operation == "signin":
+                    try:
+                        current = self._observe(self._ea_window())
+                    except EaCaptureUnavailable:
+                        raise
+                    except EaAppAutomationError:
+                        current = None
+                    if current is not None and current.page is not EaPage.UNKNOWN:
+                        # Leave the failure attached to this lease; normal
+                        # verified sign-out cleans it up before another claim.
+                        raise error
                 try:
                     self._recover_ui_surface(operation)
-                except (EaUiRecoveryExhausted, EaLoginRejected, EaCaptchaRequired, EaAccountBanned, EaOtpUnavailable):
+                except (EaUiRecoveryExhausted, EaCaptureUnavailable, EaLoginRejected,
+                        EaCaptchaRequired, EaAccountBanned, EaOtpUnavailable):
                     raise
                 except EaAppAutomationError as recovery_error:
                     self._record("ui-recovery-exhausted", getattr(self, "_last_observation", None))
@@ -1439,14 +1488,9 @@ class WindowsEaHybridDriver(EaPasswordRecoveryMixin):
             raise EaUiRecoveryExhausted("Apex 尚未退出，不能重启 EA 恢复页面")
         self._record("ui-recovery-start", getattr(self, "_last_observation", None))
         self.notify("EA 页面操作未生效，重启 EA 后验证当前流程")
-        try:
-            self.restart_app()
-        except (EaCaptchaRequired, EaAccountBanned, EaUiRecoveryExhausted):
-            raise
-        except EaAppAutomationError:
-            # Login/error pages do not expose Help -> Restart app. Reopen the
-            # verified EA desktop executable without clearing cached sessions.
-            self._restart_ea_process()
+        # Recovery has one process owner. Do not combine a menu restart with
+        # a fallback launch while EA may still be asynchronously restarting.
+        self._restart_ea_process()
         self._record("ui-recovery-ready", self._observe(self._ea_window()))
 
     def _taskkill(self, args: list[str]) -> None:
@@ -1566,12 +1610,19 @@ class WindowsEaHybridDriver(EaPasswordRecoveryMixin):
             raise EaUiRecoveryExhausted("EA 进程重启未完成") from error
         self._hwnd = None
         deadline = time.monotonic() + EA_RESTART_TIMEOUT_S
+        last_error = None
         while time.monotonic() < deadline:
             try:
                 return self.preflight()
-            except EaAppAutomationError:
+            except (EaCaptureUnavailable, EaCaptchaRequired, EaAccountBanned):
+                raise
+            except EaAppAutomationError as error:
+                last_error = error
                 self.sleep(1.0)
-        raise EaUiRecoveryExhausted("EA 重启后仍没有可识别页面")
+        self._record("ui-recovery-exhausted", getattr(self, "_last_observation", None))
+        raise EaUiRecoveryExhausted(
+            "EA 重启后仍没有可识别页面" + (f"：{last_error}" if last_error else "")
+        ) from last_error
 
     def current_identity(self) -> EaIdentityFact | None:
         hwnd = self._ea_window()
@@ -2860,13 +2911,10 @@ class WindowsEaHybridDriver(EaPasswordRecoveryMixin):
         signed_in_page_seen = False
         cloud_sync_close_deadline: float | None = None
         for _ in range(8):
-            try:
-                observation = self._observe(hwnd)
-            except EaAppAutomationError:
-                if cloud_sync_close_deadline is not None:
-                    self._record("signout-cloud-sync-closed")
-                    return True
-                raise
+            # A closed window or failed capture is not sign-out evidence,
+            # even after Skip sync & close. Recovery must rediscover the UI
+            # and confirm the login page before the lease can be released.
+            observation = self._observe(hwnd)
             hwnd, observation = self._handle_app_update(hwnd, observation)
             # Sign-out is where a finished run sits after Apex closes. The
             # expired gate is not a session to log out of, but leaving the
@@ -2937,13 +2985,7 @@ class WindowsEaHybridDriver(EaPasswordRecoveryMixin):
         upload_signout_retries = 0
         while time.monotonic() < deadline:
             self.sleep(1.0)
-            try:
-                observation = self._observe(hwnd)
-            except EaAppAutomationError:
-                if cloud_sync_skipped:
-                    self._record("signout-cloud-sync-closed")
-                    return True
-                raise
+            observation = self._observe(hwnd)
             upload_notice = self._contains_any(observation, CLOUD_UPLOAD_ERROR_TERMS)
             observation = self._dismiss_cloud_upload_error(hwnd, observation)
             observation = self._cancel_interrupted_cloud_launch(hwnd, observation)
@@ -2989,12 +3031,6 @@ class WindowsEaHybridDriver(EaPasswordRecoveryMixin):
                     self._record("signout-confirm-failed", observation)
                     return False
                 confirmed = True
-        try:
-            final_observation = self._observe(hwnd)
-        except EaAppAutomationError:
-            if cloud_sync_skipped:
-                self._record("signout-cloud-sync-closed")
-                return True
-            raise
+        final_observation = self._observe(hwnd)
         self._record("signout-timeout", final_observation)
         return False

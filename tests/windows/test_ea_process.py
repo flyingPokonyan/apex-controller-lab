@@ -88,6 +88,7 @@ class RestartTest(unittest.TestCase):
         self.driver.user32 = SimpleNamespace(GetWindowThreadProcessId=lambda _hwnd, pointer: setattr(pointer._obj, "value", 321))
         self.driver.preflight = Mock(return_value=EaUiState.LOGIN)
         self.driver.notify = Mock()
+        self.driver.evidence = None
         self.driver.sleep = Mock()
         self.calls = []
         self.snapshots = [""]

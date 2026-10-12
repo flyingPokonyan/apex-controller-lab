@@ -19,9 +19,25 @@ jobs:
           python-version: '3.12'
       - name: Verify real virtual-environment worker heartbeats and update handoff
         run: python -m unittest discover -s tests/windows -p test_managed_launcher_process.py -v
+  ea-lifecycle-check:
+    runs-on: windows-latest
+    timeout-minutes: 10
+    env:
+      PYTHONUTF8: '1'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install image and geometry test dependencies
+        run: python -m pip install 'numpy>=2.0,<3' 'opencv-python>=4.12,<5'
+      - name: Verify native windows, EA recovery, and repeated account lifecycle
+        run: python -m unittest discover -s tests/windows -p 'test_ea_*.py' -v
+      - name: Verify lease cleanup and restart reconciliation
+        run: python -m unittest discover -s tests/windows -p test_account_orchestration.py -v
   notify:
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
-    needs: runtime-check
+    needs: [runtime-check, ea-lifecycle-check]
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:

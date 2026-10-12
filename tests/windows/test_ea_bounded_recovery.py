@@ -7,7 +7,7 @@ from unittest.mock import Mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2] / 'windows'))
 from apex_automation.ea_app import (
-    EaAppAutomationError, EaCredentialsRejected, EaIdentityFact, EaUiRecoveryExhausted,
+    EaAppAutomationError, EaCaptureUnavailable, EaCredentialsRejected, EaIdentityFact, EaUiRecoveryExhausted,
 )
 from apex_automation.ea_app_win32 import WindowsEaHybridDriver
 from apex_automation.ea_pages import EaPage
@@ -27,9 +27,10 @@ class BoundedRecoveryTest(unittest.TestCase):
         driver._observe = Mock(return_value=Mock(page=EaPage.EMAIL))
         driver._record = Mock()
         driver.notify = Mock()
+        driver.sleep = Mock()
         return driver
 
-    def test_signin_repeats_the_full_identity_flow_after_restart(self):
+    def test_signin_reacquires_window_before_any_restart(self):
         driver = self.driver()
         identity = EaIdentityFact('leased-player', 'fixture', True)
         driver._sign_in_once = Mock(side_effect=[EaAppAutomationError('BACK missing'), identity])
@@ -37,7 +38,8 @@ class BoundedRecoveryTest(unittest.TestCase):
         self.assertIs(driver.sign_in(credentials, otp), identity)
         self.assertEqual(driver._sign_in_once.call_count, 2)
         driver._sign_in_once.assert_called_with(credentials, otp)
-        driver.restart_app.assert_called_once()
+        driver.restart_app.assert_not_called()
+        driver._restart_ea_process.assert_not_called()
 
     def test_successful_restart_is_not_signout_proof_and_recovery_is_bounded(self):
         driver = self.driver()
@@ -45,16 +47,17 @@ class BoundedRecoveryTest(unittest.TestCase):
         for _ in range(2):
             with self.assertRaises(EaUiRecoveryExhausted):
                 driver.sign_out()
-        driver.restart_app.assert_called_once()
-        self.assertEqual(driver._sign_out_once.call_count, 3)
+        driver.restart_app.assert_not_called()
+        driver._restart_ea_process.assert_called_once()
+        self.assertEqual(driver._sign_out_once.call_count, 5)
 
     def test_login_page_without_restart_menu_reopens_ea_then_verifies_signout(self):
         driver = self.driver()
-        driver._sign_out_once = Mock(side_effect=[False, True])
+        driver._sign_out_once = Mock(side_effect=[False, False, True])
         driver.restart_app.side_effect = EaAppAutomationError('no help menu')
         self.assertTrue(driver.sign_out())
         driver._restart_ea_process.assert_called_once()
-        self.assertEqual(driver._sign_out_once.call_count, 2)
+        self.assertEqual(driver._sign_out_once.call_count, 3)
 
     def test_failed_process_reopen_is_exhausted_not_another_account_failure(self):
         driver = self.driver()
@@ -92,6 +95,31 @@ class BoundedRecoveryTest(unittest.TestCase):
             driver._dismiss_expired_session(7)
         self.assertEqual(driver._click_point.call_count, 3)
         self.assertEqual(driver._observe.call_count, 4)
+
+    def test_readable_login_input_failure_does_not_restart_ea(self):
+        driver = self.driver()
+        driver._sign_in_once = Mock(side_effect=EaAppAutomationError('input not verified'))
+        with self.assertRaisesRegex(EaAppAutomationError, 'input not verified'):
+            driver.sign_in(object(), object())
+        self.assertEqual(driver._sign_in_once.call_count, 2)
+        driver.restart_app.assert_not_called()
+        driver._restart_ea_process.assert_not_called()
+
+    def test_unknown_surface_uses_one_verified_process_restart(self):
+        driver = self.driver()
+        driver._observe.return_value = Mock(page=EaPage.UNKNOWN)
+        identity = EaIdentityFact('leased-player', 'fixture', True)
+        driver._sign_in_once = Mock(side_effect=[EaAppAutomationError('unknown'), EaAppAutomationError('unknown'), identity])
+        self.assertIs(driver.sign_in(object(), object()), identity)
+        driver._restart_ea_process.assert_called_once()
+        driver.restart_app.assert_not_called()
+
+    def test_capture_failure_does_not_restart_a_healthy_app(self):
+        driver = self.driver()
+        driver._sign_in_once = Mock(side_effect=EaCaptureUnavailable('capture failed'))
+        with self.assertRaises(EaCaptureUnavailable):
+            driver.sign_in(object(), object())
+        driver._restart_ea_process.assert_not_called()
 
 
 class RecoveryCheckpointTest(unittest.TestCase):

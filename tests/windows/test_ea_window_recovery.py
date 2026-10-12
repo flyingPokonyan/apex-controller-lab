@@ -11,7 +11,8 @@ import numpy as np
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "windows"))
 from apex_automation.ea_app import EaAppAutomationError, EaCaptureUnavailable, EaIdentityFact, EaUiState
-from apex_automation.ea_app_win32 import EaObservation, WindowsEaHybridDriver, SW_RESTORE
+from apex_automation.ea_app_win32 import EaObservation, WindowsEaHybridDriver, SW_RESTORE, SW_HIDE
+from apex_automation.ea_windows import EaWindowRole, window_role
 from apex_automation.ea_pages import EaPage
 from apex_automation.ocr_obstacles import OcrToken
 
@@ -69,18 +70,34 @@ class EaWindowRecoveryTest(unittest.TestCase):
             return True
 
         def process_id(hwnd, pointer):
-            pointer._obj.value = hwnd
+            pointer._obj.value = windows[hwnd].get("pid", hwnd)
             return 1
 
         def restore(hwnd, command):
             restores.append((hwnd, command))
-            windows[hwnd].update(visible=True, iconic=False, rect=(100, 100, 900, 900))
+            if command == SW_HIDE:
+                windows[hwnd]["visible"] = False
+            else:
+                windows[hwnd].update(visible=True, iconic=False, rect=(100, 100, 900, 900))
+
+        def text(hwnd, buffer, _size):
+            buffer.value = windows[hwnd].get("title", "EA")
+            return len(buffer.value)
+
+        def class_name(hwnd, buffer, _size):
+            buffer.value = windows[hwnd].get("class", "Qt5QWindowIcon")
+            return len(buffer.value)
 
         driver.user32 = SimpleNamespace(
             EnumWindows=lambda callback, _value: [callback(hwnd, 0) for hwnd in windows],
             GetWindowThreadProcessId=process_id, GetWindowRect=rect,
             IsWindowVisible=lambda hwnd: windows[hwnd]["visible"],
             IsIconic=lambda hwnd: windows[hwnd]["iconic"], ShowWindow=restore,
+            GetWindowTextLengthW=lambda hwnd: len(windows[hwnd].get("title", "EA")),
+            GetWindowTextW=text, GetClassNameW=class_name,
+            GetWindowLongW=lambda hwnd, _: windows[hwnd].get("ex_style", 0),
+            GetParent=lambda hwnd: 0,
+            GetWindow=lambda hwnd, _: windows[hwnd].get("owner", 0),
         )
         driver._process_name = lambda pid: windows[pid].get("process", "eadesktop.exe")
         driver._focus = Mock()
@@ -186,6 +203,57 @@ class EaWindowRecoveryTest(unittest.TestCase):
         varied[80:150, 40:160] = (20, 200, 240)
         self.assertTrue(WindowsEaHybridDriver._interior_is_blank(flat, (0, 0, 200, 200)))
         self.assertFalse(WindowsEaHybridDriver._interior_is_blank(varied, (0, 0, 200, 200)))
+
+    def test_sparse_text_between_old_sampling_points_is_not_blank(self):
+        frame = np.full((1080, 1920, 3), 25, np.uint8)
+        frame[455:462, 840:1080] = 230  # a single short line on a dark library
+        self.assertFalse(WindowsEaHybridDriver._interior_is_blank(frame, (192, 104, 1728, 936)))
+        frame[455:462, 840:1080] = 25
+        self.assertTrue(WindowsEaHybridDriver._interior_is_blank(frame, (192, 104, 1728, 936)))
+
+    def test_only_verified_main_surface_is_restored_not_large_hidden_receivers(self):
+        windows = {
+            1: {"visible": False, "iconic": False, "rect": (0, 0, 1600, 1000), "title": "QTrayIconMessageWindow"},
+            2: {"visible": False, "iconic": False, "rect": (0, 0, 1500, 900), "title": ""},
+            3: {"visible": True, "iconic": True, "rect": (-32000, -32000, -31840, -31972)},
+        }
+        driver, calls = self.driver(windows)
+        self.assertEqual(driver._ea_window(), 3)
+        self.assertEqual(calls, [(3, SW_RESTORE)])
+
+    def test_one_root_remains_visible_while_owned_menu_and_parent_are_preserved(self):
+        base = {"visible": True, "iconic": False, "rect": (100, 100, 900, 900), "pid": 7}
+        windows = {7: dict(base), 8: dict(base, title=""),
+                   9: dict(base, title="QTrayIconMessageWindow"),
+                   10: dict(base, owner=7, ex_style=0x80),
+                   11: dict(base, pid=11)}
+        driver, calls = self.driver(windows)
+        self.assertEqual(driver._ea_window(), 7)
+        self.assertEqual(calls, [(8, SW_HIDE), (9, SW_HIDE)])
+        self.assertTrue(windows[7]["visible"])
+        self.assertTrue(windows[10]["visible"])
+        self.assertTrue(windows[11]["visible"])
+
+    def test_unrecognized_root_never_becomes_an_input_target_even_with_content(self):
+        driver, calls = self.driver({7: {"title": "", "visible": True, "iconic": False, "rect": (0, 0, 1600, 1000)}})
+        with self.assertRaises(EaAppAutomationError):
+            driver._ea_window()
+        self.assertEqual(calls, [])
+        driver._focus.assert_not_called()
+
+    def test_named_login_tool_window_can_be_selected_without_hiding_its_owner(self):
+        base = {"visible": True, "iconic": False, "rect": (100, 100, 900, 900), "pid": 7}
+        driver, calls = self.driver({8: dict(base, owner=7, ex_style=0x80), 7: dict(base)})
+        self.assertEqual(driver._ea_window(), 8)
+        self.assertEqual(calls, [])
+        self.assertEqual(window_role("EA", "Qt5QWindowIcon", 0x08000000), EaWindowRole.UNKNOWN)
+
+    def test_known_banned_session_is_ready_for_cleanup_without_badge_ocr(self):
+        driver = object.__new__(WindowsEaHybridDriver)
+        driver._identity = Mock(return_value=None)
+        observation = EaObservation((0, 0, 1920, 1080), np.zeros((1, 1)), (), EaPage.BANNED)
+        self.assertEqual(driver._state(7, observation), EaUiState.SIGNED_IN)
+        driver._identity.assert_not_called()
 
 
 class EaUpdateBannerTest(unittest.TestCase):

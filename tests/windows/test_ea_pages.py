@@ -1119,7 +1119,7 @@ class EaLaunchRecoveryTest(unittest.TestCase):
         )
         self.assertTrue(any("本地数据" in notice for notice in notices))
 
-    def test_cloud_sync_error_ec10609_skips_sync_before_ea_closes(self) -> None:
+    def test_cloud_sync_close_does_not_release_a_session_without_login_evidence(self) -> None:
         signed_in = EaObservation(
             rect=self.WINDOW,
             frame=np.zeros((1, 1), dtype=np.uint8),
@@ -1153,9 +1153,10 @@ class EaLaunchRecoveryTest(unittest.TestCase):
         driver.sleep = lambda _seconds: None
         driver.notify = notices.append
 
-        self.assertTrue(driver.sign_out())
+        with self.assertRaises(EaAppAutomationError):
+            driver._sign_out_once()
         self.assertEqual(clicks, [(700, 500), (1120, 710)])
-        self.assertEqual(records, ["signout-cloud-sync-skip", "signout-cloud-sync-closed"])
+        self.assertEqual(records, ["signout-cloud-sync-skip"])
         self.assertTrue(any("跳过同步" in notice for notice in notices))
 
     def test_apex_update_is_clicked_once_then_waits_for_play(self) -> None:
