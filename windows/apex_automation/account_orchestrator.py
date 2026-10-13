@@ -1254,6 +1254,22 @@ class AccountOrchestrator:
                 f"EA 自动化失败：{error.reason_code} @ {self._phase()}：{error}"
             )
             if isinstance(error, EaUiRecoveryExhausted):
+                # A failed login is not a broken Runner revision. Try the
+                # existing bounded cleanup once; never abandon an unclean
+                # desktop or overwrite a finished game's result.
+                if ("lease" in locals() and lease is not None
+                        and self._checkpoint.active_play_run_id is None
+                        and self._checkpoint.workflow_phase in {
+                            WorkflowPhase.EA_STARTING, WorkflowPhase.EA_SIGNING_IN,
+                            WorkflowPhase.EA_IDENTITY_VERIFYING, WorkflowPhase.APEX_STARTING,
+                        }):
+                    result = self._cleanup_and_close_preplay_failure(lease, error.reason_code)
+                    if (result.outcome is AccountCycleOutcome.PAUSED
+                            and result.error_code in {
+                                "APEX_EXIT_TIMEOUT", "CLEANUP_UNCONFIRMED", "EA_SIGNOUT_FAILED",
+                            }):
+                        return self._pause(error.reason_code, manual=True)
+                    return result
                 return self._pause(error.reason_code, manual=True)
             if self._checkpoint.workflow_phase in {
                 WorkflowPhase.APEX_STOPPING,
@@ -1386,7 +1402,8 @@ class AccountOrchestrator:
                     recovery_failures = 0
                     self.maintenance.success()
                 elif result.error_code in RECOVERABLE_EA_FAILURES or result.error_code in {
-                    "STALL_UNRECOVERED", "KNOWN_STATE_STALL_UNRECOVERED", "FOREGROUND_UNRECOVERED"
+                    "STALL_UNRECOVERED", "KNOWN_STATE_STALL_UNRECOVERED", "FOREGROUND_UNRECOVERED",
+                    "EA_RECOVERY_EXHAUSTED",
                 }:
                     # COMPLETED alone is not enough: the local checkpoint must
                     # also prove that cleanup and remote close have finished.

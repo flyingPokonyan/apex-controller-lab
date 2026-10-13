@@ -130,6 +130,17 @@ class RuntimeTest(unittest.TestCase):
         self.assertEqual(orchestrator.run_once.call_count, 2)
         self.assertEqual(self.runtime.completed, 0)
 
+    def test_cleaned_exhaustion_continues_without_counting_as_game_success(self):
+        orchestrator = self.orchestrator()
+        orchestrator.sleep = lambda _: None
+        orchestrator.run_once = Mock(side_effect=[
+            AccountCycleResult(AccountCycleOutcome.COMPLETED, error_code="EA_RECOVERY_EXHAUSTED"),
+            AccountCycleResult(AccountCycleOutcome.STOPPED),
+        ])
+        self.assertEqual(orchestrator.run_forever(), 0)
+        self.assertEqual(orchestrator.run_once.call_count, 2)
+        self.assertEqual(self.runtime.completed, 0)
+
     def test_expired_interrupted_lease_enters_cleanup_not_new_claim(self):
         lease = FakeAccountProvider.lease("acct")
         provider = FakeAccountProvider([lease])
@@ -166,7 +177,12 @@ class LauncherTest(unittest.TestCase):
         launcher.write_json(self.app.root / "worker.json", {
             "session": "current", "pid": 123, "reason": "EA_RECOVERY_EXHAUSTED"})
         self.app.monitor("old")
-        self.assertEqual(self.app.state["error"], "WORKER_EXIT_1: EA_RECOVERY_EXHAUSTED")
+        self.assertEqual(self.app.state["error"], "EA_RECOVERY_EXHAUSTED")
+        self.assertEqual(self.app.state["stage"], "WAITING_CLEANUP")
+        self.assertEqual(self.app.state["failures"], {})
+        reloaded = launcher.Launcher(self.repo)
+        self.assertFalse(reloaded.can_start("old"))
+        self.assertTrue(reloaded.can_start("new"))
 
     def test_failure_budget_survives_restart_and_new_commit_can_run(self):
         for _ in range(3):

@@ -312,6 +312,7 @@ class Launcher:
 
     def can_start(self, commit):
         return (not self.state.get("operatorStopped")
+                and self.state.get("cleanupBlockedCommit") != commit
                 and self.state["failures"].get(commit, 0) < MAX_FAILURES
                 and time.monotonic() >= self.next_start)
 
@@ -404,6 +405,11 @@ class Launcher:
             elif code == BUSY_EXIT:
                 self.next_start = time.monotonic() + 30
                 self.save("WAITING_LOCAL_RUNNER", pid=None, error=None)
+            elif code == 1 and final_status.get("reason") == "EA_RECOVERY_EXHAUSTED":
+                # The checkpoint deliberately retains this lease and pause.
+                # Restarting it cannot recover and is not a build failure.
+                self.save("WAITING_CLEANUP", pid=None, cleanupBlockedCommit=commit,
+                          error="EA_RECOVERY_EXHAUSTED")
             elif code == RETRY_EXIT:
                 attempts = int(self.state["recoveryFailures"].get(commit, 0)) + 1
                 self.state["recoveryFailures"][commit] = attempts
@@ -486,6 +492,7 @@ class Launcher:
 
     def run(self, *, resume=False, update_only=False):
         if resume:
+            self.state.pop("cleanupBlockedCommit", None)
             self.state["resumeWorker"] = True
             self.state["operatorStopped"] = False
             self.state["failures"] = {}
@@ -513,6 +520,7 @@ class Launcher:
                 if check_now.exists():
                     control = read_json(check_now)
                     if control.get("resume"):
+                        self.state.pop("cleanupBlockedCommit", None)
                         self.state["resumeWorker"] = True
                         self.state["operatorStopped"] = False
                         self.state["failures"] = {}
@@ -576,6 +584,8 @@ class Launcher:
                                 self.save("START_FAILED", error=type(error).__name__)
                         elif self.state.get("operatorStopped"):
                             self.save("OPERATOR_STOPPED")
+                        elif self.state.get("cleanupBlockedCommit") == head:
+                            self.save("WAITING_CLEANUP", error="EA_RECOVERY_EXHAUSTED")
                         elif self.state["failures"].get(head, 0) >= MAX_FAILURES:
                             self.save("WAITING_FIX")
                 time.sleep(1)

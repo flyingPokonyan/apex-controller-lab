@@ -123,6 +123,29 @@ class BoundedRecoveryTest(unittest.TestCase):
 
 
 class RecoveryCheckpointTest(unittest.TestCase):
+    def test_exhausted_login_closes_only_after_verified_cleanup(self):
+        for clean in (True, False):
+            with self.subTest(clean=clean), tempfile.TemporaryDirectory() as directory:
+                lease = replace(FakeAccountProvider.lease('acct_1'), expected_ea_account_id='acct_1')
+                provider = FakeAccountProvider([lease, FakeAccountProvider.lease('acct_2')],
+                    credentials={'acct_1': SecretCredentials('fixture@example.test', 'fixture-secret')})
+                driver = FakeEaDriver([], 'acct_1')
+                driver.sign_in = Mock(side_effect=EaUiRecoveryExhausted('login stuck'))
+                driver.sign_out = Mock(return_value=clean)
+                store = AtomicCheckpointStore(Path(directory) / 'checkpoint.json')
+                orchestrator = AccountOrchestrator(provider=provider, ea_driver=driver,
+                    play_session=Mock(), checkpoint_store=store, device_id='dev_1',
+                    capture_source=object(), notify=lambda _: None,
+                    lease_keeper_factory=lambda _provider, value, **_kwargs: ScriptedLeaseKeeper(value))
+                result = orchestrator.run_once()
+                self.assertEqual(result.error_code, 'EA_RECOVERY_EXHAUSTED')
+                driver.sign_out.assert_called_once()
+                orchestrator.play_session.run.assert_not_called()
+                self.assertEqual(len([c for c in provider.calls if c[0] == 'close']), int(clean))
+                self.assertEqual(store.load().lease_id, None if clean else lease.lease_id)
+                self.assertEqual(result.outcome, AccountCycleOutcome.COMPLETED if clean else AccountCycleOutcome.PAUSED)
+                self.assertEqual(len([c for c in provider.calls if c[0] == 'claim']), 1)
+
     def test_exhaustion_keeps_the_lease_and_survives_worker_restart(self):
         for failure in ('preflight', 'leftover', 'cleanup'):
             with self.subTest(failure=failure), tempfile.TemporaryDirectory() as directory:
