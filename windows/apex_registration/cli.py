@@ -161,6 +161,14 @@ def apply_bundle(output_dir: Path, payload: dict) -> str:
         # This task's assigned vendor takes precedence over machine overrides.
         os.environ['EA_PROXY'] = str(runtime['proxyUrl'])
         os.environ['CAPTCHALY_KEY'] = str(runtime.get('steamCaptchaKey') or '')
+        # Select relative to the original assignment, not the last retry's vendor.
+        # Existing tasks without a pool keep their assigned vendor and draw a new exit.
+        pool = runtime.get('proxies') or {}
+        vendors = [key for key, value in pool.items() if value] if isinstance(pool, dict) else []
+        attempt = int(os.environ.get('APEX_REGISTRATION_ATTEMPT', '1'))
+        if attempt > 1 and runtime.get('proxyVendor') in vendors:
+            index = (vendors.index(runtime['proxyVendor']) + attempt - 1) % len(vendors)
+            os.environ['EA_PROXY'] = str(pool[vendors[index]])
     ea_mailbox = payload["ea_mailbox"]
     steam_mailbox = payload["steam_mailbox"]
     mailboxes = [ea_mailbox]
@@ -305,6 +313,11 @@ def sync_result(output_dir: Path, *, finished: bool, exit_code: int | None = Non
         # Keep the final result after acknowledgement so the parent cannot
         # overwrite a concrete failure with a generic process interruption.
         write_private_json(output_dir / "forge_final_result.json", payload)
+    if finished and exit_code != 0 and os.environ.get('APEX_REGISTRATION_DEFER_FAILURE') == '1':
+        # The supervisor owns the retry budget and final failure. Keep the task
+        # and both resources reserved while it decides whether to continue.
+        payload = dict(payload, finished=False)
+        write_private_json(output_dir / "forge_pending_result.json", payload)
     api_base = bundle.get("forge_api_url") or forge_api_url()
     _use_local_proxy()
     token = os.environ.get("FORGE_TOKEN", "").strip() or login_token(api_base)
@@ -551,12 +564,13 @@ def main(argv=None) -> int:
         complete = finished_locally(output_dir)
         return 0 if try_sync_result(output_dir, finished=True, exit_code=0 if complete else 1) else 3
     previous = read_json(output_dir, "ea_full_setup_result.json")
-    if previous.get("ea_creation_submitted") or previous.get("ea_registered"):
-        if not args.resume or not previous.get("account_login_verified"):
-            sys.stderr.write("本机已有 EA 创建记录。先用 --sync-only 保存成果；已复核的 EA 可用 --resume 继续。\n")
+    from .recovery import resume_saved_ea
+    if any(previous.get(key) for key in ('ea_creation_submitted', 'ea_registered', 'account_login_verified')):
+        if not resume_saved_ea(previous) or not (args.resume or os.environ.get('APEX_REGISTRATION_MANAGED') == '1'):
+            sys.stderr.write("已有 EA 创建记录，必须使用已保存凭据续跑；缺少凭据时只能补传结果。\n")
             return 2
         write_private_json(output_dir / "ea_previous_result.json", previous)
-        os.environ.update(SKIP_EA_REGISTER="1", EA_PASSWORD=previous["ea_password"], EA_ORIGIN_ID=previous["ea_origin_id"])
+        os.environ.update(SKIP_EA_REGISTER="1", EA_PASSWORD=previous["ea_password"], EA_ORIGIN_ID=str(previous.get("ea_origin_id") or ""))
     else:
         os.environ.pop("SKIP_EA_REGISTER", None)
     _refuse_unless_windows()

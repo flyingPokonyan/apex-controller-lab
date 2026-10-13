@@ -15,6 +15,7 @@ from urllib.request import Request, build_opener, ProxyHandler
 from .account_provider import HttpAccountProvider, LeaseProviderError
 from .atomic_files import replace_with_retry
 from apex_registration.config import DEFAULTS, config_path, load_config, environment
+from apex_registration.recovery import MAX_ATTEMPTS, completed, recovery_action
 
 
 def read_json(path, default=None):
@@ -210,6 +211,8 @@ class RegistrationWorker:
         env = dict(os.environ, **self.environment)
         env.update(FORGE_API_URL=self.base, FORGE_TOKEN=self.token, FORGE_RUNNER_TASK_ID=task['id'],
                    APEX_REGISTRATION_MANAGED='1',
+                   APEX_REGISTRATION_DEFER_FAILURE='0' if sync_only else '1',
+                   APEX_REGISTRATION_ATTEMPT=str(read_json(directory / 'started.json').get('attempts', 1)),
                    FORGE_PROXY=env.get('FORGE_PROXY', 'direct'), GAME_ACCOUNTS_DESKTOP_BROWSER='bitbrowser',
                    ACCOUNT_FLOW_OUTPUT_DIR=str(directory))
         log = (directory / 'runner.log').open('ab')
@@ -222,21 +225,74 @@ class RegistrationWorker:
         finally:
             log.close()
 
+    def retry_action(self, work, *, interrupted=False):
+        started = read_json(work / 'started.json')
+        if (started.get('syncOnly') or int(started.get('attempts', 1)) >= MAX_ATTEMPTS
+                or time.time() - started.get('firstStartedAt', time.time()) >= self.timeout):
+            return 'stop'
+        # A missing checkout file cannot safely allocate the same task again.
+        if not (work / 'windows_trial.json').is_file():
+            return 'stop'
+        return recovery_action(read_json(work / 'ea_full_setup_result.json'), interrupted=interrupted)
+
+    def spawn(self, task, work, processes, *, recovering=False, sync_only=False):
+        started = read_json(work / 'started.json')
+        attempt = int(started.get('attempts', 1 if recovering else 0)) + (not sync_only)
+        if recovering:
+            # Only this task's windows may be closed. Failure blocks recovery.
+            self.bit.cleanup(read_json(work / 'flow_browsers.json', []), self.sleep)
+            if not sync_only:
+                self.local_event(work, 'recovery', message=f'同一任务恢复，第 {attempt}/{MAX_ATTEMPTS} 轮')
+                self.notify(f'注册恢复：同一账号第 {attempt}/{MAX_ATTEMPTS} 轮')
+                self.sleep(min(15, 5 * max(1, attempt - 1)))
+        # Persist the budget before spawn, and remove the dead child's deadline.
+        started = dict(started, started=True, attempts=attempt,
+                       firstStartedAt=started.get('firstStartedAt', time.time()), pid=None, syncOnly=sync_only)
+        write_json(work / 'started.json', started)
+        write_json(work / 'flow_operation.json', {})
+        if not sync_only:
+            for name in ('forge_final_result.json', 'forge_receipt.json'):
+                (work / name).unlink(missing_ok=True)
+        child = self.launch(task, work, sync_only=sync_only)
+        write_json(work / 'started.json', dict(started, pid=child.pid))
+        processes[task['id']] = (child, time.monotonic(), work, task)
+
     def mark_interrupted(self, task, directory):
         payload = read_json(directory / 'forge_pending_result.json') or read_json(directory / 'forge_final_result.json')
+        latest = read_json(directory / 'ea_full_setup_result.json')
+        if payload and latest:
+            payload['result'] = latest
         if not payload:
-            result = read_json(directory / 'ea_full_setup_result.json')
+            result = latest
             operation = read_json(directory / 'flow_operation.json')
-            if not result.get('error_code'):
+            if not result.get('error_code') and not completed(result):
                 result.update(error_code='runner_interrupted', error_message='注册进程中断，已保存本机已有成果')
             result.setdefault('stage', operation.get('stage') or 'checkout')
             payload = {'finished': True, 'exit_code': 1, 'result': result,
                        'steam_result': read_json(directory / 'steam_register_result.json')}
         payload['finished'] = True
         payload['exit_code'] = payload.get('exit_code') if payload.get('exit_code') is not None else 1
+        if payload['exit_code'] != 0 and not payload.get('result', {}).get('error_code') and not completed(payload.get('result', {})):
+            payload.setdefault('result', {}).update(error_code='runner_interrupted',
+                error_message='注册进程中断，恢复已停止；已保留完成阶段和原账号')
+        engine = read_json(directory / 'protocol_register_result.json').get('register_engine')
+        if engine and not payload.get('register_engine'):
+            payload['register_engine'] = engine
+        steam = read_json(directory / 'steam_register_result.json')
+        if steam:
+            payload['steam_result'] = steam
+        updates = read_json(directory / 'windows_trial.json').get('mailbox_updates')
+        if updates:
+            payload['mailbox_updates'] = updates
+        if completed(payload.get('result', {})):
+            payload['exit_code'] = 0
         client = HttpAccountProvider(self.base + '/v1/runner/registration-tasks', self.token,
                                     client_version=self.api.client_version, transport=self.api.transport)
-        client._request('PUT', f"/{task['id']}/result", payload=payload)
+        write_json(directory / 'forge_pending_result.json', payload)
+        receipt, _ = client._request('PUT', f"/{task['id']}/result", payload=payload)
+        write_json(directory / 'forge_receipt.json', receipt)
+        write_json(directory / 'forge_final_result.json', payload)
+        (directory / 'forge_pending_result.json').unlink(missing_ok=True)
         self.local_event(directory, 'result_upload', message='已有结果已回传', stage=payload.get('result', {}).get('stage'))
 
     def run_batch(self, batch, ea_driver):
@@ -260,10 +316,9 @@ class RegistrationWorker:
                     self.local_event(work, 'recovery', message='恢复已有成果，不重复创建账号')
                     self.mark_interrupted(task, work)
                     continue
-                write_json(work / 'started.json', {'started': True})
-                child = self.launch(task, work, sync_only=bool(started))
-                write_json(work / 'started.json', {'started': True, 'pid': child.pid})
-                processes[task['id']] = (child, time.monotonic(), work, task)
+                action = self.retry_action(work, interrupted=True) if started else 'create'
+                self.spawn(task, work, processes, recovering=bool(started),
+                           sync_only=action in {'stop', 'upload'})
             next_heartbeat = 0
             while processes:
                 self.pulse('REGISTERING')
@@ -275,7 +330,11 @@ class RegistrationWorker:
                                    'message': message, 'name': operation.get('name'),
                                    'seconds': operation.get('seconds'), 'clientVersion': self.release_version})
                     now = time.monotonic()
-                    if child.poll() is None and (now - started_at > self.timeout or
+                    started = read_json(work / 'started.json')
+                    timed_out = False
+                    expired = (now - started_at > 90 if started.get('syncOnly') else
+                               time.time() - started.get('firstStartedAt', time.time()) > self.timeout)
+                    if child.poll() is None and (expired or
                             (operation.get('deadline') and now > operation['deadline'] + 45)):
                         self.local_event(work, 'timeout', stage=operation.get('stage'), name=operation.get('name'))
                         child.terminate()
@@ -284,10 +343,21 @@ class RegistrationWorker:
                         except subprocess.TimeoutExpired:
                             child.kill()
                             child.wait(timeout=10)
-                        self.mark_interrupted(task, work)
+                        timed_out = True
                     if child.poll() is not None:
                         self.local_event(work, 'process_exit', exitCode=child.returncode, stage=operation.get('stage'))
                         if child.returncode != 0:
+                            action = self.retry_action(work, interrupted=True)
+                            if action in {'create', 'resume'}:
+                                self.spawn(task, work, processes, recovering=True)
+                                continue
+                            if timed_out:
+                                result = read_json(work / 'ea_full_setup_result.json')
+                                if not result.get('error_code') and not completed(result):
+                                    result.update(error_code='ea_step_timeout',
+                                        error_message='注册步骤或总耗时超过恢复预算，已保留完成的阶段',
+                                        stage=operation.get('stage') or result.get('stage', 'checkout'))
+                                    write_json(work / 'ea_full_setup_result.json', result)
                             self.mark_interrupted(task, work)
                         receipt = read_json(work / 'forge_receipt.json')
                         self.local_event(work, 'result_upload', outcome=receipt.get('state', 'pending'), message='成果回传已确认' if receipt else '等待确认成果回传')

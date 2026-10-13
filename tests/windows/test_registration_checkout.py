@@ -12,6 +12,36 @@ from apex_registration import cli as windows
 
 
 class WindowsCheckoutTests(unittest.TestCase):
+    def test_managed_failure_stays_running_until_supervisor_finishes(self):
+        from unittest.mock import MagicMock
+        with tempfile.TemporaryDirectory() as directory:
+            output = Path(directory)
+            windows.write_private_json(output / 'windows_trial.json', self.bundle())
+            windows.write_private_json(output / 'ea_full_setup_result.json', {'stage':'verify_account','error_code':'ea_network_error'})
+            reply = MagicMock()
+            reply.__enter__.return_value = reply
+            reply.read.return_value = b'{"task_id":"owned-task","state":"running"}'
+            with patch.dict(windows.os.environ, {'FORGE_TOKEN':'fixture','FORGE_API_URL':'https://forge.example','APEX_REGISTRATION_DEFER_FAILURE':'1'}), \
+                    patch.object(windows.urllib.request, 'urlopen', return_value=reply) as send:
+                windows.sync_result(output, finished=True, exit_code=1)
+            transmitted = json.loads(send.call_args.args[0].data)
+            self.assertFalse(transmitted['finished'])
+            self.assertTrue(json.loads((output / 'forge_final_result.json').read_text())['finished'])
+
+    def test_retries_rotate_from_original_vendor_and_legacy_tasks_keep_assignment(self):
+        payload = self.bundle()
+        payload['registration'] = {'proxyVendor':'1024','proxyUrl':'http://1024.example', 'steamCaptchaKey':'fixture',
+                                  'proxies':{'1024':'http://1024.example','711':'http://711.example'}}
+        with tempfile.TemporaryDirectory() as directory, patch.dict(windows.os.environ, {}):
+            for attempt, vendor in ((1,'1024'),(2,'711'),(3,'1024')):
+                windows.os.environ['APEX_REGISTRATION_ATTEMPT'] = str(attempt)
+                windows.apply_bundle(Path(directory), payload)
+                self.assertEqual(windows.os.environ['EA_PROXY'], f'http://{vendor}.example')
+            payload['registration'].pop('proxies')
+            windows.os.environ['APEX_REGISTRATION_ATTEMPT'] = '2'
+            windows.apply_bundle(Path(directory), payload)
+            self.assertEqual(windows.os.environ['EA_PROXY'], 'http://1024.example')
+
     def test_managed_checkout_uses_runner_task_and_never_allocates_another(self):
         from unittest.mock import Mock
         response = Mock()

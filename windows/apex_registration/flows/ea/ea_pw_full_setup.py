@@ -36,6 +36,7 @@ from apex_registration.utils.browser_profile import (  # noqa: E402
     save_page_screenshot,
 )
 from apex_registration.utils.flow_runtime import FlowRuntime  # noqa: E402
+from apex_registration.recovery import restore_checkpoint, transport_failure
 
 from . import try_ea_once as protocol  # noqa: E402
 from . import ea_pw_register as pw_reg  # noqa: E402
@@ -732,8 +733,14 @@ def ensure_myaccount_session(
         if navigate:
             try:
                 current.goto(target_url, wait_until="domcontentloaded", timeout=timeout_ms)
-            except PWTimeout:
-                log("myaccount navigation timed out; checking current login state")
+            except Exception as exc:
+                if isinstance(exc, PWTimeout):
+                    log("myaccount navigation timed out; checking current login state")
+                elif transport_failure(exc):
+                    log(f"myaccount transport interrupted on attempt {attempt + 1}")
+                    continue
+                else:
+                    raise
         pw_link.dismiss_cookies(current)
         pw_link.dismiss_password_save(current)
         pw_link.ensure_remember_device(current)
@@ -935,6 +942,7 @@ def main() -> int:
         ea_email = ea_mailbox["email"]
 
     previous_registration = {}
+    saved_run = json.loads(OUT_RESULT.read_text()) if OUT_RESULT.is_file() else {}
     if skip_register and OUT_EA_RESULT.is_file():
         try:
             previous_registration = json.loads(OUT_EA_RESULT.read_text())
@@ -970,6 +978,9 @@ def main() -> int:
         "notes": [],
         "skipped_ea_emails": [],
     }
+    # A fresh browser must retain every commit marker, including OAuth handoff
+    # and a pending 2FA secret. Errors belong to the previous attempt only.
+    restore_checkpoint(result, saved_run)
     save_checkpoint(result)
 
     if missing_steam_input:
@@ -985,8 +996,8 @@ def main() -> int:
 
     country = pick_register_country()
     dob_month, dob_day, dob_year = protocol.random_adult_dob()
-    origin_id = rand_gamer_id()
-    password = protocol.rand_password()
+    origin_id = result.get("ea_origin_id") or rand_gamer_id()
+    password = result.get("ea_password") or protocol.rand_password()
     if skip_register:
         prev = previous_registration
         origin_id = (
@@ -997,7 +1008,7 @@ def main() -> int:
         password = (
             os.environ.get("EA_PASSWORD", "").strip()
             or prev.get("password")
-            or ""
+            or result.get("ea_password") or ""
         )
         if not password:
             result.update(error_code="ea_resume_credentials_missing", error_message="继续已有 EA 账号需要已保存的密码", stage="preflight", needs_review=True)
@@ -1093,35 +1104,13 @@ def main() -> int:
                 break
             try:
                 if not pw_reg.browser_still_connected(browser, context):
-                    log(
-                        "WARN fingerprint window dropped; reopening "
-                        f"attempt={reg_attempt}"
-                    )
-                    browser, context, page, bit_client, bit_profile_id = (
-                        attach_task_browser(
-                            playwright, proxy=proxy, seed=ea_email
-                        )
-                    )
+                    raise RuntimeError("Browser has been closed")
                 RUNTIME.start("open_register", "open_register", "打开 EA 注册页面", 150)
                 page = pw_reg.goto_register(page)
             except Exception as exc:
-                log(f"WARN open register attempt {reg_attempt} failed: {exc}")
-                if reg_attempt < 4:
-                    try:
-                        browser, context, page, bit_client, bit_profile_id = (
-                            attach_task_browser(
-                                playwright, proxy=proxy, seed=ea_email
-                            )
-                        )
-                    except Exception as reopen_exc:
-                        log(f"WARN reopen fingerprint: {reopen_exc}")
-                    time.sleep(2)
-                    continue
-                result["ea_failure_reason"] = "open_register_failed"
-                result["error_code"] = "ea_proxy_error" if "proxy" in str(exc).lower() else "ea_network_error"
-                save_checkpoint(result)
-                close_task_browser(browser, result, bit_client, bit_profile_id)
-                return 1
+                log(f"WARN open register attempt {reg_attempt} failed: {type(exc).__name__}")
+                # The supervisor verifies cleanup before reopening the browser.
+                raise
 
             html = document_html(page)
             log(f"landed {safe_url(page.url)} len={len(html)}")
@@ -1334,8 +1323,7 @@ def main() -> int:
         session_ready = ensure_myaccount_session(page, context, ea_mailbox, password, origin_id)
         if not session_ready:
             log("FAIL: registration and account session remain unconfirmed")
-            result["ea_registered"] = False
-            result["account_login_verified"] = False
+            # Losing this browser session does not undo a previously verified account.
             result["error_code"] = "myaccount_session_failed"
             result["error_message"] = "EA 创建已提交，但登录和账号中心状态未确认，凭据已保留待复核"
             result["needs_review"] = True
@@ -1361,7 +1349,7 @@ def main() -> int:
         # =====================================================================
         # PHASE 2: Steam Linking (Same browser session & proxy)
         # =====================================================================
-        if skip_steam:
+        if skip_steam or result.get("steam_link"):
             log("Steam link skipped by configuration")
         else:
             result["stage"] = "steam_oauth"
@@ -1404,6 +1392,8 @@ def main() -> int:
 
                 # Check if already linked
                 conn_res = am_json("/am/data/1/connected-accounts")
+                if not conn_res.get("ok"):
+                    raise FullSetupError("steam_link_status_unavailable", "无法读取 EA 关联状态，保留原配对后恢复", "link_verify")
                 already_linked = pw_link.steam_connection_from_payload(conn_res.get("payload") or {})
                 if already_linked.get("status") == "linked":
                     persona = already_linked.get("persona") or pw_link.extract_linked_steam_persona(page)
@@ -1413,6 +1403,17 @@ def main() -> int:
                     steam_linked = True
                     save_checkpoint(result)
                     break
+
+                if steam_oauth_handed_off(result):
+                    # A lost callback is not proof that authorization failed.
+                    # Reconcile only; never click Allow again in a new browser.
+                    verify_res = pw_link.wait_for_steam_linked(page, timeout_ms=45_000)
+                    if verify_res.get("status") == "linked":
+                        result.update(steam_link=True, linked_steam_persona=verify_res.get("persona"))
+                        save_checkpoint(result)
+                        steam_linked = True
+                        break
+                    raise FullSetupError("steam_link_commit_unconfirmed", "Steam 授权已提交，EA 最终关联状态仍未确认，保留原配对", "link_verify")
 
                 # Click Steam tile
                 tile_clicked = pw_link.click_steam_tile(page)
@@ -1729,7 +1730,7 @@ def main() -> int:
         # =====================================================================
         # PHASE 3: 2FA Binding (Same browser session & proxy)
         # =====================================================================
-        if skip_2fa:
+        if skip_2fa or result.get("totp"):
             log("2FA setup skipped by configuration")
         else:
             result["stage"] = "tfa_setup"
@@ -1752,13 +1753,20 @@ def main() -> int:
 
                 # Check if already enabled
                 tfa_check = am_json("/am/data/1/security-privacy")
+                if not tfa_check.get("ok"):
+                    raise FullSetupError("tfa_status_unavailable", "无法读取 EA 2FA 状态，保留已有密钥", "tfa_setup")
                 if pw_link.app_2fa_enabled(tfa_check.get("payload") or {}):
                     log("2FA is ALREADY enabled on this EA account!")
                     if not result.get("totp_secret"):
+                        result["tfa_existing_enabled"] = True
+                        save_checkpoint(result)
                         raise FullSetupError("tfa_existing_secret_missing", "EA 已开启 APP 2FA，但本任务没有可验证的密钥", "tfa_setup")
                     checkpoint_tfa_enabled(result)
                     tfa_success = True
                     break
+
+                if result.get("totp_secret"):
+                    raise FullSetupError("tfa_activation_unconfirmed", "已保存 Authenticator 密钥，激活尚未确认；保留密钥且不重新生成", "tfa_activation")
 
                 # Trigger 2FA Enable
                 try:
@@ -1933,7 +1941,8 @@ def main() -> int:
                 result["error_code"] = "roxy_unavailable"
                 result["error_message"] = f"RoxyBrowser 无法打开指纹窗口：{detail[:300]}"
             else:
-                result["error_code"] = "ea_action_timeout" if isinstance(exc, PWTimeout) else "ea_full_setup_crashed"
+                result["error_code"] = ("ea_network_error" if transport_failure(exc) else
+                                        "ea_action_timeout" if isinstance(exc, PWTimeout) else "ea_full_setup_crashed")
                 result["stage"] = RUNTIME.operation.get("stage") or result["stage"]
                 result["error_message"] = f"{name} ({RUNTIME.operation.get('name')}): {detail[:300]}"
                 result["needs_review"] = True

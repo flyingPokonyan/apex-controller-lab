@@ -459,7 +459,7 @@ def human_click(page, selector_or_locator, timeout: int = 8000) -> bool:
 
 
 LOGIN_PASSWORD_ERROR_RE = re.compile(
-    r"憑證不正確|凭证不正确|不正确或已过期|incorrect or expired|"
+    r"憑證不正確|凭证不正确|不正确或已过期|incorrect or (?:have )?expired|"
     r"invalid credentials|wrong password|password is incorrect",
     re.I,
 )
@@ -650,6 +650,8 @@ def complete_ea_login_form(
     while time.monotonic() < deadline:
         if on_myaccount(page):
             return True
+        if filled_password and login_password_rejected(page):
+            raise LoginFormError("ea_login_credentials_rejected", "EA 拒绝登录凭据，注册结果仍待确认")
         if require_transition:
             from . import ea_pw_link_2fa as pw_link
             if pw_link.is_login_otp_page(page_blob(page), page.url, page.title()):

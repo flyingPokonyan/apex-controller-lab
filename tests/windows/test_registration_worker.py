@@ -103,6 +103,87 @@ class RegistrationWorkerTests(unittest.TestCase):
         self.assertTrue(launch.call_args.kwargs['sync_only'])
         self.assertEqual(launch.call_args.args[1], work)
 
+    def retry_checkpoint(self, work, **extra):
+        write_json(work / 'windows_trial.json', {'task_id': 'task-0'})
+        result = dict(ea_creation_submitted=True, ea_registered=False, ea_password='saved',
+                      ea_origin_id='same-player', stage='verify_account', error_code='ea_network_error')
+        result.update(extra)
+        write_json(work / 'ea_full_setup_result.json', result)
+        write_json(work / 'flow_browsers.json', ['owned-profile'])
+
+    def test_network_failure_retries_same_task_only_after_cleanup(self):
+        order = []
+        def launch(task, work, **kwargs):
+            order.append('launch')
+            if order.count('launch') == 1:
+                self.retry_checkpoint(work)
+                return self.child(1)
+            self.assertFalse(kwargs['sync_only'])
+            self.assertEqual(json.loads((work / 'started.json').read_text())['attempts'], 2)
+            self.assertEqual(json.loads((work / 'flow_operation.json').read_text()), {})
+            return self.child(0)
+        self.worker.bit.cleanup.side_effect = lambda ids, sleep: order.append(('cleanup', ids))
+        with patch.object(self.worker, 'launch', side_effect=launch), patch.object(self.worker, 'mark_interrupted') as finish:
+            self.worker.run_batch(self.batch(), self.ea)
+        self.assertEqual(order[:3], ['launch', ('cleanup', ['owned-profile']), 'launch'])
+        finish.assert_not_called()
+        self.assertEqual(len(self.finishes()), 1)
+
+    def test_repeated_failure_stops_after_three_attempts_even_across_restart(self):
+        work = self.worker.root / 'batch-one' / 'task-0'
+        self.retry_checkpoint(work)
+        write_json(work / 'started.json', {'started': True, 'attempts': 2})
+        with patch.object(self.worker, 'launch', return_value=self.child(1)) as launch, \
+                patch.object(self.worker, 'mark_interrupted') as finish:
+            self.worker.run_batch(self.batch(), self.ea)
+        self.assertEqual(launch.call_count, 1)
+        self.assertFalse(launch.call_args.kwargs['sync_only'])
+        finish.assert_called_once()
+        self.assertEqual(json.loads((work / 'started.json').read_text())['attempts'], 3)
+
+    def test_step_timeout_can_recover_without_resetting_total_budget(self):
+        import time
+        first_started = time.time() - 10
+        def launch(task, work, **kwargs):
+            state = json.loads((work / 'started.json').read_text())
+            if state['attempts'] == 1:
+                self.retry_checkpoint(work, error_code=None)
+                state['firstStartedAt'] = first_started
+                write_json(work / 'started.json', state)
+                write_json(work / 'flow_operation.json', {'deadline': time.monotonic() - 100, 'stage': 'verify_account'})
+                child = self.child(None)
+                def stop():
+                    child.returncode = -15
+                    child.poll.return_value = -15
+                child.terminate.side_effect = stop
+                return child
+            self.assertEqual(state['firstStartedAt'], first_started)
+            return self.child(0)
+        with patch.object(self.worker, 'launch', side_effect=launch) as spawn, patch.object(self.worker, 'mark_interrupted') as finish:
+            self.worker.run_batch(self.batch(), self.ea)
+        self.assertEqual(spawn.call_count, 2)
+        finish.assert_not_called()
+
+    def test_exhausted_wall_clock_only_uploads_and_does_not_reset(self):
+        import time
+        work = self.worker.root / 'batch-one' / 'task-0'
+        self.retry_checkpoint(work)
+        write_json(work / 'started.json', {'attempts': 1, 'firstStartedAt': time.time() - self.worker.timeout - 1})
+        with patch.object(self.worker, 'launch', return_value=self.child(0)) as launch:
+            self.worker.run_batch(self.batch(), self.ea)
+        self.assertTrue(launch.call_args.kwargs['sync_only'])
+
+    def test_recovery_cleanup_failure_does_not_launch_another_browser(self):
+        def launch(task, work, **kwargs):
+            self.retry_checkpoint(work)
+            return self.child(1)
+        self.worker.bit.cleanup.side_effect = RuntimeError('still running')
+        with patch.object(self.worker, 'launch', side_effect=launch) as spawn:
+            self.worker.run_batch(self.batch(), self.ea)
+        self.assertEqual(spawn.call_count, 1)
+        self.assertEqual(self.finishes(), [])
+        self.ea.ensure_started.assert_not_called()
+
     def test_live_orphan_child_blocks_recovery_upload_and_new_work(self):
         work = self.worker.root / 'batch-one' / 'task-0'
         write_json(work / 'started.json', {'started': True, 'pid': 123})
