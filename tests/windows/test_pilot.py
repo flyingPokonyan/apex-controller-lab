@@ -151,6 +151,26 @@ class PilotTest(unittest.TestCase):
             monotonic=lambda: self.now,
         )
 
+    def test_game_restriction_uses_escape_and_ends_without_continue_loop(self):
+        self.enable_overlays()
+        self.screen(titleContinue=('继续', .99))
+        self.overlay_provider.readings['gameAccountRestriction'] = ('错误 客户端中的游戏账户已被封禁。[1]', .99)
+        for at in [0.0, 1.0, 2.0, 3.0]:
+            self.now = at
+            self.pilot.step()
+            if self.pilot.session_outcome:
+                break
+        self.assertEqual(self.pilot.session_outcome, 'GAME_RESTRICTED')
+        self.assertEqual([c for c in self.sender.calls if c[0] != 'releaseAll'], [('tap', 1, self.pilot.key_tap_ms)])
+        self.assertIn('GAME_ACCOUNT_RESTRICTED', self.recorder.names())
+
+    def test_generic_error_does_not_become_game_account_restriction(self):
+        self.enable_overlays()
+        self.overlay_provider.readings['gameAccountRestriction'] = ('错误 连接超时 请重试', .99)
+        self.stall()
+        self.assertIsNone(self.pilot.session_outcome)
+        self.assertNotIn('GAME_ACCOUNT_RESTRICTED', self.recorder.names())
+
     def screen(self, **readings: tuple[str, float]) -> None:
         self.provider.readings = dict(readings)
 

@@ -48,7 +48,32 @@ class LoginFieldsTest(unittest.TestCase):
         driver._type_secret = lambda _: None
         driver._click_point = lambda *_args: None
         driver._click = lambda *_args: None
+        driver._verify_focused_login_input = lambda *_args: False
         return driver
+
+    def test_ocr_zero_letter_confusion_uses_exact_field_readback(self):
+        from unittest.mock import patch
+        driver = self.driver()
+        driver._focus = lambda _hwnd: None
+        # Exercise the real readback comparison, not the fixture's stub.
+        verify = WindowsEaHybridDriver._verify_focused_login_input.__get__(driver)
+        with patch('apex_automation.ea_app_win32.read_focused_account', return_value='user0@example.test'):
+            self.assertTrue(verify(1, 'user0@example.test'))
+            self.assertFalse(verify(1, 'userO@example.test'))
+        with patch('apex_automation.ea_app_win32.read_focused_account', return_value=None):
+            self.assertFalse(verify(1, 'user0@example.test'))
+
+    def test_failed_ocr_can_submit_only_after_exact_native_readback(self):
+        driver = self.driver()
+        driver._observe = lambda _: self.email
+        driver._verify_focused_login_input = lambda _hwnd, value: value == self.credentials.login_identifier
+        submissions = []
+        driver._submit = lambda *_args: submissions.append(True) or 'enter'
+        driver._wait_for_page = lambda *_args, **_kwargs: self.clean_password
+        result = driver._submit_login_identifier(1, self.email, self.credentials)
+        self.assertEqual(result.page, EaPage.PASSWORD)
+        self.assertTrue(driver._login_identifier_verified)
+        self.assertEqual(submissions, [True])
 
     def test_screenshot_clicks_inside_email_field_not_more_confident_label(self):
         point, target = WindowsEaHybridDriver._login_field_anchor(self.email)

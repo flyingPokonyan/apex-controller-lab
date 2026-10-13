@@ -208,6 +208,15 @@ class PlaySessionRunnerTest(unittest.TestCase):
         self.assertEqual(result.error_code, "KNOWN_STATE_STALL_UNRECOVERED")
         self.assertIn("已知页面", result.error)
 
+    def test_game_account_restriction_finishes_as_failure_for_lease_cleanup(self):
+        identity = SessionIdentity.from_runner_settings(self.settings, self.verification)
+        FakePilot.outcome = 'GAME_RESTRICTED'
+        with patch('apex_automation.play_session.CapabilityPilot', FakePilot):
+            result = self.runner.run(identity, ContinuePlayPolicy(), object())
+        self.assertEqual(result.status, 'FAILED')
+        self.assertEqual(result.error_code, 'APEX_GAME_ACCOUNT_RESTRICTED')
+        self.assertEqual(result.exit_code, 1)
+
     def test_update_interruption_releases_input_and_persists_unfinished_run(self):
         identity = SessionIdentity.from_runner_settings(self.settings, self.verification)
         with (

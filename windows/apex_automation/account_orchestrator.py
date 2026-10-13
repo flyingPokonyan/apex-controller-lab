@@ -1400,6 +1400,7 @@ class AccountOrchestrator:
                     self.maintenance.pulse("BETWEEN_ACCOUNTS", blocked=False, boundary=True)
                     continue
                 elif not (is_account_ban_reason(result.error_code) or result.error_code in {
+                    "APEX_GAME_ACCOUNT_RESTRICTED",
                     EaCredentialsRejected.reason_code, "RESTART_RECOVERY", "LEASE_UNRECOVERED"
                 }):
                     return 1

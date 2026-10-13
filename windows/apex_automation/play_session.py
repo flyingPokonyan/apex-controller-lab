@@ -386,6 +386,12 @@ class PlaySessionRunner:
                     # result or prevent lease cleanup/report draining.
                     pack_probe.finish(is_current=lease_is_current)
                     metrics.flush(force=True, observedState=pilot.observed_state)
+            elif outcome == "GAME_RESTRICTED":
+                finish_status = "FAILED"
+                error_code = "APEX_GAME_ACCOUNT_RESTRICTED"
+                error_message = "Apex 显示游戏账号限制提示，已发送 Esc 并结束本次任务，账号待复核"
+                finish_detail.update(reason=error_message, errorCode=error_code)
+                exit_code = 1
             elif outcome == "LEASE_UNRECOVERED":
                 error_code = "LEASE_UNRECOVERED"
                 error_message = "租约续租未恢复，已停止游玩并进入清理流程"

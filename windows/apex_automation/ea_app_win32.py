@@ -36,6 +36,7 @@ from .ea_app import (
     EaIdentityFact,
     EaIdentityMismatch,
     EaIdentityUnconfirmed,
+    EaLoginInputUnconfirmed,
     EaLoginRejected,
     EaOtpUnavailable,
     EaUiState,
@@ -43,6 +44,7 @@ from .ea_app import (
     OtpChallenge,
 )
 from .ea_evidence import EaLoginEvidence, is_sensitive_text
+from .ea_login_input import read_focused_account
 from .ea_password_recovery import EaPasswordRecoveryMixin
 from .ea_process import (
     EaDesktopInstallation,
@@ -1000,6 +1002,11 @@ class WindowsEaHybridDriver(EaPasswordRecoveryMixin):
             for token in tokens
         )
 
+    def _verify_focused_login_input(self, hwnd: int, identifier: str) -> bool:
+        self._focus(hwnd)
+        value = read_focused_account(hwnd)
+        return value is not None and self._exact_identifier(value) == self._exact_identifier(identifier)
+
     def _type_secret(self, value: str) -> None:
         inputs: list[INPUT] = []
         for character in value:
@@ -1782,7 +1789,8 @@ class WindowsEaHybridDriver(EaPasswordRecoveryMixin):
             echoed = self._identifier_echoed(typed, credentials.login_identifier)
             self._login_identifier_verified = (
                 typed.page is EaPage.EMAIL
-                and self._verify_login_input(typed, credentials.login_identifier)
+                and (self._verify_login_input(typed, credentials.login_identifier)
+                     or self._verify_focused_login_input(hwnd, credentials.login_identifier))
             )
             self._record("account-typed", typed, fieldTarget=target,
                          identifierEchoed=echoed,
@@ -1794,7 +1802,7 @@ class WindowsEaHybridDriver(EaPasswordRecoveryMixin):
                 raise EaAppAutomationError("EA 账号输入时页面发生变化，已停止提交")
             observation = typed
         if not self._login_identifier_verified:
-            raise EaAppAutomationError("EA 未确认账号已输入编辑框，已停止提交并跳过本次登录")
+            raise EaLoginInputUnconfirmed("EA 未确认账号已输入编辑框，已停止提交并跳过本次登录")
         submit = self._submit(hwnd, typed, ACCOUNT_SUBMIT_RATIO)
         transitioned = self._wait_for_page(
             hwnd,

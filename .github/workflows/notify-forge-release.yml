@@ -37,6 +37,11 @@ jobs:
         run: python -m unittest discover -s tests/windows -p test_managed_update.py -v
       - name: Verify lease cleanup and restart reconciliation
         run: python -m unittest discover -s tests/windows -p test_account_orchestration.py -v
+      - name: Verify game restriction recognition and lease-safe termination
+        run: |
+          python -m unittest discover -s tests/windows -p test_pilot.py -v
+          python -m unittest discover -s tests/windows -p test_play_session.py -v
+          python -m unittest discover -s tests/windows -p test_reporter.py -v
   registration-check:
     runs-on: windows-latest
     timeout-minutes: 10

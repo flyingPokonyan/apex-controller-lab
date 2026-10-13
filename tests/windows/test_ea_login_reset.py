@@ -266,6 +266,7 @@ class LoginResetTest(unittest.TestCase):
                 driver._submit = lambda *_args: "anchor"
                 driver._wait_for_page = lambda *_args, **_kwargs: self.password
                 driver._login_identifier_verified = not echoed
+                driver._verify_focused_login_input = lambda *_args: False
                 if echoed:
                     result = WindowsEaHybridDriver._submit_login_identifier(
                         driver, 1, self.email, self.credentials,

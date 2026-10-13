@@ -96,6 +96,17 @@
   "_keyBindings": "扫描码写死在这里，等于假定了游戏里的键位。这些假定必须和目标账号实际绑的键一致，否则动作照发、游戏没反应，而画面上和「输入没送到」长得一模一样——2026-07-30 就栽在这上面：配置写 V(47)，当时账号绑在 N 上，白查了一轮反作弊。当前假定：1=ESC 安全返回，28=ENTER 安全继续，15=TAB 返回大厅，57=SPACE 确认返回大厅，47=V 近战，16=Q 战术技能，29=LCTRL 单独发射，18=E 发射。改键位的话这里也要跟着改；windows/probe-input.cmd 可以逐个验。另外 Apex 里有相当一批提示是长按而不是点按，那种要靠能力自己的 holdMs 或动作序列内的 durationMs 声明，默认的 keyTapMs 太短。",
   "capabilities": [
     {
+      "id": "close-game-account-restriction",
+      "priority": 200,
+      "states": ["GAME_ACCOUNT_RESTRICTED"],
+      "action": "escapeScanCode",
+      "kind": "key",
+      "actionClass": "idempotent",
+      "maxAttempts": 1,
+      "confirmMs": 1500,
+      "_note": "明确游戏限制弹窗：只发送一次 Esc，然后结束游玩、清理并关闭租约，保留截图待复核，不把游戏 UI 提示写成 EA PID 封禁。"
+    },
+    {
       "id": "confirm-quit-match",
       "priority": 131,
       "states": ["QUIT_MATCH_CONFIRM"],

@@ -56,9 +56,14 @@ class EaIdentityUnconfirmed(EaAppAutomationError):
     reason_code = "IDENTITY_UNCONFIRMED"
 
 
+class EaLoginInputUnconfirmed(EaAppAutomationError):
+    reason_code = "EA_LOGIN_INPUT_UNCONFIRMED"
+
+
 RECOVERABLE_EA_FAILURES = frozenset({
     "EA_UI_UNKNOWN", "IDENTITY_UNCONFIRMED", "IDENTITY_MISMATCH",
     "APEX_START_FAILED", "OTP_TIMEOUT", "EA_SIGNOUT_FAILED", "CAPTURE_UNAVAILABLE",
+    "EA_LOGIN_INPUT_UNCONFIRMED",
 })
 
 

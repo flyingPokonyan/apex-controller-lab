@@ -2115,6 +2115,10 @@ class CapabilityPilot:
             **detail,
         )
         self.notify(f"  ↳ 已执行：{capability.id}（{capability.action}）")
+        if capability.id == "close-game-account-restriction":
+            self._snapshot("game-account-restricted", frame)
+            self.recorder.log("GAME_ACCOUNT_RESTRICTED", reason="游戏显示账号限制提示，已发送 Esc 并结束本次任务")
+            self.session_outcome = "GAME_RESTRICTED"
 
     def _foreground_executable(self) -> str | None:
         executable: str | None = None

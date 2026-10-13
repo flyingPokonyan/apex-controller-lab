@@ -4,6 +4,7 @@
   "defaultMinConfidence": 0.58,
   "_note": "自动游玩需要先于大厅按钮处理的已知覆盖层。它刻意只保留已有真实帧的全局页面，不包含训练任务本身。全屏 OCR 很慢，因此 CapabilityPilot 只在未知画面和会发送菜单输入的画面上低频调用它。",
   "regions": {
+    "gameAccountRestriction": [650, 500, 1900, 720],
     "fullFrame": [0, 0, 2560, 1440],
     "challengePanelTasks": [1720, 280, 2490, 1120],
     "titleCenter": [320, 80, 2240, 760],
@@ -13,6 +14,13 @@
     "bottomLeftBack": [60, 1310, 245, 1370]
   },
   "rules": [
+    {
+      "id": "game-account-restriction",
+      "state": "GAME_ACCOUNT_RESTRICTED",
+      "requirements": [
+        {"region": "gameAccountRestriction", "all": ["错误"], "any": ["游戏账户已被封禁", "游戏帐户已被封禁", "游戏账号已被封禁"], "minConfidence": 0.85}
+      ]
+    },
     {
       "id": "challenge-ranked-road",
       "state": "CHALLENGE_RANKED_ROAD",
