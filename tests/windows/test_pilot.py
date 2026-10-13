@@ -65,6 +65,12 @@ class FakeSender:
     def tap_scan_code(self, scan_code: int, duration_ms: int) -> None:
         self.calls.append(("tap", scan_code, duration_ms))
 
+    def hold_scan_codes(self, scan_codes, duration_ms: int) -> None:
+        self.calls.append(("hold", tuple(scan_codes), duration_ms))
+
+    def move_mouse(self, dx: int, dy: int) -> None:
+        self.calls.append(("move", dx, dy))
+
     def release_all(self) -> None:
         self.calls.append(("releaseAll",))
 
@@ -1369,33 +1375,34 @@ class PilotTest(unittest.TestCase):
             self.pilot.step()
         self.assertEqual(self.sender.calls, [])
 
-    def test_melee_repeats_while_the_match_screen_persists(self) -> None:
+    def test_an_alive_match_looks_and_moves_instead_of_repeating_two_keys(self) -> None:
         self.screen(squadCountAlive=("20 剩余小队数量", 0.98))
-        fired = 0
-        for step in range(20):
-            self.now = step * 1.0
+        gestures: list[str] = []
+        for step in range(40):
+            self.now = step * 0.5
             if self.pilot.step()["decision"]["kind"] == "fire":
-                fired += 1
-        self.assertGreater(fired, 1)
-        melee = self.payload["actions"]["meleeScanCode"]
-        tactical = self.payload["actions"]["tacticalScanCode"]
-        # Nothing but the two periodic keys, and no clicking: a match screen
-        # has no coordinates anyone has measured.
-        self.assertTrue(
-            all(call[0] == "tap" and call[1] in {melee, tactical} for call in self.sender.calls)
-        )
-
-    def test_the_tactical_ability_fires_on_its_own_interval_beside_melee(self) -> None:
-        # Twenty seconds of match at one frame a second: melee every one to
-        # five, the tactical every nine to twelve. Ranking them by priority
-        # alone would have let the faster one starve the slower one out.
-        self.screen(squadCountAlive=("20 剩余小队数量", 0.98))
-        for step in range(20):
-            self.now = step * 1.0
-            self.pilot.step()
-        tactical = self.payload["actions"]["tacticalScanCode"]
-        sent = [call for call in self.sender.calls if call[1] == tactical]
-        self.assertGreaterEqual(len(sent), 2)
+                sent = next(
+                    payload
+                    for event, payload in reversed(self.recorder.events)
+                    if event == "ACTION_SENT"
+                )
+                gestures.append(str(sent["gesture"]))
+        self.assertGreaterEqual(len(gestures), 10)
+        self.assertGreaterEqual(len(set(gestures)), 3)
+        allowed = set(self.payload["actions"]["inMatchLive"]["scanCodes"].values())
+        self.assertTrue(self.sender.calls)
+        for call in self.sender.calls:
+            self.assertIn(call[0], {"tap", "hold", "move"})
+            if call[0] == "tap":
+                self.assertIn(call[1], allowed)
+                self.assertLessEqual(call[2], 1200)
+            elif call[0] == "hold":
+                self.assertTrue(set(call[1]).issubset(allowed))
+                self.assertGreaterEqual(call[2], 1000)
+                self.assertLessEqual(call[2], 5000)
+            else:
+                self.assertLessEqual(abs(call[1]), 320)
+                self.assertLessEqual(abs(call[2]), 80)
 
     # ------------------------------------------------------------ 停滞看门狗
 

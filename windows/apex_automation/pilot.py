@@ -6,12 +6,13 @@ import json
 from pathlib import Path
 import re
 import time
-from typing import Any, Callable, Protocol
+from typing import Any, Callable, Iterable, Protocol
 import unicodedata
 
 import numpy as np
 
 from .capabilities import Capability, CapabilityDispatcher, Decision
+from .match_behavior import FORBIDDEN_SCAN_CODES, REQUIRED_SCAN_CODES, MatchBehavior
 from .frame_normalization import CaptureResolutionMismatch
 from .config import RunnerConfig
 from .diagnostics import PerformanceMetrics
@@ -128,6 +129,8 @@ class PilotGuard(Protocol):
 class PilotSender(Protocol):
     def click(self, x: int, y: int) -> None: ...
     def tap_scan_code(self, scan_code: int, duration_ms: int) -> None: ...
+    def hold_scan_codes(self, scan_codes: Iterable[int], duration_ms: int) -> None: ...
+    def move_mouse(self, dx: int, dy: int) -> None: ...
     def release_all(self) -> None: ...
 
 
@@ -203,6 +206,7 @@ class CapabilityPilot:
         self.overlay_detector = overlay_detector
         self.dispatcher = dispatcher
         self.actions = actions
+        self.match_behavior = MatchBehavior()
         self.sleep = sleep
         self.monotonic = monotonic
         self.notify = notify
@@ -585,21 +589,56 @@ class CapabilityPilot:
             raise ValueError(f"文字点击动作 {action_name} 引用了未知区域 {spec['region']}")
 
     def _validate_sequence(self, action_name: str, spec: object) -> None:
+        if isinstance(spec, dict):
+            self._validate_generated_sequence(action_name, spec)
+            return
         if not isinstance(spec, list) or not spec:
             raise ValueError(f"动作序列 {action_name} 为空")
         for index, raw_step in enumerate(spec, start=1):
-            if not isinstance(raw_step, dict):
-                raise ValueError(f"动作序列 {action_name} 第 {index} 步不是对象")
-            step_type = str(raw_step.get("type", ""))
-            if step_type not in {"tapKey", "wait"}:
-                raise ValueError(
-                    f"动作序列 {action_name} 第 {index} 步类型未知：{step_type}"
-                )
-            duration_ms = int(raw_step.get("durationMs", self.key_tap_ms))
-            if not 0 <= duration_ms <= 10_000:
-                raise ValueError(f"动作序列 {action_name} 第 {index} 步时长无效")
-            if step_type == "tapKey" and not isinstance(raw_step.get("scanCode"), int):
-                raise ValueError(f"动作序列 {action_name} 第 {index} 步没有扫描码")
+            self._validate_sequence_step(action_name, index, raw_step)
+
+    def _validate_generated_sequence(self, action_name: str, spec: dict[str, Any]) -> None:
+        if spec.get("generate") != "inMatchLive":
+            raise ValueError(f"动作序列 {action_name} 的生成器未知")
+        scan_codes = spec.get("scanCodes")
+        if not isinstance(scan_codes, dict):
+            raise ValueError(f"动作序列 {action_name} 没有声明扫描码")
+        for name in REQUIRED_SCAN_CODES:
+            if not isinstance(scan_codes.get(name), int):
+                raise ValueError(f"动作序列 {action_name} 缺少扫描码 {name}")
+        values = [int(scan_codes[name]) for name in REQUIRED_SCAN_CODES]
+        if len(set(values)) != len(values):
+            raise ValueError(f"动作序列 {action_name} 的扫描码重复")
+        if FORBIDDEN_SCAN_CODES.intersection(values):
+            raise ValueError(f"动作序列 {action_name} 使用了会打开菜单或脱离小队的键")
+
+    def _validate_sequence_step(self, action_name: str, index: int, raw_step: object) -> None:
+        if not isinstance(raw_step, dict):
+            raise ValueError(f"动作序列 {action_name} 第 {index} 步不是对象")
+        step_type = str(raw_step.get("type", ""))
+        if step_type not in {"tapKey", "wait", "holdKeys", "moveMouse"}:
+            raise ValueError(f"动作序列 {action_name} 第 {index} 步类型未知：{step_type}")
+        if step_type == "moveMouse":
+            dx = raw_step.get("dx", 0)
+            dy = raw_step.get("dy", 0)
+            if not isinstance(dx, int) or not isinstance(dy, int):
+                raise ValueError(f"动作序列 {action_name} 第 {index} 步鼠标位移不是整数")
+            if abs(dx) > 1200 or abs(dy) > 900:
+                raise ValueError(f"动作序列 {action_name} 第 {index} 步鼠标位移过大")
+            return
+        duration_ms = int(raw_step.get("durationMs", self.key_tap_ms))
+        if not 0 <= duration_ms <= 10_000:
+            raise ValueError(f"动作序列 {action_name} 第 {index} 步时长无效")
+        if step_type == "tapKey" and not isinstance(raw_step.get("scanCode"), int):
+            raise ValueError(f"动作序列 {action_name} 第 {index} 步没有扫描码")
+        if step_type == "holdKeys":
+            scan_codes = raw_step.get("scanCodes")
+            if (
+                not isinstance(scan_codes, list)
+                or not scan_codes
+                or not all(isinstance(code, int) for code in scan_codes)
+            ):
+                raise ValueError(f"动作序列 {action_name} 第 {index} 步没有按键")
 
     # ------------------------------------------------------------------ input
 
@@ -823,28 +862,43 @@ class CapabilityPilot:
                 "fallback": "NO_BUTTON_TEXT",
             }
 
+        gesture: str | None = None
+        if isinstance(spec, dict):
+            scan_codes = {name: int(spec["scanCodes"][name]) for name in REQUIRED_SCAN_CODES}
+            gesture, spec = self.match_behavior.sample(scan_codes)
         executed: list[dict[str, object]] = []
-        for raw_step in spec:
+        for index, raw_step in enumerate(spec, start=1):
             # A sequence can span several seconds. Re-check focus and abort
             # immediately before every input, not merely before the sequence.
             self.guard.ensure_target_foreground()
             self.guard.ensure_not_aborted()
-            step_type = str(raw_step["type"])
-            duration_ms = int(raw_step.get("durationMs", self.key_tap_ms))
-            if step_type == "wait":
-                self.sleep(duration_ms / 1000)
-                executed.append({"type": step_type, "durationMs": duration_ms})
-                continue
-            scan_code = int(raw_step["scanCode"])
-            self.sender.tap_scan_code(scan_code, duration_ms)
-            executed.append(
-                {
-                    "type": step_type,
-                    "scanCode": scan_code,
-                    "durationMs": duration_ms,
-                }
-            )
-        return {"steps": executed}
+            self._validate_sequence_step(capability.action, index, raw_step)
+            executed.append(self._run_sequence_step(raw_step))
+        result: dict[str, object] = {"steps": executed}
+        if gesture is not None:
+            result["gesture"] = gesture
+        return result
+
+    def _run_sequence_step(self, raw_step: dict[str, Any]) -> dict[str, object]:
+        step_type = str(raw_step["type"])
+        if step_type == "wait":
+            duration_ms = int(raw_step["durationMs"])
+            self.sleep(duration_ms / 1000)
+            return {"type": step_type, "durationMs": duration_ms}
+        if step_type == "moveMouse":
+            dx = int(raw_step["dx"])
+            dy = int(raw_step["dy"])
+            self.sender.move_mouse(dx, dy)
+            return {"type": step_type, "dx": dx, "dy": dy}
+        if step_type == "holdKeys":
+            scan_codes = [int(code) for code in raw_step["scanCodes"]]
+            duration_ms = int(raw_step["durationMs"])
+            self.sender.hold_scan_codes(scan_codes, duration_ms)
+            return {"type": step_type, "scanCodes": scan_codes, "durationMs": duration_ms}
+        scan_code = int(raw_step["scanCode"])
+        duration_ms = int(raw_step.get("durationMs", self.key_tap_ms))
+        self.sender.tap_scan_code(scan_code, duration_ms)
+        return {"type": step_type, "scanCode": scan_code, "durationMs": duration_ms}
 
     def _action_evidence(
         self,
@@ -1283,6 +1337,12 @@ class CapabilityPilot:
             if not self._round_active:
                 self._round_active = True
                 self.rounds_started += 1
+                self.match_behavior.begin_life()
+                self.recorder.log(
+                    "MATCH_BEHAVIOR",
+                    mood=self.match_behavior.mood,
+                    roundNumber=self.rounds_started,
+                )
 
     @staticmethod
     def _failed_progression_payload(

@@ -614,23 +614,26 @@ class EnterGameCapabilityTest(unittest.TestCase):
             {"LOBBY_READY_TARGET", "LOBBY_READY_TARGET_FILL_ON"},
         )
 
-    def test_melee_repeats_while_alive_and_stops_everywhere_else(self) -> None:
+    def test_ground_behavior_repeats_while_alive_and_stops_everywhere_else(self) -> None:
         dispatcher = self._dispatcher()
         first = dispatcher.decide("IN_MATCH_ALIVE", 1, 0.0)
-        self.assertEqual(first.capability.action, "meleeScanCode")
-        # The tactical ability shares this screen and keeps its own ten second
-        # interval, so a decision taken while melee cools down belongs to it.
-        second = dispatcher.decide("IN_MATCH_ALIVE", 1, 0.1)
-        self.assertEqual(second.capability.action, "tacticalScanCode")
-        self.assertEqual(dispatcher.decide("IN_MATCH_ALIVE", 1, 1.0).reason, "PERIODIC_COOLDOWN")
-        self.assertEqual(dispatcher.decide("IN_MATCH_ALIVE", 1, 6.0).kind, "fire")
+        self.assertEqual(first.capability.id, "in-match-live")
+        self.assertEqual(first.capability.action, "inMatchLive")
+        self.assertEqual(dispatcher.decide("IN_MATCH_ALIVE", 1, 0.1).reason, "PERIODIC_COOLDOWN")
+        self.assertEqual(dispatcher.decide("IN_MATCH_ALIVE", 1, 1.3).kind, "fire")
+        # One behavior owns the screen. A second metronome would put melee and
+        # the tactical back on their own clocks.
+        self.assertEqual(
+            [item.id for item in self.capabilities.for_state("IN_MATCH_ALIVE")],
+            ["in-match-live"],
+        )
 
-        for state in ("SPECTATING", "POST_MATCH_SUMMARY", "LOBBY_READY_TARGET"):
+        for state in ("SPECTATING", "POST_MATCH_SUMMARY", "LOBBY_READY_TARGET", "FREEFALL"):
             with self.subTest(state=state):
                 decision = self._dispatcher().decide(state, 1, 0.0)
                 self.assertNotEqual(
                     None if decision.capability is None else decision.capability.action,
-                    "meleeScanCode",
+                    "inMatchLive",
                 )
 
     def test_spectating_has_no_capability_at_all(self) -> None:
@@ -647,6 +650,8 @@ class EnterGameCapabilityTest(unittest.TestCase):
             action = self.payload["actions"][capability.action]
             if capability.kind == "key":
                 codes = [action]
+            elif capability.kind == "sequence" and isinstance(action, dict):
+                codes = list(action["scanCodes"].values())
             elif capability.kind == "sequence":
                 codes = [
                     step["scanCode"]
