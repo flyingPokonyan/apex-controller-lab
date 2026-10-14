@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import os
 from pathlib import Path
 import sys
 import time
@@ -784,6 +785,14 @@ def run_account_cycle(
             / "account-cycle.private.json",
             managed=True,
         )
+        clash_path = runner_config_path
+        if clash_path is None and os.environ.get("APEX_RUNNER_CONFIG"):
+            clash_path = Path(os.environ["APEX_RUNNER_CONFIG"]).expanduser()
+        if clash_path is None:
+            default_private = REPOSITORY_ROOT / "windows" / "account-cycle.private.json"
+            clash_path = default_private if default_private.exists() else None
+        from .clash_exit import load_exit_switch
+        exit_switch = load_exit_switch(clash_path)
         if not settings.enabled or settings.device_id is None:
             raise RunnerConfigurationError("托管模式必须启用设备级远程上报")
         if provider is None:
@@ -868,6 +877,7 @@ def run_account_cycle(
             orchestrator = AccountOrchestrator(
                 provider=provider,
                 registration=registration,
+                exit_switch=exit_switch,
                 ea_driver=ea_driver,
                 play_session=play_session,
                 checkpoint_store=AtomicCheckpointStore(

@@ -37,6 +37,8 @@ jobs:
         run: python -m unittest discover -s tests/windows -p test_managed_update.py -v
       - name: Verify lease cleanup and restart reconciliation
         run: python -m unittest discover -s tests/windows -p test_account_orchestration.py -v
+      - name: Verify Clash account-boundary switching
+        run: python -m unittest discover -s tests/windows -p test_exit_switch.py -v
       - name: Verify game restriction recognition and lease-safe termination
         run: |
           python -m unittest discover -s tests/windows -p test_pilot.py -v

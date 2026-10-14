@@ -8,6 +8,7 @@ import time
 from typing import Callable, Protocol
 import uuid
 
+from .clash_exit import ExitNotReady
 from .account_provider import (
     AccountLease,
     AccountProvider,
@@ -128,6 +129,7 @@ class AccountOrchestrator:
         diagnostic: Callable[..., None] | None = None,
         maintenance=None,
         registration=None,
+        exit_switch=None,
     ) -> None:
         self.provider = provider
         self.ea_driver = ea_driver
@@ -145,6 +147,7 @@ class AccountOrchestrator:
         self.diagnostic = diagnostic
         self.maintenance = maintenance
         self.registration = registration
+        self.exit_switch = exit_switch
         self._phase_started_at = time.monotonic()
         self._checkpoint_lock = threading.Lock()
         self._provider_operation_lock = threading.RLock()
@@ -603,6 +606,16 @@ class AccountOrchestrator:
 
         return provide
 
+    def _align_exit(self, lease: AccountLease) -> None:
+        # Only the gap after the previous sign-out and before this login.
+        # A session that is already the leased account keeps its exit.
+        switch = getattr(self, "exit_switch", None)
+        if switch is None:
+            return
+        observation = switch.prepare(lease.exit_country)
+        if isinstance(observation, dict):
+            self.notify(f"账号出口已对齐：{observation['country']}，IP {observation['ip'] or '未返回'}")
+
     def _password_recovery_handler(self, lease):
         def recover(action, credentials):
             try:
@@ -650,6 +663,7 @@ class AccountOrchestrator:
                 raise EaAppAutomationError("EA App 无法确认已退出其他账号")
             current = None
         if current is None:
+            self._align_exit(lease)
             self._update_checkpoint(workflow_phase=WorkflowPhase.EA_SIGNING_IN)
             self.notify("EA 开始自动登录")
             with self._provider_operation_lock:
@@ -1332,6 +1346,9 @@ class AccountOrchestrator:
                     error.reason_code,
                 )
             return self._pause(error.reason_code, manual=True)
+        except ExitNotReady as error:
+            self.notify(f"出口未对准，停止登录：{error}")
+            return self._pause("EXIT_COUNTRY_MISMATCH", manual=True)
         except Exception as error:
             self.notify(
                 f"账号编排异常：{type(error).__name__} @ {self._phase()}：{error}"

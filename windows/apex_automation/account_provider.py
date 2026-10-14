@@ -146,6 +146,7 @@ class AccountLease:
     expected_ea_account_id: str | None = None
     ring_progress: int | None = None
     ring_target: int | None = None
+    exit_country: str = "HK"
 
     def __post_init__(self) -> None:
         if self.lease_fence < 1:
@@ -587,6 +588,18 @@ class HttpAccountProvider:
             )
         return value.astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
 
+    @staticmethod
+    def _exit_country(payload: Mapping[str, object]) -> str:
+        if "exitCountry" not in payload:
+            return "HK"
+        value = payload.get("exitCountry")
+        if not isinstance(value, str) or value.strip().upper() not in {"HK", "US", "JP"}:
+            raise LeaseProviderError(
+                "Provider 响应中的 exitCountry 无效",
+                code="INVALID_PROVIDER_RESPONSE",
+            )
+        return value.strip().upper()
+
     def _validate_identity(self, payload: Mapping[str, object]) -> str:
         identity = payload.get("expectedIdentity")
         if not isinstance(identity, dict) or identity.get("platform") != "ea":
@@ -613,6 +626,7 @@ class HttpAccountProvider:
         assert expires_at is not None and renew_after is not None
         ring_progress = self._optional_int(payload, "ringProgress", minimum=0)
         ring_target = self._optional_int(payload, "ringTarget", minimum=1)
+        exit_country = self._exit_country(payload)
         if (ring_progress is None) != (ring_target is None) or (
             ring_progress is not None
             and ring_target is not None
@@ -632,6 +646,7 @@ class HttpAccountProvider:
             expected_ea_account_id=self._validate_identity(payload),
             ring_progress=ring_progress,
             ring_target=ring_target,
+            exit_country=exit_country,
         )
         known_account = self._lease_accounts.get(lease.lease_id)
         if known_account is not None and known_account != lease.account_id:
