@@ -37,10 +37,12 @@ class WindowsCheckoutTests(unittest.TestCase):
                 windows.os.environ['APEX_REGISTRATION_ATTEMPT'] = str(attempt)
                 windows.apply_bundle(Path(directory), payload)
                 self.assertEqual(windows.os.environ['EA_PROXY'], f'http://{vendor}.example')
+                self.assertEqual(windows.os.environ['EA_PROXY_VENDOR'], vendor)
             payload['registration'].pop('proxies')
             windows.os.environ['APEX_REGISTRATION_ATTEMPT'] = '2'
             windows.apply_bundle(Path(directory), payload)
             self.assertEqual(windows.os.environ['EA_PROXY'], 'http://1024.example')
+            self.assertEqual(windows.os.environ['EA_PROXY_VENDOR'], '1024')
 
     def test_managed_checkout_uses_runner_task_and_never_allocates_another(self):
         from unittest.mock import Mock
@@ -225,7 +227,7 @@ class WindowsCheckoutTests(unittest.TestCase):
             with patch.object(windows, '_refuse_unless_windows'), patch.object(windows, 'acquire_game_lock'), \
                     patch.object(bitbrowser.BitBrowserClient, 'health', return_value=True), \
                     patch.object(windows, 'prepare_bundle', return_value='inventory'), \
-                    patch.object(proxy_probe, 'probe_exit_country', return_value=(None, 'ipinfo.io: ConnectTimeout')), \
+                    patch.object(proxy_probe, 'probe_exit', return_value=(None, 'ipinfo.io: ConnectTimeout')), \
                     patch.object(windows, 'try_sync_result', return_value=True) as sync:
                 self.assertEqual(windows.main(['--output-dir', directory]), 2)
             result = windows.read_json(output, 'ea_full_setup_result.json')

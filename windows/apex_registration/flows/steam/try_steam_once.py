@@ -311,6 +311,18 @@ def load_email_line() -> dict[str, str]:
     }
 
 
+def graph_client() -> requests.Session:
+    client = requests.Session()
+    client.trust_env = False
+    proxy = os.environ.get('STEAM_PROXY', '').strip() or os.environ.get('EA_PROXY', '').strip()
+    if proxy and not direct_mode():
+        parsed = urlparse(proxy)
+        if parsed.scheme == 'socks5':
+            proxy = parsed._replace(scheme='socks5h').geturl()
+        client.proxies = {'http': proxy, 'https': proxy}
+    return client
+
+
 def graph_access_token(email_data: dict[str, str]) -> str:
     data = {
         "client_id": email_data["client_id"],
@@ -318,9 +330,7 @@ def graph_access_token(email_data: dict[str, str]) -> str:
         "grant_type": "refresh_token",
         "scope": "https://graph.microsoft.com/.default",
     }
-    client = requests.Session()
-    if direct_mode():
-        client.trust_env = False
+    client = graph_client()
     r = client.post(
         "https://login.microsoftonline.com/consumers/oauth2/v2.0/token",
         data=data,
@@ -342,9 +352,7 @@ def graph_find_steam_link(access_token: str, *, after_ts: float) -> str | None:
         "$select": "subject,body,receivedDateTime,from",
         "$orderby": "receivedDateTime desc",
     }
-    client = requests.Session()
-    if direct_mode():
-        client.trust_env = False
+    client = graph_client()
     r = client.get(
         "https://graph.microsoft.com/v1.0/me/messages",
         headers=headers,

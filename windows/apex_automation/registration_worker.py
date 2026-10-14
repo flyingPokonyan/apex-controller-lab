@@ -271,6 +271,8 @@ class RegistrationWorker:
             payload = {'finished': True, 'exit_code': 1, 'result': result,
                        'steam_result': read_json(directory / 'steam_register_result.json')}
         payload['finished'] = True
+        from apex_registration.utils.egress import exit_fields
+        payload.update(exit_fields(directory))
         payload['exit_code'] = payload.get('exit_code') if payload.get('exit_code') is not None else 1
         if payload['exit_code'] != 0 and not payload.get('result', {}).get('error_code') and not completed(payload.get('result', {})):
             payload.setdefault('result', {}).update(error_code='runner_interrupted',

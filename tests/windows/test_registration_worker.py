@@ -266,6 +266,16 @@ class RegistrationWorkerTests(unittest.TestCase):
         self.worker.mark_interrupted({'id': 'task-0'}, work)
         self.assertEqual(json.loads(transport.request.call_args.args[3])['result'], result)
 
+    def test_killed_child_uploads_saved_exit_without_an_existing_payload(self):
+        work = self.root / 'killed'
+        write_json(work / 'proxy_exit.json', {'provider': '711', 'attempt': 2, 'ip': '192.0.2.2'})
+        transport = Mock()
+        transport.request.return_value = ProviderHttpResponse(200, {}, b'{"state":"failed"}')
+        self.worker.api.transport = transport
+        self.worker.mark_interrupted({'id': 'task-0'}, work)
+        payload = json.loads(transport.request.call_args.args[3])
+        self.assertEqual((payload['exit']['provider'], payload['exit']['ip']), ('711', '192.0.2.2'))
+
     def test_no_local_registration_file_is_needed_for_dispatch(self):
         self.worker.config_path.unlink()
         self.worker.configure()

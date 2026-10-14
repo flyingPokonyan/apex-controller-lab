@@ -1,0 +1,100 @@
+import json
+import sys
+import tempfile
+import unittest
+from pathlib import Path
+from unittest.mock import Mock, patch
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[2] / 'windows'))
+from apex_registration import cli
+from apex_registration.utils.proxy import ProxyExit
+from apex_registration.utils import proxy_probe
+from apex_registration.utils.egress import exit_fields, public_exit
+from apex_registration.flows.steam import try_steam_once as steam
+
+
+class RegistrationEgressTests(unittest.TestCase):
+    def test_selected_exit_and_retry_vendor_are_saved_without_proxy_credentials(self):
+        with tempfile.TemporaryDirectory() as directory, patch.dict(cli.os.environ, {
+                'EA_PROXY_VENDOR': '1024', 'APEX_REGISTRATION_ATTEMPT': '1', 'EA_REGISTER_REGION': 'US'}, clear=True):
+            output = Path(directory)
+            with patch.object(proxy_probe, 'probe_exit', side_effect=[
+                    (ProxyExit(country='JP', ip='192.0.2.1'), None),
+                    (ProxyExit(country='US', ip='192.0.2.2', asn=1234, org='Example ISP'), None)]):
+                cli.select_sticky_proxy(output, 'http://user:secret@us.1024proxy.io:3000', 'fixture')
+            cli.os.environ.update(EA_PROXY_VENDOR='711', APEX_REGISTRATION_ATTEMPT='2')
+            with patch.object(proxy_probe, 'probe_exit', return_value=(ProxyExit(country='US', ip='2001:db8::2'), None)):
+                cli.select_sticky_proxy(output, 'http://user:secret@proxy.trustsource.live:10000', 'fixture')
+            facts = exit_fields(output)
+            self.assertEqual([(x['attempt'], x['provider'], x['ip']) for x in facts['exits']],
+                [(1, '1024', '192.0.2.2'), (2, '711', '2001:db8::2')])
+            self.assertNotIn('secret', json.dumps(facts))
+            self.assertNotIn('192.0.2.1', json.dumps(facts))
+            # A failed new round cannot reuse the last round's IP.
+            cli.os.environ.update(EA_PROXY_VENDOR='1024', APEX_REGISTRATION_ATTEMPT='3')
+            with patch.object(proxy_probe, 'probe_exit', return_value=(None, 'ConnectTimeout')):
+                with self.assertRaises(RuntimeError):
+                    cli.select_sticky_proxy(output, 'http://user:secret@proxy.example', 'fixture')
+            self.assertEqual(exit_fields(output)['exit']['provider'], '1024')
+            self.assertEqual(exit_fields(output)['exit']['ip'], '')
+            self.assertEqual(len(exit_fields(output)['exits']), 3)
+
+    def test_incognito_never_reports_an_unused_proxy_ip(self):
+        with tempfile.TemporaryDirectory() as directory, patch.dict(cli.os.environ, {
+                'GAME_ACCOUNTS_DESKTOP_BROWSER': 'incognito', 'EA_PROXY_VENDOR': '711'}, clear=True):
+            cli.remember_exit(Path(directory), ProxyExit(country='US', ip='192.0.2.2'))
+            fact = exit_fields(directory)['exit']
+            self.assertEqual((fact['provider'], fact['ip'], fact['country']), ('direct', '', ''))
+
+    def test_sync_uses_saved_facts_even_with_a_different_machine_vendor(self):
+        with tempfile.TemporaryDirectory() as directory, patch.dict(cli.os.environ, {
+                'FORGE_TOKEN': 'fixture', 'FORGE_API_URL': 'https://forge.example', 'EA_PROXY_VENDOR': '1024'}, clear=True):
+            output = Path(directory)
+            cli.write_private_json(output / 'windows_trial.json', {'task_id': 'owned-task'})
+            cli.write_private_json(output / 'proxy_exit.json', {'provider': '711', 'ip': '192.0.2.2',
+                'attempt': 2, 'proxyUrl': 'http://user:secret@proxy.example'})
+            response = Mock()
+            response.__enter__ = Mock(return_value=response)
+            response.__exit__ = Mock(return_value=False)
+            response.read.return_value = b'{"task_id":"owned-task","state":"running"}'
+            with patch.object(cli.urllib.request, 'urlopen', return_value=response) as send:
+                cli.sync_result(output, finished=False)
+            payload = json.loads(send.call_args.args[0].data)
+            self.assertEqual(payload['exit']['provider'], '711')
+            self.assertNotIn('secret', json.dumps(payload))
+
+    def test_public_exit_rejects_credentials_and_invalid_ip(self):
+        fact = public_exit({'provider': '711', 'ip': 'http://u:p@host', 'country': 'usa', 'asn': True,
+                            'org': 'token=private', 'proxyUrl': 'secret'})
+        self.assertEqual((fact['ip'], fact['country'], fact['asn'], fact['org']), ('', '', None, ''))
+
+    def test_probe_keeps_geo_and_fallback_remote_dns(self):
+        session = Mock()
+        session.get.side_effect = [proxy_probe.requests.exceptions.ConnectTimeout('secret'), Mock(text=
+            '{"countryCode":"US","query":"192.0.2.2","as":"AS1234 ISP","org":"ISP"}')]
+        with patch.object(proxy_probe.requests, 'Session') as factory:
+            factory.return_value.__enter__.return_value = session
+            geo, error = proxy_probe.probe_exit('socks5://user:secret@proxy.example')
+        self.assertIsNone(error)
+        self.assertEqual((geo.ip, geo.asn, geo.org), ('192.0.2.2', 1234, 'ISP'))
+        self.assertTrue(session.proxies['https'].startswith('socks5h:'))
+
+    def test_steam_mail_uses_explicit_proxy_and_direct_mode_ignores_system_proxy(self):
+        with patch.dict(cli.os.environ, {'STEAM_PROXY': 'socks5://fixture:secret@proxy.example:3000',
+                'HTTPS_PROXY': 'http://ambient.example', 'NO_PROXY': 'graph.microsoft.com'}, clear=True):
+            with steam.graph_client() as client:
+                self.assertFalse(client.trust_env)
+                self.assertEqual(client.proxies['https'], 'socks5h://fixture:secret@proxy.example:3000')
+            cli.os.environ['ACCOUNT_FLOW_DIRECT'] = '1'
+            with steam.graph_client() as client:
+                self.assertFalse(client.trust_env)
+                self.assertEqual(client.proxies, {})
+
+    def test_both_steam_mail_calls_use_the_assigned_proxy_client(self):
+        with patch.object(steam, 'graph_client') as factory:
+            factory.return_value.post.return_value.json.return_value = {'access_token': 'access'}
+            factory.return_value.get.return_value.status_code = 200
+            factory.return_value.get.return_value.json.return_value = {'value': []}
+            self.assertEqual(steam.graph_access_token({'client_id': 'client', 'refresh_token': 'refresh'}), 'access')
+            self.assertIsNone(steam.graph_find_steam_link('access', after_ts=0))
+            self.assertEqual(factory.call_count, 2)

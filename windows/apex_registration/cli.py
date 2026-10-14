@@ -160,6 +160,7 @@ def apply_bundle(output_dir: Path, payload: dict) -> str:
             raise RuntimeError('Forge 下发的注册代理不完整')
         # This task's assigned vendor takes precedence over machine overrides.
         os.environ['EA_PROXY'] = str(runtime['proxyUrl'])
+        os.environ['EA_PROXY_VENDOR'] = str(runtime.get('proxyVendor') or '')
         os.environ['CAPTCHALY_KEY'] = str(runtime.get('steamCaptchaKey') or '')
         # Select relative to the original assignment, not the last retry's vendor.
         # Existing tasks without a pool keep their assigned vendor and draw a new exit.
@@ -169,6 +170,7 @@ def apply_bundle(output_dir: Path, payload: dict) -> str:
         if attempt > 1 and runtime.get('proxyVendor') in vendors:
             index = (vendors.index(runtime['proxyVendor']) + attempt - 1) % len(vendors)
             os.environ['EA_PROXY'] = str(pool[vendors[index]])
+            os.environ['EA_PROXY_VENDOR'] = vendors[index]
     ea_mailbox = payload["ea_mailbox"]
     steam_mailbox = payload["steam_mailbox"]
     mailboxes = [ea_mailbox]
@@ -308,6 +310,8 @@ def sync_result(output_dir: Path, *, finished: bool, exit_code: int | None = Non
                "register_engine": proto.get("register_engine"), "finished": finished,
                "exit_code": exit_code, "steam_hold_task_id": bundle.get("steam_hold_task_id"),
                "mailbox_updates": bundle.get("mailbox_updates", [])}
+    from .utils.egress import exit_fields
+    payload.update(exit_fields(output_dir))
     write_private_json(output_dir / "forge_pending_result.json", payload)
     if finished:
         # Keep the final result after acknowledgement so the parent cannot
@@ -474,6 +478,42 @@ def proxy_vendor(proxy_url: str) -> str:
     return host or "proxy"
 
 
+def remember_exit(output_dir: Path, geo=None) -> None:
+    from .utils.egress import exit_fields, public_exit
+    provider = os.environ.get('EA_PROXY_VENDOR', '')
+    if not provider:
+        provider = {'711proxy': '711', '1024proxy': '1024', 'resin': 'resin'}.get(
+            proxy_vendor(os.environ.get('EA_PROXY', '')), '')
+    direct = os.environ.get('GAME_ACCOUNTS_DESKTOP_BROWSER', '').lower() in {'chrome', 'chrome-incognito', 'incognito'}
+    if direct:
+        provider, geo = 'direct', None
+    fact = public_exit(dict(provider=provider, attempt=int(os.environ.get('APEX_REGISTRATION_ATTEMPT', '1')),
+        ip=getattr(geo, 'ip', ''), country=getattr(geo, 'country', ''),
+        asn=getattr(geo, 'asn', None), org=getattr(geo, 'org', '') or getattr(geo, 'isp', '')))
+    (output_dir / 'proxy_exit.json').unlink(missing_ok=True)
+    if fact is None:
+        return
+    exits = exit_fields(output_dir).get('exits', [])
+    exits = [item for item in exits if item['attempt'] != fact['attempt']] + [fact]
+    write_private_json(output_dir / 'proxy_exits.json', exits)
+    write_private_json(output_dir / 'proxy_exit.json', fact)
+
+
+def select_sticky_proxy(output_dir: Path, proxy_url: str, seed: str, *, progress=None) -> str:
+    from .utils.proxy_probe import probe_exit
+    # Clear the previous round's current IP before probing this round's vendor.
+    remember_exit(output_dir)
+    selected = None
+    def probe(url):
+        nonlocal selected
+        selected, error = probe_exit(url)
+        return selected.country if selected else None, error
+    chooser = choose_resin_proxy if uses_resin_proxy(proxy_url) else choose_region_proxy
+    sticky = chooser(proxy_url, seed, probe=probe, progress=progress)
+    remember_exit(output_dir, selected)
+    return sticky
+
+
 def configured_proxy() -> str:
     proxy = (os.environ.get("EA_PROXY") or os.environ.get("GAME_ACCOUNTS_REGISTER_PROXY") or "").strip()
     if not proxy:
@@ -622,17 +662,14 @@ def main(argv=None) -> int:
         runtime.start('checkout', 'checkout', '领取本次任务的邮箱和代理', 90)
         source = prepare_bundle(output_dir)
         os.environ["EA_PROXY"] = configured_proxy()
-        from .utils.proxy_probe import probe_exit_country as _probe_exit_country
-
-        chooser = choose_resin_proxy if uses_resin_proxy(os.environ["EA_PROXY"]) else choose_region_proxy
         def proxy_progress(region, attempt, total):
             message = f"检查 {proxy_vendor(os.environ['EA_PROXY'])} 出口 {region}（第 {attempt}/{total} 次）"
             runtime.start('proxy_check', 'proxy_check', message, 120)
             sys.stderr.write(message + '\n')
-        sticky = chooser(
+        sticky = select_sticky_proxy(
+            output_dir,
             os.environ["EA_PROXY"],
             os.environ.get("EA_EMAIL", "windows"),
-            probe=_probe_exit_country,
             progress=proxy_progress,
         )
         os.environ["EA_PROXY"] = sticky
