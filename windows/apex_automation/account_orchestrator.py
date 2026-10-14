@@ -786,8 +786,19 @@ class AccountOrchestrator:
                 cleared = self.ea_driver.clear_cache(before_clear=lambda: self._update_checkpoint(
                     ea_cache_cleanup="REQUESTED",
                 ))
+            except EaCacheCleanupFailed as error:
+                # Clear cache was never confirmed. Signing out plainly lets a
+                # finished TARGET_REACHED lease close instead of pausing into
+                # WAITING_FIX. An in-flight REQUESTED clear still pauses below.
+                if self._checkpoint.ea_cache_cleanup == "REQUESTED":
+                    raise
+                self.notify(f"EA 清缓存失败，改为直接退出登录：{error}")
+                return self.ea_driver.sign_out()
             except EaAppAutomationError as error:
-                raise EaCacheCleanupFailed(str(error)) from error
+                if self._checkpoint.ea_cache_cleanup == "REQUESTED":
+                    raise EaCacheCleanupFailed(str(error)) from error
+                self.notify(f"EA 清缓存失败，改为直接退出登录：{error}")
+                return self.ea_driver.sign_out()
             self._update_checkpoint(
                 ea_cache_cleanup="COMPLETE" if cleared else "SKIPPED_NOT_SIGNED_IN",
             )
