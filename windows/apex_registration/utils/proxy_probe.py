@@ -12,7 +12,7 @@ def probe_exit(proxy_url):
     if parsed.scheme == 'socks5':
         proxy_url = urlunsplit(parsed._replace(scheme='socks5h'))
     targets = [os.environ.get("GAME_ACCOUNTS_PROXY_GEO_URL") or "https://ipinfo.io/json",
-               "http://ip-api.com/json/?fields=status,countryCode,query,as,org,isp"]
+               "http://ip-api.com/json/?fields=status,countryCode,query,as,org,isp,timezone"]
     errors = []
     with requests.Session() as session:
         session.trust_env = False

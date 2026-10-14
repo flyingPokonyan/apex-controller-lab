@@ -306,6 +306,7 @@ class ProxyExit:
     org: str = ""
     hosting: bool = False
     mobile: bool = False
+    timezone: str = ""
 
 
 _ASN_RE = re.compile(r"AS(\d+)", re.I)
@@ -379,6 +380,9 @@ def parse_proxy_exit(body: str) -> ProxyExit:
             as_field = conn.get("asn")
     hosting = bool(payload.get("hosting"))
     mobile = bool(payload.get("mobile"))
+    timezone = str(payload.get("timezone") or "").strip()
+    if not re.fullmatch(r"[A-Za-z0-9_+-]+(?:/[A-Za-z0-9_+-]+)+|UTC|GMT", timezone):
+        timezone = ""
     privacy = payload.get("privacy")
     if isinstance(privacy, dict):
         hosting = hosting or bool(privacy.get("hosting"))
@@ -390,6 +394,7 @@ def parse_proxy_exit(body: str) -> ProxyExit:
         org=org,
         hosting=hosting,
         mobile=mobile,
+        timezone=timezone,
     )
 
 

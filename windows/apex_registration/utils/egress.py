@@ -39,4 +39,11 @@ def exit_fields(directory):
         facts.extend(item for value in values[:100] if (item := public_exit(value)))
     by_attempt = {item['attempt']: item for item in facts}
     exits = sorted(by_attempt.values(), key=lambda item: item['attempt'])
-    return {'exit': exits[-1], 'exits': exits} if exits else {}
+    result = {'exit': exits[-1], 'exits': exits} if exits else {}
+    try:
+        creation = public_exit(json.loads((directory / 'ea_creation_exit.json').read_text(encoding='utf-8')))
+    except (OSError, ValueError):
+        creation = None
+    if creation:
+        result['creationExit'] = creation
+    return result

@@ -43,21 +43,34 @@ def proxy_fields(proxy_url: str) -> dict[str, Any]:
     }
 
 
+def _chrome_major() -> str:
+    raw = os.environ.get("GAME_ACCOUNTS_BIT_CORE", "").strip()
+    return raw if raw.isdigit() else "130"
+
+
 def _fingerprint() -> dict[str, Any]:
-    """Let BitBrowser follow the proxy IP. Hardware stays with the profile."""
-    system = random.choice(("Win32", "MacIntel"))
-    finger: dict[str, Any] = {
+    """One Windows Chrome. Language and timezone follow the proxy exit."""
+    major = _chrome_major()
+    # BitBrowser samples osVersion inside the given set. "11,10" stays on
+    # Windows 11 and 10; a blank value also draws 8 and 7.
+    return {
+        "coreProduct": "chrome",
+        "coreVersion": major,
         "ostype": "PC",
-        "os": system,
+        "os": "Win32",
+        "osVersion": "11,10",
+        "version": major,
+        "userAgent": (
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+            "AppleWebKit/537.36 (KHTML, like Gecko) "
+            f"Chrome/{major}.0.0.0 Safari/537.36"
+        ),
         "isIpCreateTimeZone": True,
         "isIpCreatePosition": True,
         "isIpCreateLanguage": True,
         "isIpCreateDisplayLanguage": True,
+        "webRTC": "0",
     }
-    core = os.environ.get("GAME_ACCOUNTS_BIT_CORE", "130").strip()
-    if core:
-        finger["coreVersion"] = core
-    return finger
 
 
 class BitBrowserClient:

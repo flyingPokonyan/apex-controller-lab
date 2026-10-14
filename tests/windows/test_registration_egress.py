@@ -14,6 +14,25 @@ from apex_registration.flows.steam import try_steam_once as steam
 
 
 class RegistrationEgressTests(unittest.TestCase):
+    def test_creation_exit_survives_a_new_country_on_resume_and_supervisor_upload(self):
+        with tempfile.TemporaryDirectory() as directory, patch.dict(cli.os.environ, {
+                'EA_PROXY_VENDOR': '711', 'APEX_REGISTRATION_ATTEMPT': '1'}, clear=True):
+            output = Path(directory)
+            cli.remember_exit(output, ProxyExit(country='HK', ip='192.0.2.1'))
+            cli.remember_creation_exit(output, {'ea_registered': False})
+            self.assertNotIn('creationExit', exit_fields(output))
+            cli.remember_creation_exit(output, {'ea_creation_submitted': True})
+            cli.os.environ.update(APEX_REGISTRATION_ATTEMPT='2', SKIP_EA_REGISTER='1')
+            cli.remember_exit(output, ProxyExit(country='US', ip='192.0.2.2'))
+            cli.remember_creation_exit(output, {'ea_registered': True})
+            facts = exit_fields(output)
+            self.assertEqual(facts['creationExit']['country'], 'HK')
+            self.assertEqual(facts['creationExit']['ip'], '192.0.2.1')
+            self.assertEqual(facts['exit']['country'], 'US')
+            (output / 'ea_creation_exit.json').unlink()
+            cli.remember_creation_exit(output, {'ea_registered': True})
+            self.assertNotIn('creationExit', exit_fields(output))
+
     def test_selected_exit_and_retry_vendor_are_saved_without_proxy_credentials(self):
         with tempfile.TemporaryDirectory() as directory, patch.dict(cli.os.environ, {
                 'EA_PROXY_VENDOR': '1024', 'APEX_REGISTRATION_ATTEMPT': '1', 'EA_REGISTER_REGION': 'US'}, clear=True):

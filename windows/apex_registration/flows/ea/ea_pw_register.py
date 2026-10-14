@@ -33,6 +33,7 @@ from apex_registration.utils.browser_profile import (  # noqa: E402
     PLAYWRIGHT_CHROME_ARGS,
     pick_register_country,
     playwright_context_options,
+    register_locale,
     playwright_proxy,
     rand_gamer_id,
     save_page_screenshot,
@@ -2048,11 +2049,6 @@ def attach_browser(playwright, *, proxy: str | None, seed: str, on_profile_opene
             if not browser.contexts:
                 raise RuntimeError("fingerprint CDP connected but has no context")
             context = browser.contexts[0]
-            if desktop_window:
-                context.add_init_script(
-                    "Object.defineProperty(Navigator.prototype, 'webdriver', "
-                    "{get: () => undefined});"
-                )
             page = context.pages[0] if context.pages else context.new_page()
             page = ensure_live_page(context, page)
             try:
@@ -2177,7 +2173,8 @@ def main() -> int:
     )
     log(
         f"GET ea.com/register country={country} "
-        f"dob={dob_year}-{dob_month}-{dob_day} lang=zh-HK engine={engine_name}"
+        f"dob={dob_year}-{dob_month}-{dob_day} "
+        f"lang={register_locale().accept_language.split(',')[0]} engine={engine_name}"
     )
 
     account_login_verified = False

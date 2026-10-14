@@ -499,9 +499,41 @@ def remember_exit(output_dir: Path, geo=None) -> None:
     write_private_json(output_dir / 'proxy_exit.json', fact)
 
 
+def remember_creation_exit(output_dir: Path, result: dict) -> None:
+    """Freeze the observed exit at the creation checkpoint, never on a resume."""
+    path = output_dir / 'ea_creation_exit.json'
+    if path.exists() or os.environ.get('SKIP_EA_REGISTER') == '1':
+        return
+    if not any(result.get(key) is True for key in ('ea_creation_submitted', 'ea_registered')):
+        return
+    from .utils.egress import public_exit
+    fact = public_exit(read_json(output_dir, 'proxy_exit.json'))
+    if fact:
+        write_private_json(path, fact)
+
+
+def pin_us_timezone(geo) -> None:
+    """US spans several zones. Other countries use a fixed offset."""
+    os.environ.pop("EA_REGISTER_UTC_OFFSET", None)
+    os.environ.pop("EA_REGISTER_TIMEZONE", None)
+    if os.environ.get("EA_REGISTER_COUNTRY", "").strip().upper() != "US":
+        return
+    from .utils.browser_profile import exit_utc_offset
+
+    offset = exit_utc_offset(geo)
+    if offset is None:
+        return
+    os.environ["EA_REGISTER_UTC_OFFSET"] = str(int(offset))
+    name = str(getattr(geo, "timezone", "") or "").strip()
+    if name:
+        os.environ["EA_REGISTER_TIMEZONE"] = name
+
+
 def select_sticky_proxy(output_dir: Path, proxy_url: str, seed: str, *, progress=None) -> str:
     from .utils.proxy_probe import probe_exit
     # Clear the previous round's current IP before probing this round's vendor.
+    os.environ.pop("EA_REGISTER_UTC_OFFSET", None)
+    os.environ.pop("EA_REGISTER_TIMEZONE", None)
     remember_exit(output_dir)
     selected = None
     def probe(url):
@@ -510,6 +542,7 @@ def select_sticky_proxy(output_dir: Path, proxy_url: str, seed: str, *, progress
         return selected.country if selected else None, error
     chooser = choose_resin_proxy if uses_resin_proxy(proxy_url) else choose_region_proxy
     sticky = chooser(proxy_url, seed, probe=probe, progress=progress)
+    pin_us_timezone(selected)
     remember_exit(output_dir, selected)
     return sticky
 
@@ -702,6 +735,7 @@ def main(argv=None) -> int:
 
     def checkpoint(result):
         nonlocal last_milestone
+        remember_creation_exit(output_dir, result)
         save_checkpoint(result)
         milestone = tuple(bool(result.get(k)) for k in ("ea_creation_submitted", "account_login_verified", "steam_link", "totp_secret", "totp")) + (result.get("error_code"), result.get("stage") == "complete")
         if milestone != last_milestone and any(milestone):

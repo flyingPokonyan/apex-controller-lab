@@ -24,10 +24,11 @@ import requests
 from bs4 import BeautifulSoup
 
 from apex_registration.utils.browser_profile import (  # noqa: E402
-    EA_REGISTER_URL as REGISTER_URL,
+    ea_register_url,
     new_chrome_session,
     pick_register_country,
     rand_gamer_id,
+    register_locale,
 )
 
 ROOT = Path(__file__).resolve().parent
@@ -551,8 +552,10 @@ def main() -> int:
     dob_month, dob_day, dob_year = random_adult_dob()
 
     # 1) open register
-    log(f"GET {REGISTER_URL} country={country} dob={dob_year}-{dob_month}-{dob_day} lang=zh-HK")
-    r = s.get(REGISTER_URL, timeout=45, allow_redirects=True)
+    register_url = ea_register_url()
+    language = register_locale().accept_language.split(",")[0]
+    log(f"GET {register_url} country={country} dob={dob_year}-{dob_month}-{dob_day} lang={language}")
+    r = s.get(register_url, timeout=45, allow_redirects=True)
     r.raise_for_status()
     log(f"landed {r.url} step={cur_step(r.text)} len={len(r.text)}")
     soup = BeautifulSoup(r.text, "html.parser")

@@ -1,18 +1,20 @@
-"""Hong Kong Chrome profile shared by EA/Steam register, probe, and Playwright.
+"""Windows Chrome identity shared by EA/Steam register, probe, and Playwright.
 
-Protocol calls impersonate Chrome TLS via curl_cffi. The browser context uses
-the same locale, language, timezone, and country so the account looks like a
-Hong Kong Windows Chrome user.
+One registration presents one browser: BitBrowser, the curl_cffi protocol
+client, and captcha requests claim the same Chrome major on Windows. Language
+and timezone follow the country of the selected exit rather than a fixed HK.
 """
 
 from __future__ import annotations
 
 import base64
+import datetime as dt
 import hashlib
 import os
 import random
 import re
-from typing import Any
+from dataclasses import dataclass
+from typing import Any, Iterable, Optional
 from urllib.parse import urlparse
 
 try:
@@ -28,6 +30,11 @@ COUNTRY = "HK"
 LOCALE = "zh-HK"
 TIMEZONE = "Asia/Hong_Kong"
 ACCEPT_LANGUAGE = "zh-HK,zh;q=0.9,en;q=0.8"
+_EA_SITE = {
+    "HK": ("zh-hk", "zh_HK"),
+    "US": ("en-us", "en_US"),
+    "JP": ("ja", "ja_JP"),
+}
 EA_REGISTER_URL = "https://www.ea.com/zh-hk/register"
 EA_JUNO_CREATE_URL = (
     "https://accounts.ea.com/connect/auth"
@@ -35,10 +42,130 @@ EA_JUNO_CREATE_URL = (
     "&redirect_uri=https://www.ea.com/login_check"
     "&locale=zh_HK&client_id=EADOTCOM-WEB-SERVER"
 )
-STEAM_ELANG = "7"
-STEAM_LANGUAGE_COOKIE = "tchinese"
-STEAM_TIMEZONE_OFFSET = "28800,0"
-CHROME_IMPERSONATE = "chrome"
+
+
+def ea_register_url() -> str:
+    """Register page for this exit. Resolved when the request is made."""
+    slug, _locale = _EA_SITE[current_country()]
+    return f"https://www.ea.com/{slug}/register"
+
+
+def ea_juno_create_url() -> str:
+    _slug, locale = _EA_SITE[current_country()]
+    return (
+        "https://accounts.ea.com/connect/auth"
+        "?display=junoWeb/create&response_type=code"
+        "&redirect_uri=https://www.ea.com/login_check"
+        f"&locale={locale}&client_id=EADOTCOM-WEB-SERVER"
+    )
+
+
+@dataclass(frozen=True)
+class RegionLocale:
+    accept_language: str
+    steam_language: str
+    steam_elang: str
+    utc_offset: Optional[int]
+    timezone_id: Optional[str]
+
+
+# Steam ELanguage ids: 0 English, 7 Traditional Chinese, 10 Japanese.
+# The US spans several zones, so its offset must come from the exit itself.
+REGION_LOCALES = {
+    "HK": RegionLocale(ACCEPT_LANGUAGE, "tchinese", "7", 8 * 3600, "Asia/Hong_Kong"),
+    "US": RegionLocale("en-US,en;q=0.9", "english", "0", None, None),
+    "JP": RegionLocale("ja,en-US;q=0.9,en;q=0.8", "japanese", "10", 9 * 3600, "Asia/Tokyo"),
+}
+
+
+def current_country() -> str:
+    region = os.environ.get("EA_REGISTER_COUNTRY", "").strip().upper()
+    return region if region in REGION_LOCALES else COUNTRY
+
+
+def register_locale() -> RegionLocale:
+    return REGION_LOCALES[current_country()]
+
+
+def accept_language() -> str:
+    return register_locale().accept_language
+
+
+def exit_utc_offset(geo) -> Optional[int]:
+    """Seconds east of UTC that a browser at this exit would report."""
+    if geo is None:
+        return None
+    if getattr(geo, "utc_offset", None) is not None:
+        return geo.utc_offset
+    name = getattr(geo, "timezone", "")
+    if not name:
+        return None
+    try:
+        from zoneinfo import ZoneInfo
+
+        offset = dt.datetime.now(ZoneInfo(name)).utcoffset()
+    except Exception:
+        # Windows Python has no IANA database unless tzdata is installed.
+        return None
+    return int(offset.total_seconds()) if offset is not None else None
+
+
+def steam_timezone_cookie() -> Optional[str]:
+    """Steam's own ``timezoneOffset`` value, or None when the exit's zone is unknown."""
+    raw = os.environ.get("EA_REGISTER_UTC_OFFSET", "").strip()
+    offset = int(raw) if re.fullmatch(r"-?\d{1,5}", raw) else register_locale().utc_offset
+    return None if offset is None else f"{offset},0"
+
+
+def _chrome_major() -> int:
+    raw = os.environ.get("GAME_ACCOUNTS_BIT_CORE", "").strip()
+    return int(raw) if raw.isdigit() else 130
+
+
+# BitBrowser's kernel; every other client in the task claims this version too.
+CHROME_MAJOR = _chrome_major()
+
+_GREASE_CHARS = (" ", "(", ":", "-", ".", "/", ")", ";", "=", "?", "_")
+_GREASE_VERSIONS = ("8", "99", "24")
+_BRAND_ORDERS = ((0, 1, 2), (0, 2, 1), (1, 0, 2), (1, 2, 0), (2, 0, 1), (2, 1, 0))
+
+
+def sec_ch_ua(major: int) -> str:
+    """The brand list a real Chrome of this major sends; Chromium seeds it with the major."""
+    grease = (
+        f"Not{_GREASE_CHARS[major % 11]}A{_GREASE_CHARS[(major + 1) % 11]}Brand",
+        _GREASE_VERSIONS[major % 3],
+    )
+    brands: list[tuple[str, str]] = [("", "")] * 3
+    order = _BRAND_ORDERS[major % 6]
+    brands[order[0]] = grease
+    brands[order[1]] = ("Chromium", str(major))
+    brands[order[2]] = ("Google Chrome", str(major))
+    return ", ".join(f'"{name}";v="{version}"' for name, version in brands)
+
+
+def impersonation_target(major: int, available: Iterable[str]) -> str:
+    """Newest curl_cffi Chrome profile that is not newer than the claimed browser."""
+    best: Optional[tuple[int, str]] = None
+    for name in available:
+        matched = re.fullmatch(r"chrome(\d+)a?", str(name))
+        if not matched:
+            continue
+        version = int(matched.group(1))
+        if version <= major and (best is None or version > best[0]):
+            best = (version, str(name))
+    return best[1] if best else "chrome"
+
+
+def _curl_targets() -> list[str]:
+    try:
+        from curl_cffi.requests import BrowserType
+    except ImportError:
+        return []
+    return [str(getattr(item, "value", item)) for item in BrowserType]
+
+
+CHROME_IMPERSONATE = impersonation_target(CHROME_MAJOR, _curl_targets())
 HK_GEO = {"longitude": 114.1694, "latitude": 22.3193}
 # Residential centroids used as the jitter base. Keep pins on land, not the harbour.
 _HK_NEIGHBORHOODS = (
@@ -60,9 +187,9 @@ _HK_NEIGHBORHOODS = (
 UA = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
     "AppleWebKit/537.36 (KHTML, like Gecko) "
-    "Chrome/142.0.0.0 Safari/537.36"
+    f"Chrome/{CHROME_MAJOR}.0.0.0 Safari/537.36"
 )
-SEC_CH_UA = '"Google Chrome";v="142", "Chromium";v="142", "Not_A Brand";v="24"'
+SEC_CH_UA = sec_ch_ua(CHROME_MAJOR)
 VIEWPORTS = (
     {"width": 1366, "height": 768},
     {"width": 1440, "height": 900},
@@ -178,7 +305,7 @@ def pick_register_country() -> str:
 def chrome_headers(*, navigate: bool = True) -> dict[str, str]:
     headers = {
         "User-Agent": UA,
-        "Accept-Language": ACCEPT_LANGUAGE,
+        "Accept-Language": accept_language(),
         "Accept": (
             "text/html,application/xhtml+xml,application/xml;q=0.9,"
             "image/avif,image/webp,image/apng,*/*;q=0.8"
@@ -217,16 +344,21 @@ def geolocation_for(seed: str) -> dict[str, float]:
 
 
 def playwright_context_options(seed: str = "") -> dict[str, Any]:
-    return {
+    locale = register_locale()
+    options: dict[str, Any] = {
         "user_agent": UA,
-        "locale": LOCALE,
-        "timezone_id": TIMEZONE,
-        "geolocation": geolocation_for(seed),
-        "permissions": ["geolocation"],
+        "locale": locale.accept_language.split(",")[0],
         "color_scheme": "light",
         "viewport": viewport_for(seed),
-        "extra_http_headers": {"Accept-Language": ACCEPT_LANGUAGE},
+        "extra_http_headers": {"Accept-Language": locale.accept_language},
     }
+    timezone_id = os.environ.get("EA_REGISTER_TIMEZONE", "").strip() or locale.timezone_id
+    if timezone_id:
+        options["timezone_id"] = timezone_id
+    if current_country() == COUNTRY:
+        options["geolocation"] = geolocation_for(seed)
+        options["permissions"] = ["geolocation"]
+    return options
 
 
 def new_chrome_session(proxy_url: str | None = None):

@@ -28,13 +28,11 @@ from bs4 import BeautifulSoup
 # Sibling imports (captcha_run_client) work when this file is launched as a
 # script. Loading it with importlib does not put this directory on sys.path.
 from apex_registration.utils.browser_profile import (  # noqa: E402
-    ACCEPT_LANGUAGE,
-    STEAM_ELANG,
-    STEAM_LANGUAGE_COOKIE,
-    STEAM_TIMEZONE_OFFSET,
     UA,
     chrome_headers,
     new_chrome_session,
+    register_locale,
+    steam_timezone_cookie,
 )
 from apex_registration.utils.proxy import as_http_forward_proxy, with_sticky_session  # noqa: E402
 
@@ -70,21 +68,34 @@ OUT_LOG = ARTIFACT_ROOT / "last_run.log"
 CAPTCHA_RUN_KEY = ""
 
 JOIN_URL = "https://store.steampowered.com/join/"
-BASE_HEADERS = chrome_headers(navigate=False)
-BASE_HEADERS.update(
-    {
-        "Accept": "*/*",
-        "Accept-Language": ACCEPT_LANGUAGE,
-        "User-Agent": UA,
-        "Referer": JOIN_URL,
-        "Origin": "https://store.steampowered.com",
-        "Connection": "keep-alive",
-        "Content-Type": "application/x-www-form-urlencoded; charset=UTF-8",
-        "Sec-Fetch-Dest": "empty",
-        "Sec-Fetch-Mode": "cors",
-        "Sec-Fetch-Site": "same-origin",
-    }
-)
+
+
+def steam_join_headers() -> dict[str, str]:
+    """Headers for this exit. Built per request so the country is already chosen."""
+    headers = chrome_headers(navigate=False)
+    headers.update(
+        {
+            "Accept": "*/*",
+            "Accept-Language": register_locale().accept_language,
+            "User-Agent": UA,
+            "Referer": JOIN_URL,
+            "Origin": "https://store.steampowered.com",
+            "Connection": "keep-alive",
+            "Content-Type": "application/x-www-form-urlencoded; charset=UTF-8",
+            "Sec-Fetch-Dest": "empty",
+            "Sec-Fetch-Mode": "cors",
+            "Sec-Fetch-Site": "same-origin",
+        }
+    )
+    return headers
+
+
+def apply_steam_locale(session) -> None:
+    locale = register_locale()
+    session.cookies.set("Steam_Language", locale.steam_language, domain="steampowered.com")
+    offset = steam_timezone_cookie()
+    if offset is not None:
+        session.cookies.set("timezoneOffset", offset, domain="steampowered.com")
 
 
 def log(msg: str) -> None:
@@ -583,9 +594,8 @@ def open_steam_join(proxy_url: str | None, email: str):
     for attempt in range(1, 4):
         info = parse_proxy(current) if current else None
         session = new_chrome_session(None if info is None else info["url"])
-        session.headers.update(BASE_HEADERS)
-        session.cookies.set("Steam_Language", STEAM_LANGUAGE_COOKIE, domain="steampowered.com")
-        session.cookies.set("timezoneOffset", STEAM_TIMEZONE_OFFSET, domain="steampowered.com")
+        session.headers.update(steam_join_headers())
+        apply_steam_locale(session)
         session.timeout = 45
         log(f"GET join page attempt={attempt}")
         try:
@@ -648,7 +658,7 @@ def main() -> int:
     else:
         log(f"init_id={init_id[:16]}...")
 
-    headers = BASE_HEADERS.copy()
+    headers = steam_join_headers()
     sessionid = None
     email_requested_at = time.time()
     mailbox_index = 0
@@ -728,13 +738,13 @@ def main() -> int:
 
         cookie_str = "; ".join(f"{k}={v}" for k, v in session.cookies.get_dict().items())
         log(f"cookies={list(session.cookies.get_dict().keys())}")
-        headers = BASE_HEADERS.copy()
+        headers = steam_join_headers()
         headers.update({"Cookie": cookie_str, "X-Requested-With": "XMLHttpRequest"})
         data = {
             "email": email_data["email"],
             "captchagid": captcha_gid or steam_gid,
             "captcha_text": token,
-            "elang": STEAM_ELANG,
+            "elang": register_locale().steam_elang,
             "init_id": init_id,
             "guest": "false",
         }
