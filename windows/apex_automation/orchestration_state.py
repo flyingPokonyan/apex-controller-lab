@@ -63,6 +63,7 @@ class OrchestrationCheckpoint:
     cleanup_verified_at: str | None = None
     last_error_code: str | None = None
     ea_recovery_steps: tuple[str, ...] = ()
+    ea_cache_cleanup: str | None = None
     updated_at: str | None = None
 
     def evolve(self, **changes: object) -> "OrchestrationCheckpoint":
@@ -106,6 +107,7 @@ class OrchestrationCheckpoint:
             "cleanupVerifiedAt": self.cleanup_verified_at,
             "lastErrorCode": self.last_error_code,
             "eaRecoverySteps": list(self.ea_recovery_steps),
+            "eaCacheCleanup": self.ea_cache_cleanup,
             "updatedAt": self.updated_at or _now(),
         }
         return {key: value for key, value in values.items() if value is not None}
@@ -156,8 +158,15 @@ class OrchestrationCheckpoint:
             cleanup_verified_at=_optional_string(payload.get("cleanupVerifiedAt")),
             last_error_code=_optional_string(payload.get("lastErrorCode")),
             ea_recovery_steps=_recovery_steps(payload.get("eaRecoverySteps", [])),
+            ea_cache_cleanup=_cache_cleanup(payload.get("eaCacheCleanup")),
             updated_at=_optional_string(payload.get("updatedAt")),
         )
+
+
+def _cache_cleanup(value):
+    if value not in (None, "REQUESTED", "COMPLETE", "SKIPPED_NOT_SIGNED_IN"):
+        raise ValueError("invalid EA cache cleanup state")
+    return value
 
 
 def _recovery_steps(value):

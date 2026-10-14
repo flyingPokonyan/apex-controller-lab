@@ -28,6 +28,12 @@ class EaUiRecoveryExhausted(EaAppAutomationError):
     reason_code = "EA_RECOVERY_EXHAUSTED"
 
 
+class EaCacheCleanupFailed(EaAppAutomationError):
+    """App Recovery did not produce verified cleanup/restart evidence."""
+
+    reason_code = "EA_CACHE_CLEANUP_FAILED"
+
+
 class EaCaptchaRequired(EaAppAutomationError):
     reason_code = "CAPTCHA"
 
@@ -144,6 +150,8 @@ class EaAppDriver(Protocol):
 
     def stop_apex(self, *, settle_launch=False) -> ApexExitEvidence: ...
 
+    def clear_cache(self, *, before_clear: Callable[[], None]) -> bool: ...
+
     def sign_out(self) -> bool: ...
 
 
@@ -194,5 +202,9 @@ class UnavailableEaAppDriver:
         raise AssertionError("unreachable")
 
     def sign_out(self) -> bool:
+        self._unavailable()
+        return False
+
+    def clear_cache(self, *, before_clear: Callable[[], None]) -> bool:
         self._unavailable()
         return False

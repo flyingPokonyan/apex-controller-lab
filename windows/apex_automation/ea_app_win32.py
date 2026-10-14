@@ -32,6 +32,7 @@ from .ea_app import (
     EaApexStartFailed,
     EaCaptchaRequired,
     EaCaptureUnavailable,
+    EaCacheCleanupFailed,
     EaCredentialsRejected,
     EaIdentityFact,
     EaIdentityMismatch,
@@ -138,11 +139,17 @@ IDENTITY_BANDS = (
 INPUT_SETTLE_S = 0.8
 MAX_OTP_ATTEMPTS = 3
 EA_RESTART_TIMEOUT_S = 60.0
+EA_CACHE_RESTART_TIMEOUT_S = 120.0
 APEX_INSTALL_REPAIR_TIMEOUT_S = 180.0
 APEX_LAUNCH_TIMEOUT_S = 90.0
 APEX_UPDATE_TIMEOUT_S = 2 * 60 * 60.0
 APEX_INSTALL_DIR = Path(r"D:\Apex")
 HELP_TERMS = ("help", "帮助")
+APP_RECOVERY_TERMS = ("apprecovery", "应用恢复", "应用程序恢复")
+CLEAR_CACHE_TERMS = ("clearcache", "清除缓存", "清理缓存")
+APP_RECOVERY_CONFIRM_TERMS = (
+    "restarttorunapprecovery", "重新启动以运行应用恢复", "重新启动以运行应用程序恢复",
+)
 RESTART_APP_TERMS = (
     "restartapp",
     "restartapplication",
@@ -2686,6 +2693,120 @@ class WindowsEaHybridDriver(EaPasswordRecoveryMixin):
             raise EaApexStartFailed("EA App Help 菜单未找到 Restart app")
         self._record("restart-requested", help_menu)
         self._click_point(hwnd, *restart_item)
+
+    @staticmethod
+    def _cache_action_point(observation, terms, **ranges):
+        placed = tuple(t for t in observation.tokens if t.confidence >= 0.75)
+        trusted = replace(observation, tokens=placed)
+        point = WindowsEaHybridDriver._anchor(trusted, terms, exact=True, **ranges)
+        if point is not None:
+            return point
+        # Some OCR engines split the two words on a button into separate boxes.
+        for term in terms:
+            for start in range(len(placed)):
+                for size in (2, 3):
+                    group = placed[start:start + size]
+                    if "".join(t.normalized for t in group) == term:
+                        point = phrase_point(group, observation.rect, term, **ranges)
+                        if point is not None:
+                            return point
+        return None
+
+    def clear_cache(self, *, before_clear: Callable[[], None]) -> bool:
+        """Use EA's App Recovery once, without a competing process restart.
+
+        False means the session is already on a pre-login page. True means
+        Clear cache was selected and a new readable surface was observed;
+        neither value replaces the caller's separate sign-out verification.
+        """
+
+        if any(self._process_running(name) for name in APEX_EXECUTABLES):
+            raise EaCacheCleanupFailed("Apex 尚未退出，不能清理 EA 缓存")
+        hwnd = self._ea_window()
+        self._dismiss_expired_session(hwnd)
+        observation = self._observe(hwnd)
+        if observation.page in PRE_LOGIN_PAGES:
+            self._record("cache-clear-skipped-login", observation)
+            return False
+        observation = self._dismiss_cloud_upload_error(hwnd, observation)
+        observation = self._cancel_interrupted_cloud_launch(hwnd, observation)
+        observation = self._dismiss_library_tour(hwnd, observation)
+        observation = self._dismiss_account_ban(hwnd, observation)
+        if self._state(hwnd, observation) is not EaUiState.SIGNED_IN:
+            raise EaCacheCleanupFailed("EA 当前页面未确认登录，不能打开 App Recovery")
+        left, top, right, bottom = observation.rect
+        self._click_point(hwnd, left + round((right - left) * 0.011),
+                          top + round((bottom - top) * 0.018))
+        self.sleep(1.2)
+        for terms, missing in (
+            (HELP_TERMS, "Help"), (APP_RECOVERY_TERMS, "App Recovery"),
+        ):
+            menu = self._observe(hwnd)
+            item = self._cache_action_point(menu, terms, x_range=(0.0, 0.45))
+            if item is None:
+                raise EaCacheCleanupFailed(f"EA 菜单未找到 {missing}")
+            self._click_point(hwnd, *item)
+            self.sleep(1.2)
+
+        deadline = time.monotonic() + 10.0
+        while True:
+            dialog = self._observe(hwnd)
+            clear = self._cache_action_point(dialog, CLEAR_CACHE_TERMS,
+                                 x_range=(0.2, 0.9), y_range=(0.4, 0.9))
+            cancel = self._cache_action_point(dialog, ("cancel", "取消"),
+                                  x_range=(0.2, 0.95), y_range=(0.4, 0.9))
+            if clear is not None and cancel is not None and self._contains_any(
+                replace(dialog, tokens=tuple(t for t in dialog.tokens if t.confidence >= 0.75)),
+                APP_RECOVERY_CONFIRM_TERMS,
+            ):
+                break
+            if time.monotonic() >= deadline:
+                raise EaCacheCleanupFailed("未确认 App Recovery 清缓存弹窗，停止点击")
+            self.sleep(0.5)
+
+        # Persist before the side effect. A worker dying after this point must
+        # not assume success or start another recovery over the pending one.
+        if any(self._process_running(name) for name in APEX_EXECUTABLES):
+            raise EaCacheCleanupFailed("Apex 再次启动，取消清缓存操作")
+        before_clear()
+        self._record("cache-clear-requested", dialog)
+        self._click_point(hwnd, *clear)
+        deadline = time.monotonic() + EA_CACHE_RESTART_TIMEOUT_S
+        transition_deadline = min(deadline, time.monotonic() + 30.0)
+        while self._alive(hwnd) and time.monotonic() < transition_deadline:
+            self.sleep(0.5)
+        if self._alive(hwnd):
+            raise EaCacheCleanupFailed("Clear cache 后原窗口未退出，无法确认清理重启")
+        self._record("cache-clear-window-exited")
+        self._hwnd = None
+        previous = None
+        last_error = None
+        while time.monotonic() < deadline:
+            try:
+                current = self._ea_window()
+                observation = self._observe(current, retries=1)
+                if observation.page is EaPage.EXPIRED_SESSION:
+                    self._dismiss_expired_session(current)
+                    previous = None
+                    continue
+                state = self._state(current, observation)
+                ready = state in (EaUiState.LOGIN, EaUiState.OTP, EaUiState.SIGNED_IN)
+                ready = ready and not self._contains_any(observation, APP_RECOVERY_CONFIRM_TERMS)
+                surface = (current, observation.page)
+                if ready and previous == surface:
+                    self._record("cache-clear-restart-ready", observation, state=state.value)
+                    return True
+                previous = surface if ready else None
+            except EaCaptureUnavailable:
+                raise
+            except EaAppAutomationError as error:
+                previous = None
+                last_error = error
+            self.sleep(1.0)
+        raise EaCacheCleanupFailed(
+            "清缓存后 EA 未在 120 秒内恢复可识别页面"
+            + (f"：{last_error}" if last_error else "")
+        )
 
     def restart_app(self) -> EaUiState:
         """Restart EA through its own menu and wait for a readable session."""

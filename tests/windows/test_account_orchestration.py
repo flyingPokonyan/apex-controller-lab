@@ -473,6 +473,10 @@ class FakeEaDriver:
         self.log.append("ea.sign_out")
         return True
 
+    def clear_cache(self, *, before_clear) -> bool:
+        before_clear()
+        return True
+
 
 class ScriptedLeaseKeeper:
     def __init__(self, lease, *, state=LeaseKeeperState.CURRENT) -> None:

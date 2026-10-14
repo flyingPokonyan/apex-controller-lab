@@ -78,6 +78,13 @@ class Session:
         self.account = None
         return True
 
+    def clear_cache(self, *, before_clear):
+        assert not self.game_running
+        if self.account is None:
+            return False
+        before_clear()
+        return True
+
 
 class LifecycleTest(unittest.TestCase):
     def fixture(self, accounts, bans=()):

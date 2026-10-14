@@ -10,6 +10,10 @@ import math
 import re
 
 EA_STEPS = frozenset(['OTHER',
+ 'cache-clear-skipped-login',
+ 'cache-clear-requested',
+ 'cache-clear-window-exited',
+ 'cache-clear-restart-ready',
  'account-banned',
  'account-banned-close',
  'account-banned-close-failed',

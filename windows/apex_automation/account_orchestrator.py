@@ -24,6 +24,7 @@ from .ea_app import (
     ApexExitEvidence,
     EaAccountBanned,
     EaAppAutomationError,
+    EaCacheCleanupFailed,
     EaApexDownloadRequired,
     EaApexStartFailed,
     EaAppDriver,
@@ -269,6 +270,7 @@ class AccountOrchestrator:
             cleanup_verified_at=None,
             last_error_code=None,
             ea_recovery_steps=(),
+            ea_cache_cleanup=None,
         )
 
     def _clear_lease_checkpoint(self) -> None:
@@ -770,6 +772,27 @@ class AccountOrchestrator:
             result_error_code=result.error_code,
         )
 
+    def _clear_cache_and_sign_out(self) -> bool:
+        # Only terminal lease cleanup calls this. Preflight/leftover sign-out
+        # and other uses of Restart app retain their existing behavior.
+        state = self._checkpoint.ea_cache_cleanup
+        if state == "REQUESTED":
+            raise EaCacheCleanupFailed(
+                "上次清缓存已请求但未确认完成，保留租约等待检查，不重复点击 Clear cache"
+            )
+        if state is None:
+            self.notify("任务收尾：通过 App Recovery 清理 EA 缓存，重启后验证退出登录")
+            try:
+                cleared = self.ea_driver.clear_cache(before_clear=lambda: self._update_checkpoint(
+                    ea_cache_cleanup="REQUESTED",
+                ))
+            except EaAppAutomationError as error:
+                raise EaCacheCleanupFailed(str(error)) from error
+            self._update_checkpoint(
+                ea_cache_cleanup="COMPLETE" if cleared else "SKIPPED_NOT_SIGNED_IN",
+            )
+        return self.ea_driver.sign_out()
+
     def _cleanup_and_close(
         self,
         lease: AccountLease,
@@ -780,7 +803,7 @@ class AccountOrchestrator:
         if not exit_evidence.all_processes_exited:
             return self._pause("APEX_EXIT_TIMEOUT", manual=True)
         self._update_checkpoint(workflow_phase=WorkflowPhase.EA_SIGNING_OUT)
-        signed_out = self.ea_driver.sign_out()
+        signed_out = self._clear_cache_and_sign_out()
         if not signed_out:
             return self._pause("EA_SIGNOUT_FAILED", manual=True)
 
@@ -816,7 +839,10 @@ class AccountOrchestrator:
             return self._pause("APEX_EXIT_TIMEOUT", manual=True)
         self._update_checkpoint(workflow_phase=WorkflowPhase.EA_SIGNING_OUT)
         try:
-            signed_out = self.ea_driver.sign_out()
+            signed_out = self._clear_cache_and_sign_out()
+        except EaCacheCleanupFailed as error:
+            self.notify(f"EA 清缓存失败：{error}")
+            return self._pause(error.reason_code, manual=True)
         except EaUiRecoveryExhausted as error:
             self.notify(f"EA 清理失败：{error.reason_code}：{error}")
             return self._pause(error.reason_code, manual=True)
@@ -979,7 +1005,7 @@ class AccountOrchestrator:
         if phase is WorkflowPhase.APEX_STOPPING:
             return self._cleanup_and_close(lease, result, evidence)
         if phase is WorkflowPhase.EA_SIGNING_OUT:
-            signed_out = self.ea_driver.sign_out()
+            signed_out = self._clear_cache_and_sign_out()
             if not signed_out:
                 return self._pause("EA_SIGNOUT_FAILED", manual=True)
             return self._submit_close(
@@ -1082,7 +1108,9 @@ class AccountOrchestrator:
             self._restart_recovery_pending
             and self._checkpoint.has_lease
             and self._checkpoint.run_state is not OrchestratorRunState.ACTIVE
-            and self._checkpoint.last_error_code != "EA_RECOVERY_EXHAUSTED"
+            and self._checkpoint.last_error_code not in {
+                "EA_RECOVERY_EXHAUSTED", "EA_CACHE_CLEANUP_FAILED",
+            }
         ):
             previous = self._checkpoint.last_error_code
             self._update_checkpoint(
@@ -1253,6 +1281,8 @@ class AccountOrchestrator:
             self.notify(
                 f"EA 自动化失败：{error.reason_code} @ {self._phase()}：{error}"
             )
+            if isinstance(error, EaCacheCleanupFailed):
+                return self._pause(error.reason_code, manual=True)
             if isinstance(error, EaUiRecoveryExhausted):
                 # A failed login is not a broken Runner revision. Try the
                 # existing bounded cleanup once; never abandon an unclean
@@ -1314,6 +1344,10 @@ class AccountOrchestrator:
             resume_phase=None,
             last_error_code=None,
             ea_recovery_steps=(),
+            # resume() is the explicit operator acknowledgement. Automatic
+            # worker recovery must never reset an uncertain cache request.
+            ea_cache_cleanup=(None if self._checkpoint.ea_cache_cleanup == "REQUESTED"
+                              else self._checkpoint.ea_cache_cleanup),
         )
         self.notify(f"已清除本地暂停状态（原因 {previous or '未记录'}）")
         return True
