@@ -140,6 +140,7 @@ INPUT_SETTLE_S = 0.8
 MAX_OTP_ATTEMPTS = 3
 EA_RESTART_TIMEOUT_S = 60.0
 EA_CACHE_RESTART_TIMEOUT_S = 120.0
+APP_RECOVERY_DIALOG_TIMEOUT_S = 15.0
 APEX_INSTALL_REPAIR_TIMEOUT_S = 180.0
 APEX_LAUNCH_TIMEOUT_S = 90.0
 APEX_UPDATE_TIMEOUT_S = 2 * 60 * 60.0
@@ -2648,14 +2649,48 @@ class WindowsEaHybridDriver(EaPasswordRecoveryMixin):
         finally:
             self._update_restart_in_progress = False
 
-    def _request_restart_app(self, hwnd: int) -> None:
-        """Select the exact Help -> Restart app action from EA's main menu."""
+    def _help_menu_failure(
+        self,
+        step: str,
+        observation: EaObservation,
+        message: str,
+    ) -> None:
+        self._record(step, observation)
+        error = EaApexStartFailed(message)
+        error.observation = observation
+        raise error
+
+    def _open_help_menu_item(
+        self,
+        hwnd: int,
+        terms: Sequence[str],
+        step_prefix: str,
+    ) -> None:
+        """Open hamburger, Help, then `terms`, or click `terms` if it is already open.
+
+        Restart app's update banner is the same shortcut: the underlined link
+        sits outside the left menu column, so it is clicked before the menu.
+        Help stays in the left 35% of the window; the submenu item stays in
+        the left 45%. Each of those steps is recorded under `step_prefix`.
+        """
 
         observation = self._observe(hwnd)
-        restart_point = self._app_restart_point(observation)
-        if restart_point is not None:
-            self._record("restart-requested", observation)
-            self._click_point(hwnd, *restart_point)
+        if tuple(terms) == RESTART_APP_TERMS:
+            restart_point = self._app_restart_point(observation)
+            if restart_point is not None:
+                self._record(f"{step_prefix}-requested", observation)
+                self._click_point(hwnd, *restart_point)
+                return
+        # Menu already open: the submenu item is on screen, so click it.
+        opened = self._anchor(
+            observation,
+            terms,
+            x_range=(0.0, 0.45),
+            exact=True,
+        )
+        if opened is not None:
+            self._record(f"{step_prefix}-requested", observation)
+            self._click_point(hwnd, *opened)
             return
         left, top, right, bottom = observation.rect
         width = max(1, right - left)
@@ -2664,7 +2699,7 @@ class WindowsEaHybridDriver(EaPasswordRecoveryMixin):
             left + round(width * 0.011),
             top + round(height * 0.018),
         )
-        self._record("restart-menu-open", observation)
+        self._record(f"{step_prefix}-menu-open", observation)
         self._click_point(hwnd, *hamburger)
         self.sleep(1.2)
 
@@ -2676,23 +2711,89 @@ class WindowsEaHybridDriver(EaPasswordRecoveryMixin):
             exact=True,
         )
         if help_item is None:
-            self._record("restart-help-missing", menu)
-            raise EaApexStartFailed("EA App 主菜单未找到 Help")
+            self._help_menu_failure(
+                f"{step_prefix}-help-missing",
+                menu,
+                "EA App 主菜单未找到 Help",
+            )
         self._click_point(hwnd, *help_item)
         self.sleep(1.2)
 
         help_menu = self._observe(hwnd)
-        restart_item = self._anchor(
+        item = self._anchor(
             help_menu,
-            RESTART_APP_TERMS,
+            terms,
             x_range=(0.0, 0.45),
             exact=True,
         )
-        if restart_item is None:
-            self._record("restart-item-missing", help_menu)
-            raise EaApexStartFailed("EA App Help 菜单未找到 Restart app")
-        self._record("restart-requested", help_menu)
-        self._click_point(hwnd, *restart_item)
+        if item is None:
+            missing = "Restart app" if step_prefix == "restart" else "目标项"
+            self._help_menu_failure(
+                f"{step_prefix}-item-missing",
+                help_menu,
+                f"EA App Help 菜单未找到 {missing}",
+            )
+        self._record(f"{step_prefix}-requested", help_menu)
+        self._click_point(hwnd, *item)
+
+    def _request_restart_app(self, hwnd: int) -> None:
+        """Select the exact Help -> Restart app action from EA's main menu."""
+
+        self._open_help_menu_item(hwnd, RESTART_APP_TERMS, "restart")
+
+    def _close_lingering_menu(self, hwnd: int, observation: EaObservation) -> None:
+        """Dismiss a Help menu that did not open the recovery dialog.
+
+        Escape leaves an already-closed menu closed. Re-clicking the hamburger
+        is only the fallback when that key cannot be delivered.
+        """
+
+        try:
+            self._focus(hwnd)
+            self._tap(VK_ESCAPE)
+        except (AttributeError, EaAppAutomationError):
+            left, top, right, bottom = observation.rect
+            width = max(1, right - left)
+            height = max(1, bottom - top)
+            self._click_point(
+                hwnd,
+                left + round(width * 0.011),
+                top + round(height * 0.018),
+            )
+        self.sleep(0.5)
+
+    def _wait_for_app_recovery_dialog(
+        self, hwnd: int,
+    ) -> tuple[EaObservation, tuple[int, int] | None]:
+        deadline = time.monotonic() + APP_RECOVERY_DIALOG_TIMEOUT_S
+        dialog = self._observe(hwnd)
+        while True:
+            clear = self._cache_action_point(
+                dialog,
+                CLEAR_CACHE_TERMS,
+                x_range=(0.2, 0.9),
+                y_range=(0.4, 0.9),
+            )
+            cancel = self._cache_action_point(
+                dialog,
+                ("cancel", "取消"),
+                x_range=(0.2, 0.95),
+                y_range=(0.4, 0.9),
+            )
+            trusted = replace(
+                dialog,
+                tokens=tuple(token for token in dialog.tokens if token.confidence >= 0.75),
+            )
+            if (
+                clear is not None
+                and cancel is not None
+                and self._contains_any(trusted, APP_RECOVERY_CONFIRM_TERMS)
+            ):
+                return dialog, clear
+            if time.monotonic() >= deadline:
+                return dialog, None
+            self.sleep(0.5)
+            dialog = self._observe(hwnd)
 
     @staticmethod
     def _cache_action_point(observation, terms, **ranges):
@@ -2718,6 +2819,11 @@ class WindowsEaHybridDriver(EaPasswordRecoveryMixin):
         False means the session is already on a pre-login page. True means
         Clear cache was selected and a new readable surface was observed;
         neither value replaces the caller's separate sign-out verification.
+
+        The confirmation dialog is given 15 seconds. If it never appears, the
+        menu is closed and the Help path is tried once more. A menu or dialog
+        that is still missing is recorded, with the screenshot and OCR tokens,
+        before the error is raised.
         """
 
         if any(self._process_running(name) for name in APEX_EXECUTABLES):
@@ -2734,35 +2840,27 @@ class WindowsEaHybridDriver(EaPasswordRecoveryMixin):
         observation = self._dismiss_account_ban(hwnd, observation)
         if self._state(hwnd, observation) is not EaUiState.SIGNED_IN:
             raise EaCacheCleanupFailed("EA 当前页面未确认登录，不能打开 App Recovery")
-        left, top, right, bottom = observation.rect
-        self._click_point(hwnd, left + round((right - left) * 0.011),
-                          top + round((bottom - top) * 0.018))
-        self.sleep(1.2)
-        for terms, missing in (
-            (HELP_TERMS, "Help"), (APP_RECOVERY_TERMS, "App Recovery"),
-        ):
-            menu = self._observe(hwnd)
-            item = self._cache_action_point(menu, terms, x_range=(0.0, 0.45))
-            if item is None:
-                raise EaCacheCleanupFailed(f"EA 菜单未找到 {missing}")
-            self._click_point(hwnd, *item)
-            self.sleep(1.2)
-
-        deadline = time.monotonic() + 10.0
-        while True:
-            dialog = self._observe(hwnd)
-            clear = self._cache_action_point(dialog, CLEAR_CACHE_TERMS,
-                                 x_range=(0.2, 0.9), y_range=(0.4, 0.9))
-            cancel = self._cache_action_point(dialog, ("cancel", "取消"),
-                                  x_range=(0.2, 0.95), y_range=(0.4, 0.9))
-            if clear is not None and cancel is not None and self._contains_any(
-                replace(dialog, tokens=tuple(t for t in dialog.tokens if t.confidence >= 0.75)),
-                APP_RECOVERY_CONFIRM_TERMS,
-            ):
+        dialog: EaObservation | None = None
+        clear: tuple[int, int] | None = None
+        for attempt in range(2):
+            try:
+                self._open_help_menu_item(hwnd, APP_RECOVERY_TERMS, "app-recovery")
+            except EaApexStartFailed as error:
+                missed = getattr(error, "observation", None)
+                if not isinstance(missed, EaObservation):
+                    missed = self._observe(hwnd)
+                self._record("cache-clear-menu-missing", missed)
+                raise EaCacheCleanupFailed(f"EA 菜单未找到 App Recovery：{error}") from error
+            dialog, clear = self._wait_for_app_recovery_dialog(hwnd)
+            if clear is not None:
                 break
-            if time.monotonic() >= deadline:
-                raise EaCacheCleanupFailed("未确认 App Recovery 清缓存弹窗，停止点击")
-            self.sleep(0.5)
+            if attempt == 0:
+                self._close_lingering_menu(hwnd, dialog)
+        else:
+            self._record("cache-clear-dialog-unconfirmed", dialog)
+            raise EaCacheCleanupFailed("未确认 App Recovery 清缓存弹窗，停止点击")
+        if clear is None or dialog is None:
+            raise EaCacheCleanupFailed("未确认 App Recovery 清缓存弹窗，停止点击")
 
         # Persist before the side effect. A worker dying after this point must
         # not assume success or start another recovery over the pending one.

@@ -9,8 +9,14 @@ from unittest.mock import Mock, patch
 import numpy as np
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "windows"))
+from apex_automation.diagnostic_schema import EA_STEPS
 from apex_automation.ea_app import EaCacheCleanupFailed, EaAppAutomationError, EaUiState
-from apex_automation.ea_app_win32 import WindowsEaHybridDriver, EaObservation, APEX_EXECUTABLES
+from apex_automation.ea_app_win32 import (
+    APEX_EXECUTABLES,
+    VK_ESCAPE,
+    EaObservation,
+    WindowsEaHybridDriver,
+)
 from apex_automation.ea_pages import EaPage
 from apex_automation.ocr_obstacles import OcrToken
 from apex_automation.account_provider import FakeAccountProvider
@@ -42,7 +48,11 @@ class CacheUiTest(unittest.TestCase):
             ("Restart to run App Recovery?", 600, 400),
             ("CLEAR CACHE", 700, 600), ("CANCEL", 850, 600))
         self.ready = observation(restarted_page)
-        driver._observe = Mock(side_effect=[self.home, self.help, self.recovery, self.dialog, self.ready, self.ready])
+        driver._observe = Mock(side_effect=[
+            self.home, self.home, self.help, self.recovery, self.dialog, self.ready, self.ready,
+        ])
+        driver._focus = Mock()
+        driver._tap = Mock()
         driver._state = lambda _hwnd, obs: EaUiState.LOGIN if obs.page is EaPage.EMAIL else EaUiState.SIGNED_IN
         driver._process_running = Mock(return_value=False)
         driver._alive = Mock(return_value=False)
@@ -103,12 +113,22 @@ class CacheUiTest(unittest.TestCase):
                 bad = replace(self.dialog, tokens=self.dialog.tokens[:2])
             else:
                 bad = replace(self.dialog, tokens=tuple(replace(t, confidence=.4) for t in self.dialog.tokens))
-            driver._observe.side_effect = [self.home, self.help, self.recovery] + [bad] * 30
+            script = [self.home, self.home, self.help, self.recovery]
+
+            def observe(_hwnd, retries=1, script=script, bad=bad):
+                if driver._tap.called:
+                    return bad
+                if script:
+                    return script.pop(0)
+                return bad
+
+            driver._observe.side_effect = observe
             before = Mock()
             with self.assertRaises(EaCacheCleanupFailed):
                 driver.clear_cache(before_clear=before)
             before.assert_not_called()
-            self.assertEqual(driver._click_point.call_count, 3)
+            self.assertEqual(driver._tap.call_count, 1)
+            self.assertNotIn((7, 700, 600), [call.args for call in driver._click_point.call_args_list])
 
     def test_unchanged_old_window_is_not_recovery_success(self):
         driver = self.driver()
@@ -136,6 +156,132 @@ class CacheUiTest(unittest.TestCase):
         self.assertIsNotNone(WindowsEaHybridDriver._cache_action_point(obs, ("clearcache",)))
         obs = replace(obs, tokens=tuple(replace(t, confidence=.4) for t in obs.tokens))
         self.assertIsNone(WindowsEaHybridDriver._cache_action_point(obs, ("clearcache",)))
+
+    def test_visible_app_recovery_is_clicked_without_reopening_the_menu(self):
+        driver = self.driver()
+        driver._observe.side_effect = [self.home, self.recovery, self.dialog, self.ready, self.ready]
+        self.assertTrue(driver.clear_cache(before_clear=Mock()))
+        self.assertEqual(
+            [call.args[1:] for call in driver._click_point.call_args_list],
+            [(340, 350), (700, 600)],
+        )
+        driver._tap.assert_not_called()
+
+    def test_missing_menu_records_screenshot_and_ocr_before_raising(self):
+        driver = self.driver()
+        library = observation(EaPage.SIGNED_IN, ("Library", 180, 250))
+        driver._observe.side_effect = [self.home, library, library]
+        before = Mock()
+        with self.assertRaisesRegex(EaCacheCleanupFailed, "App Recovery"):
+            driver.clear_cache(before_clear=before)
+        before.assert_not_called()
+        self.assertEqual(driver._click_point.call_count, 1)
+        driver._tap.assert_not_called()
+        steps = [call.args[0] for call in driver._record.call_args_list]
+        self.assertEqual(steps[:2], ["app-recovery-menu-open", "app-recovery-help-missing"])
+        recorded = [
+            call for call in driver._record.call_args_list
+            if call.args[0] == "cache-clear-menu-missing"
+        ]
+        self.assertEqual(len(recorded), 1)
+        shot = recorded[0].args[1]
+        self.assertIsNotNone(shot.frame)
+        self.assertEqual([token.text for token in shot.tokens], ["Library"])
+        self.assertIn("cache-clear-menu-missing", EA_STEPS)
+        for step in (
+            "app-recovery-menu-open",
+            "app-recovery-help-missing",
+            "app-recovery-item-missing",
+            "app-recovery-requested",
+        ):
+            self.assertIn(step, EA_STEPS)
+
+    def _dialog_script(self, driver, second):
+        bad = observation(EaPage.SIGNED_IN, ("Library", 400, 400))
+        first = [self.home, self.home, self.help, self.recovery]
+        cursor = {"i": 0, "j": 0}
+
+        def observe(_hwnd, retries=1):
+            if not driver._tap.called:
+                if cursor["i"] < len(first):
+                    item = first[cursor["i"]]
+                    cursor["i"] += 1
+                    return item
+                return bad
+            if cursor["j"] < len(second):
+                item = second[cursor["j"]]
+                cursor["j"] += 1
+                return item
+            return bad
+
+        driver._observe.side_effect = observe
+        return bad
+
+    def test_unconfirmed_dialog_retries_the_menu_exactly_once(self):
+        driver = self.driver()
+        bad = self._dialog_script(driver, [self.home, self.help, self.recovery])
+        before = Mock()
+        with self.assertRaisesRegex(EaCacheCleanupFailed, "未确认 App Recovery 清缓存弹窗"):
+            driver.clear_cache(before_clear=before)
+        before.assert_not_called()
+        self.assertEqual(driver._tap.call_count, 1)
+        driver._tap.assert_called_once_with(VK_ESCAPE)
+        help_clicks = [call for call in driver._click_point.call_args_list if call.args[1:] == (150, 250)]
+        recovery_clicks = [call for call in driver._click_point.call_args_list if call.args[1:] == (340, 350)]
+        self.assertEqual(len(help_clicks), 2)
+        self.assertEqual(len(recovery_clicks), 2)
+        self.assertNotIn((7, 700, 600), [call.args for call in driver._click_point.call_args_list])
+        recorded = [
+            call for call in driver._record.call_args_list
+            if call.args[0] == "cache-clear-dialog-unconfirmed"
+        ]
+        self.assertEqual(len(recorded), 1)
+        shot = recorded[0].args[1]
+        self.assertIs(shot, bad)
+        self.assertIsNotNone(shot.frame)
+        self.assertEqual([token.text for token in shot.tokens], ["Library"])
+        self.assertIn("cache-clear-dialog-unconfirmed", EA_STEPS)
+
+    def test_dialog_found_on_the_single_retry_clears_once(self):
+        driver = self.driver()
+        self._dialog_script(
+            driver,
+            [self.home, self.help, self.recovery, self.dialog, self.ready, self.ready],
+        )
+        before = Mock()
+        self.assertTrue(driver.clear_cache(before_clear=before))
+        before.assert_called_once()
+        driver._tap.assert_called_once_with(VK_ESCAPE)
+        help_clicks = [call for call in driver._click_point.call_args_list if call.args[1:] == (150, 250)]
+        self.assertEqual(len(help_clicks), 2)
+        self.assertEqual(
+            [call.args for call in driver._click_point.call_args_list].count((7, 700, 600)),
+            1,
+        )
+        steps = [call.args[0] for call in driver._record.call_args_list]
+        self.assertNotIn("cache-clear-dialog-unconfirmed", steps)
+        self.assertIn("cache-clear-requested", steps)
+
+    def test_restart_app_menu_path_is_unchanged(self):
+        driver = object.__new__(WindowsEaHybridDriver)
+        frames = [
+            observation(EaPage.SIGNED_IN, ("Apex Legends", 900, 400)),
+            observation(EaPage.SIGNED_IN, ("Help", 150, 250)),
+            observation(EaPage.SIGNED_IN, ("Restart app", 340, 350)),
+        ]
+        driver._observe = Mock(side_effect=frames)
+        driver._click_point = Mock()
+        driver._record = Mock()
+        driver.sleep = lambda _seconds: None
+        driver._request_restart_app(7)
+        self.assertEqual(
+            [call.args[1:] for call in driver._click_point.call_args_list],
+            [(111, 114), (150, 250), (340, 350)],
+        )
+        self.assertEqual(
+            [call.args[0] for call in driver._record.call_args_list],
+            ["restart-menu-open", "restart-requested"],
+        )
 
 
 class CacheLeaseTest(unittest.TestCase):
@@ -188,6 +334,16 @@ class CacheLeaseTest(unittest.TestCase):
         self.assertEqual(self.store.load().ea_cache_cleanup, "COMPLETE")
         self.assertEqual(self.build().run_once().outcome, AccountCycleOutcome.COMPLETED)
         self.driver.clear_cache.assert_called_once()
+
+    def test_cache_failure_before_click_falls_back_to_sign_out(self):
+        self.driver.clear_cache = Mock(side_effect=EaCacheCleanupFailed("menu missing"))
+        result = self.build().run_once()
+        self.assertEqual(result.outcome, AccountCycleOutcome.COMPLETED)
+        self.assertIsNone(result.error_code)
+        self.assertEqual(self.log, ["apex.stop", "ea.sign_out"])
+        close = next(args for name, args in self.provider.calls if name == "close")
+        self.assertEqual(close[3], "TARGET_REACHED")
+        self.assertIsNone(self.store.load().ea_cache_cleanup)
 
     def test_uncertain_clear_preserves_result_and_blocks_close_and_next_claim(self):
         def fail(*, before_clear):
