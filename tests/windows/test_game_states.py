@@ -33,6 +33,11 @@ LIVE_READINGS: dict[str, dict[str, tuple[str, float]]] = {
         "lobbyModeName": ("迎新赛", 0.999),
         "lobbyPrimaryButton": ("准备", 1.000),
     },
+    "LOBBY_READY_UNRANKED": {
+        "lobbyModeName": ("未上榜", 0.999),
+        "lobbyModeSquad": ("三人赛", 1.000),
+        "lobbyPrimaryButton": ("准备", 1.000),
+    },
     "MODE_PANEL_WELCOME_VISIBLE": {
         "modePanelWelcomeCard": ("迎新赛", 0.999),
         "modePanelTargetCard": ("进化版机器人大逃杀", 0.999),
@@ -166,9 +171,18 @@ class GameStateRoutingTest(unittest.TestCase):
         detector = self._detector({})
         enabled = [rule.state for rule in detector.rules if rule.enabled]
         self.assertEqual(enabled[-1], "LOBBY_READY_OTHER")
-        for named in ("LOBBY_READY_TRAINING", "LOBBY_READY_TARGET", "LOBBY_READY_WELCOME"):
+        for named in (
+            "LOBBY_READY_TRAINING",
+            "LOBBY_READY_TARGET",
+            "LOBBY_READY_WELCOME",
+            "LOBBY_READY_UNRANKED",
+        ):
             with self.subTest(state=named):
                 self.assertLess(enabled.index(named), enabled.index("LOBBY_READY_OTHER"))
+        self.assertLess(
+            enabled.index("LOBBY_READY_WELCOME"),
+            enabled.index("LOBBY_READY_UNRANKED"),
+        )
         self.assertLess(
             enabled.index("MODE_PANEL_WELCOME_VISIBLE"),
             enabled.index("MODE_PANEL_TARGET_VISIBLE"),
@@ -199,6 +213,25 @@ class GameStateRoutingTest(unittest.TestCase):
                     {"lobbyModeName": (mode, 0.999), "lobbyPrimaryButton": ("准备", 1.000)}
                 ).analyze(np.zeros((4, 4, 3), np.uint8))
                 self.assertEqual(lobby.decision.state, "LOBBY_READY_OTHER")
+
+        unranked = self._detector(
+            {
+                "lobbyModeName": ("未上榜", 0.999),
+                "lobbyModeSquad": ("三人赛", 1.000),
+                "lobbyPrimaryButton": ("准备", 1.000),
+            }
+        ).analyze(np.zeros((4, 4, 3), np.uint8))
+        self.assertEqual(unranked.decision.state, "LOBBY_READY_UNRANKED")
+
+        # 训练标题优先。下一行即使读到三人赛，也不能变成可以按准备的未上榜。
+        training = self._detector(
+            {
+                "lobbyModeName": ("训练", 1.000),
+                "lobbyModeSquad": ("三人赛", 1.000),
+                "lobbyPrimaryButton": ("准备", 1.000),
+            }
+        ).analyze(np.zeros((4, 4, 3), np.uint8))
+        self.assertEqual(training.decision.state, "LOBBY_READY_TRAINING")
 
         graduated_panel = self._detector(
             {

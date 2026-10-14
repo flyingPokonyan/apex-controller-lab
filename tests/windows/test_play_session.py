@@ -208,6 +208,20 @@ class PlaySessionRunnerTest(unittest.TestCase):
         self.assertEqual(result.error_code, "KNOWN_STATE_STALL_UNRECOVERED")
         self.assertIn("已知页面", result.error)
 
+    def test_a_repeated_cycle_stops_as_waiting_fix(self) -> None:
+        identity = SessionIdentity.from_runner_settings(
+            self.settings,
+            self.verification,
+        )
+        FakePilot.outcome = "WAITING_FIX"
+
+        with patch("apex_automation.play_session.CapabilityPilot", FakePilot):
+            result = self.runner.run(identity, ContinuePlayPolicy(), object())
+
+        self.assertEqual(result.status, "PLAYED")
+        self.assertEqual(result.error_code, "WAITING_FIX")
+        self.assertIn("等待修复", result.error)
+
     def test_game_account_restriction_finishes_as_failure_for_lease_cleanup(self):
         identity = SessionIdentity.from_runner_settings(self.settings, self.verification)
         FakePilot.outcome = 'GAME_RESTRICTED'

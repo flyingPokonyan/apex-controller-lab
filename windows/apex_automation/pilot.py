@@ -13,6 +13,7 @@ import numpy as np
 
 from .capabilities import Capability, CapabilityDispatcher, Decision
 from .match_behavior import FORBIDDEN_SCAN_CODES, REQUIRED_SCAN_CODES, MatchBehavior
+from .mode_panel import BOT_TITLE_WORD, CONFIRM_WORD, matching_text_token
 from .frame_normalization import CaptureResolutionMismatch
 from .config import RunnerConfig
 from .diagnostics import PerformanceMetrics
@@ -46,6 +47,16 @@ SUPPORTED_KINDS = frozenset({"click", "key", "sequence", "clickText"})
 # frame for minutes", which is a fact about the runner rather than about a
 # page. Capabilities may attach to it exactly as they do to a real screen.
 STALLED_UNKNOWN = "STALLED_UNKNOWN"
+# Opening the panel, missing the bot card, or leaving that panel for a screen
+# the click was not allowed to reach. After this many misses in one session
+# the lobby may queue unranked trios; every other mode still may not.
+BOT_MODE_MISS_LIMIT = 3
+BOT_MODE_CAPABILITIES = frozenset({
+    "lobby-change-mode",
+    "mode-panel-focus-target",
+    "mode-panel-confirm-hovered",
+})
+UNRANKED_READY_CAPABILITY = "lobby-start-unranked-fallback"
 RING_PROGRESS_PATTERNS = (
     re.compile(r"(?:经历)?缩圈[^0-9]{0,8}([0-9]{1,3})/([0-9]{1,3})"),
     re.compile(
@@ -80,6 +91,7 @@ LOBBY_CONTEXT_STATES = frozenset(
         "LOBBY_READY_TRAINING",
         "LOBBY_READY_TARGET",
         "LOBBY_READY_WELCOME",
+        "LOBBY_READY_UNRANKED",
         "LOBBY_READY_OTHER",
         "MODE_PANEL_WELCOME_VISIBLE",
         "MODE_PANEL_TARGET_VISIBLE",
@@ -96,6 +108,7 @@ SAFE_LOBBY_STATES = frozenset(
         "LOBBY_READY_TRAINING",
         "LOBBY_READY_TARGET",
         "LOBBY_READY_WELCOME",
+        "LOBBY_READY_UNRANKED",
         "LOBBY_READY_OTHER",
     }
 )
@@ -471,6 +484,9 @@ class CapabilityPilot:
         self._ranked_road_read_attempts = 0
         self._ranked_road_probe_requested_at: float | None = None
         self._click_text_misses = 0
+        self._bot_mode_misses = 0
+        self._unranked_fallback_armed = False
+        self._last_overlay_regions: dict[str, tuple[Any, ...]] = {}
         self._base_state: str | None = None
         self._base_state_version = 0
         self._base_unknown_since: float | None = None
@@ -544,6 +560,18 @@ class CapabilityPilot:
             raise ValueError(f"文字点击动作 {action_name} 的目标文字必须是非空字符串")
         if not isinstance(spec.get("exactMatch", False), bool):
             raise ValueError(f"文字点击动作 {action_name} 的 exactMatch 必须是布尔值")
+        near_anchor = spec.get("nearAnchor")
+        if near_anchor is not None:
+            if not isinstance(near_anchor, list) or not near_anchor:
+                raise ValueError(f"文字点击动作 {action_name} 的 nearAnchor 必须是非空列表")
+            if not all(isinstance(word, str) and word for word in near_anchor):
+                raise ValueError(f"文字点击动作 {action_name} 的 nearAnchor 必须是非空字符串")
+            for key in ("nearMaxDx", "nearMaxDy"):
+                if key not in spec:
+                    continue
+                limit = spec[key]
+                if not isinstance(limit, int) or not 1 <= limit <= 800:
+                    raise ValueError(f"文字点击动作 {action_name} 的 {key} 无效")
         fallback = spec.get("fallbackScanCode")
         if fallback is not None and not isinstance(fallback, int):
             raise ValueError(f"文字点击动作 {action_name} 的兜底扫描码不是整数")
@@ -695,23 +723,26 @@ class CapabilityPilot:
         eligible = tuple(token for token in tokens if token.confidence >= min_confidence)
         # Words are tried in the order the profile declares them, not in the
         # order OCR happened to read them: a disconnect box carrying both
-        # 重试 and 返回 should retry, not back out.
-        for word in words:
-            if not word:
-                continue
-            for token in eligible:
-                if word not in token.normalized:
-                    continue
-                if spec.get("exactMatch", False) and word != token.normalized:
-                    continue
-                if token.roi is None:
-                    # A region fallback read has no coordinates. Clicking the
-                    # middle of the region because a word appeared somewhere
-                    # inside it is exactly the blind click this design refuses.
-                    self.counters["clickTextNoPosition"] += 1
-                    continue
-                x1, y1, x2, y2 = token.roi
-                return (x1 + x2) // 2, (y1 + y2) // 2, token.text, token.confidence
+        # 重试 and 返回 should retry, not back out. nearAnchor keeps a shared
+        # label such as 「选择模式」 on the same card as the title: the panel
+        # prints that label on more than one card.
+        near_anchor = tuple(str(word) for word in spec.get("nearAnchor", ()))
+        chosen, missing_position = matching_text_token(
+            eligible,
+            words,
+            exact=bool(spec.get("exactMatch", False)),
+            near_anchors=near_anchor,
+            near_dx=int(spec.get("nearMaxDx", 420)),
+            near_dy=int(spec.get("nearMaxDy", 240)),
+        )
+        if missing_position:
+            # A region fallback read has no coordinates. Clicking the middle
+            # of the region because a word appeared somewhere inside it is
+            # exactly the blind click this design refuses.
+            self.counters["clickTextNoPosition"] += 1
+        if chosen is not None and chosen.roi is not None:
+            x1, y1, x2, y2 = chosen.roi
+            return (x1 + x2) // 2, (y1 + y2) // 2, chosen.text, chosen.confidence
         self._log_unmatched_page(spec, tokens)
         return None
 
@@ -983,6 +1014,9 @@ class CapabilityPilot:
         if confirmed:
             self.counters["confirmed"] += 1
             self.recorder.log("ACTION_CONFIRMED", **payload)
+            if state in {"LOBBY_READY_TARGET", "LOBBY_READY_TARGET_FILL_ON", "LOBBY_QUEUEING"}:
+                self._bot_mode_misses = 0
+                self._unranked_fallback_armed = False
         else:
             self.counters["rejected"] += 1
             self.recorder.log(
@@ -991,6 +1025,7 @@ class CapabilityPilot:
                 **payload,
             )
             self.notify(f"  ↳ 后置画面不对：{settled.capability.id} → {state}")
+            self._note_bot_mode_miss(settled.capability.id, "POSTCONDITION_REJECTED")
 
     # ---------------------------------------------------------------- frame
 
@@ -1043,6 +1078,7 @@ class CapabilityPilot:
         analysis = self.overlay_detector.analyze(frame)
         decision = analysis.decision
         self._last_page_tokens = analysis.regions.get("fullFrame", ())
+        self._last_overlay_regions = analysis.regions
         self.recorder.log(
             "OVERLAY_OCR_ANALYZED",
             source="overlayOcr",
@@ -1138,7 +1174,8 @@ class CapabilityPilot:
             self._overlay_next_scan_at = finished + self.overlay_scan_interval_s
             return StateObservation(None, "overlayCandidate")
 
-        self._active_overlay = match
+        self._active_overlay = self._refine_bot_card(match, base.state)
+        match = self._active_overlay
         self._probe_page_text(match)
         self.counters[f"overlay:{match.state}"] += 1
         actionable = bool(self.dispatcher.capabilities.for_state(match.state or ""))
@@ -1572,6 +1609,90 @@ class CapabilityPilot:
         self.notify("  ↳ 查看排位之路进度")
         return "RANKED_ROAD_PROGRESS"
 
+    def _note_bot_mode_miss(self, capability_id: str, reason: str) -> None:
+        if capability_id not in BOT_MODE_CAPABILITIES:
+            return
+        self._bot_mode_misses += 1
+        self.recorder.log(
+            "BOT_MODE_MISS",
+            capability=capability_id,
+            misses=self._bot_mode_misses,
+            reason=reason,
+        )
+        if self._bot_mode_misses >= BOT_MODE_MISS_LIMIT:
+            self._unranked_fallback_armed = True
+
+    def _maybe_unranked_ready(
+        self,
+        state: str | None,
+        decision: Decision,
+        now: float,
+    ) -> Decision:
+        """Queue unranked trios only after the bot card has already failed."""
+
+        if (
+            not self._unranked_fallback_armed
+            or state != "LOBBY_READY_UNRANKED"
+            or decision.kind != "fire"
+            or decision.capability is None
+            or decision.capability.id != "lobby-change-mode"
+        ):
+            return decision
+        ready = self.dispatcher.capabilities.by_id.get(UNRANKED_READY_CAPABILITY)
+        if ready is None:
+            return decision
+        self.dispatcher.drop_unsent("lobby-change-mode")
+        return self.dispatcher.adopt(
+            ready,
+            state,
+            self.state_version,
+            now,
+            reason="UNRANKED_TRIOS_FALLBACK",
+        )
+
+    def _refine_bot_card(
+        self,
+        match: StateObservation,
+        base_state: str | None,
+    ) -> StateObservation:
+        """Name the bot card from the panel search once the fast crop missed it.
+
+        A known fast state wins, so 迎新赛 stays ahead of the bot card and a
+        lobby is never reclassified because its mode name contains 机器人.
+        「选择模式」 only promotes the hovered state when it sits on the same
+        card as the title; the featured card in the middle column prints the
+        same words.
+        """
+
+        if base_state is not None:
+            return match
+        if match.state not in {"MODE_PANEL_TARGET_VISIBLE", "FULLSCREEN_ESC_BACK"}:
+            return match
+        tokens = tuple(
+            token
+            for token in self._last_overlay_regions.get("modePanelSearch", ())
+            if getattr(token, "confidence", 0.0) >= 0.7
+        )
+        title, _missing = matching_text_token(tokens, (BOT_TITLE_WORD,))
+        if title is None:
+            return match
+        confirm, _missing_confirm = matching_text_token(
+            tokens,
+            (CONFIRM_WORD,),
+            near_anchors=(BOT_TITLE_WORD,),
+        )
+        state = (
+            "MODE_PANEL_TARGET_HOVERED"
+            if confirm is not None
+            else "MODE_PANEL_TARGET_VISIBLE"
+        )
+        return StateObservation(
+            state,
+            match.source,
+            "mode-panel-bot-card",
+            title.confidence,
+        )
+
     def _decide_with_intro(self, state: str | None, now: float):
         """Clear a level-1 firing range, then leave mode choice to the rules.
 
@@ -1616,7 +1737,7 @@ class CapabilityPilot:
             decision = Decision("wait", reason="INTRO_LOCKED")
         command = self.intro.command(state, decision, now, self.dispatcher.pending)
         if command is None:
-            return decision
+            return self._maybe_unranked_ready(state, decision, now)
         for phase in self.intro.consume_transitions():
             self.recorder.log("INTRO_UNLOCK", phase=phase, state=state)
             self.notify(f"[新号] {phase}")
@@ -2146,6 +2267,8 @@ class CapabilityPilot:
             # A text-driven action that found no text sent nothing, and the
             # counters exist to answer "did this runner press anything".
             self.counters[f"skipped:{capability.id}"] += 1
+            if detail.get("skipped") == "NO_BUTTON_TEXT":
+                self._note_bot_mode_miss(capability.id, "NO_BUTTON_TEXT")
             self.recorder.log(
                 "ACTION_SKIPPED",
                 capability=capability.id,
@@ -2500,6 +2623,23 @@ class CapabilityPilot:
             self._write_status(self.monotonic())
             return record
         decision = self._decide_with_intro(state, now)
+        if (
+            decision.kind == "fire"
+            and decision.capability is not None
+            and decision.capability.id == UNRANKED_READY_CAPABILITY
+        ):
+            self.recorder.log(
+                "UNRANKED_TRIOS_FALLBACK",
+                misses=self._bot_mode_misses,
+                state=state,
+                reason="机器人模式多次未选中，改为排队未上榜三人赛",
+            )
+        if (
+            decision.kind == "pause"
+            and decision.reason == "ATTEMPTS_EXHAUSTED"
+            and decision.capability is not None
+        ):
+            self._note_bot_mode_miss(decision.capability.id, "ATTEMPTS_EXHAUSTED")
         record["decision"] = {"kind": decision.kind, "reason": decision.reason}
         self.counters[f"{decision.kind}:{decision.reason}"] += 1
         self._track_known_stall(decision, state, now, frame)
@@ -2534,6 +2674,15 @@ class CapabilityPilot:
             self.notify(f"暂停：{decision.reason}")
             if state is not None:
                 self._snapshot(f"paused-{decision.reason.lower()}", frame)
+            if decision.reason == "WAITING_FIX":
+                self.session_outcome = "WAITING_FIX"
+                if self.maintenance is not None:
+                    self.maintenance.pulse(
+                        "APEX_PLAYING",
+                        blocked=True,
+                        reason="WAITING_FIX",
+                        boundary=True,
+                    )
         self._write_status(self.monotonic())
         return record
 

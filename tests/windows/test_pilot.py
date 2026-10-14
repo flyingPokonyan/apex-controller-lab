@@ -1161,12 +1161,17 @@ class PilotTest(unittest.TestCase):
         # speak where the fast detector said nothing.
         self.enable_overlays()
         self.screen(modePanelTargetCard=("进化版机器人大逃杀", 1.0))
-        self.overlay_provider.readings = {"bottomLeftBack": ("ESC 返回", 0.98)}
+        self.overlay_provider.readings = {
+            "bottomLeftBack": ("ESC 返回", 0.98),
+            "modePanelSearch": [
+                ("进化版机器人大逃杀", 0.99, (1700, 650, 2320, 720)),
+            ],
+        }
 
         record = self._settle_overlay()
         self.assertEqual(record["state"], "MODE_PANEL_TARGET_VISIBLE")
         self.assertNotIn(("tap", 1, 80), self.sender.calls)
-        self.assertEqual({call for call in self.sender.calls}, {("click", 2145, 696)})
+        self.assertEqual({call for call in self.sender.calls}, {("click", 2010, 685)})
         self.assertIn("OVERLAY_RULE_OUTRANKED", self.recorder.names())
 
     def test_a_ticked_fill_box_is_unticked_before_the_match_is_started(self) -> None:
@@ -1631,6 +1636,201 @@ class PilotTest(unittest.TestCase):
             self.pilot.step()
 
         self.assertEqual(self.stages().count("legend-select"), 2)
+
+    def test_a_moved_bot_title_is_clicked_inside_the_panel_search(self) -> None:
+        # The tight title crop now reads only the tail. The card is still the
+        # training-column title, and the featured card's 「选择模式」 is farther
+        # away than one card.
+        self.enable_overlays()
+        self.screen(modePanelTargetCard=("大逃杀", 1.0))
+        self.overlay_provider.readings = {
+            "bottomLeftBack": ("ESC 返回", 0.98),
+            "modePanelSearch": [
+                ("进化版机器人大逃杀", 0.99, (1700, 650, 2320, 720)),
+                ("选择模式", 0.99, (980, 780, 1240, 840)),
+            ],
+        }
+
+        record = self._settle_overlay()
+
+        self.assertEqual(record["state"], "MODE_PANEL_TARGET_VISIBLE")
+        self.assertEqual(record["decision"]["capability"], "mode-panel-focus-target")
+        self.assertEqual(
+            [call for call in self.sender.calls if call[0] == "click"],
+            [("click", 2010, 685)],
+        )
+        self.assertNotIn(("tap", 1, 80), self.sender.calls)
+
+    def test_a_split_title_clicks_the_token_that_contains_the_word(self) -> None:
+        self.enable_overlays()
+        self.screen(modePanelTargetCard=("大逃杀", 1.0))
+        self.overlay_provider.readings = {
+            "modePanelSearch": [
+                ("进化版", 0.99, (1700, 650, 1900, 720)),
+                ("机器人大逃杀", 0.99, (1900, 650, 2340, 720)),
+            ],
+        }
+
+        record = self._settle_overlay()
+
+        self.assertEqual(record["state"], "MODE_PANEL_TARGET_VISIBLE")
+        self.assertEqual(
+            [call for call in self.sender.calls if call[0] == "click"],
+            [("click", 2120, 685)],
+        )
+
+    def test_a_confirm_on_the_same_card_is_clicked_and_the_featured_card_is_not(self) -> None:
+        self.enable_overlays()
+        self.screen()
+        self.overlay_provider.readings = {
+            "bottomLeftBack": ("ESC 返回", 0.98),
+            "modePanelSearch": [
+                ("进化版机器人大逃杀", 0.99, (1700, 650, 2320, 720)),
+                ("选择模式", 0.99, (980, 780, 1240, 840)),
+                ("选择模式", 0.99, (1900, 790, 2200, 850)),
+            ],
+        }
+
+        record = self._settle_overlay()
+
+        self.assertEqual(record["state"], "MODE_PANEL_TARGET_HOVERED")
+        self.assertEqual(record["decision"]["capability"], "mode-panel-confirm-hovered")
+        self.assertEqual(
+            [call for call in self.sender.calls if call[0] == "click"],
+            [("click", 2050, 820)],
+        )
+        self.assertNotIn(("tap", 1, 80), self.sender.calls)
+
+    def test_welcome_stays_ahead_of_the_bot_card_and_ignores_the_lock_line(self) -> None:
+        self.enable_overlays()
+        self.screen(modePanelWelcomeCard=("迎新赛", 1.0))
+        self.overlay_provider.readings = {
+            "fullFrame": [("完成迎新赛即可解锁", 0.99, (400, 700, 900, 780))],
+            "modePanelSearch": [
+                ("进化版机器人大逃杀", 0.99, (1700, 650, 2320, 720)),
+            ],
+            "bottomLeftBack": ("ESC 返回", 0.98),
+        }
+
+        record = self.pilot.step()
+
+        self.assertEqual(record["state"], "MODE_PANEL_WELCOME_VISIBLE")
+        self.assertEqual(record["decision"]["capability"], "mode-panel-select-welcome")
+        self.assertEqual([call for call in self.sender.calls if call[0] == "click"], [])
+        self.assertNotIn(("tap", 1, 80), self.sender.calls)
+        self.assertIn("OVERLAY_RULE_OUTRANKED", self.recorder.names())
+
+        self.overlay_provider.readings["fullFrame"] = [
+            ("完成迎新赛即可解锁", 0.99, (400, 700, 900, 780)),
+            ("迎新赛", 0.99, (200, 500, 480, 560)),
+        ]
+        self.now = 3.0
+        clicked = self.pilot.step()
+
+        self.assertEqual(clicked["state"], "MODE_PANEL_WELCOME_VISIBLE")
+        self.assertEqual(
+            [call for call in self.sender.calls if call[0] == "click"],
+            [("click", 340, 530)],
+        )
+
+    def test_a_known_lobby_is_not_clicked_as_the_bot_card(self) -> None:
+        self.enable_overlays()
+        self.screen(
+            lobbyPrimaryButton=("准备", 1.0),
+            lobbyModeName=("进化版机器人大逃杀", 1.0),
+        )
+        self.overlay_provider.readings = {
+            "modePanelSearch": [("进化版机器人大逃杀", 0.99, (60, 1060, 420, 1140))],
+            "bottomLeftBack": ("ESC 返回", 0.98),
+        }
+
+        record = self.pilot.step()
+
+        self.assertEqual(record["state"], "LOBBY_READY_TARGET")
+        self.assertEqual(record["decision"]["capability"], "lobby-start-match")
+        self.assertEqual(self.sender.calls, [("click", 1280, 1295)])
+        self.assertIn("OVERLAY_RULE_OUTRANKED", self.recorder.names())
+
+    def _show_unranked(self) -> None:
+        self.screen(
+            lobbyPrimaryButton=("准备", 1.0),
+            lobbyModeName=("未上榜", 1.0),
+            lobbyModeSquad=("三人赛", 1.0),
+        )
+
+    def test_unranked_trios_is_queued_only_after_the_bot_card_was_missed(self) -> None:
+        clicks = []
+        for index in range(3):
+            self.now = index * 2.0
+            self._show_unranked()
+            self.pilot.step()
+            clicks.append(self.sender.calls[-1])
+            self.now += 1.0
+            self.screen(lobbyPrimaryButton=("取消", 1.0))
+            self.pilot.step()
+
+        self.assertEqual(clicks, [("click", 308, 1215)] * 3)
+        self.assertNotIn(("click", 1280, 1295), self.sender.calls)
+        self.assertTrue(self.pilot._unranked_fallback_armed)
+
+        self.now = 10.0
+        self._show_unranked()
+        record = self.pilot.step()
+
+        self.assertEqual(record["state"], "LOBBY_READY_UNRANKED")
+        self.assertEqual(record["decision"]["capability"], "lobby-start-unranked-fallback")
+        self.assertEqual(self.sender.calls[-1], ("click", 1280, 1295))
+        event = next(
+            payload for name, payload in self.recorder.events if name == "UNRANKED_TRIOS_FALLBACK"
+        )
+        self.assertEqual(event["misses"], 3)
+        self.assertEqual(event["state"], "LOBBY_READY_UNRANKED")
+
+    def test_training_and_other_modes_never_press_ready_for_the_unranked_fallback(self) -> None:
+        self.pilot._unranked_fallback_armed = True
+        self.screen(lobbyPrimaryButton=("准备", 1.0), lobbyModeName=("训练", 1.0))
+        training = self.pilot.step()
+        self.assertEqual(training["state"], "LOBBY_READY_TRAINING")
+        self.assertEqual(training["decision"]["capability"], "lobby-change-mode")
+        self.assertEqual(self.sender.calls, [("click", 308, 1215)])
+
+        self.now = 1.0
+        self.screen(lobbyPrimaryButton=("准备", 1.0), lobbyModeName=("控制", 1.0))
+        other = self.pilot.step()
+        self.assertEqual(other["state"], "LOBBY_READY_OTHER")
+        self.assertEqual(other["decision"]["capability"], "lobby-change-mode")
+        self.assertNotIn(("click", 1280, 1295), self.sender.calls)
+
+    def test_waiting_fix_stops_the_session_and_keeps_a_screenshot(self) -> None:
+        pulses: list[tuple[object, ...]] = []
+
+        class Maintenance:
+            def pulse(self, phase=None, *, blocked=None, reason=None, boundary=False):
+                pulses.append((phase, blocked, reason, boundary))
+
+        self.pilot.maintenance = Maintenance()
+        self.screen(
+            lobbyPrimaryButton=("准备", 1.0),
+            lobbyModeName=("进化版机器人大逃杀", 1.0),
+        )
+        self.pilot.dispatcher._waiting_fix = {
+            "state": "LOBBY_READY_TARGET",
+            "signature": ["LOBBY_READY_TARGET"],
+            "repeats": 3,
+        }
+
+        record = self.pilot.step()
+
+        self.assertEqual(record["decision"]["reason"], "WAITING_FIX")
+        self.assertEqual(self.pilot.session_outcome, "WAITING_FIX")
+        self.assertEqual(self.sender.calls, [("releaseAll",)])
+        saved = [
+            payload["stage"]
+            for name, payload in self.recorder.events
+            if name == "SCREENSHOT_SAVED"
+        ]
+        self.assertIn("paused-waiting_fix", saved)
+        self.assertEqual(pulses, [("APEX_PLAYING", True, "WAITING_FIX", True)])
 
     def test_a_run_always_releases_input_when_it_ends(self) -> None:
         self.screen(squadCountAlive=("20 剩余小队数量", 0.98))
