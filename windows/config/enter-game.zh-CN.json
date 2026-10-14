@@ -21,8 +21,21 @@
     "modeSelectClick": [1280, 1295],
     "modeCardClick": [308, 1215],
     "startMatchClick": [1280, 1295],
-    "targetCardClick": [2145, 696],
-    "targetConfirmClick": [2040, 808],
+    "targetCardClick": {
+      "region": "modePanelSearch",
+      "any": ["机器人"],
+      "minConfidence": 0.7,
+      "_note": "点模式面板上标题含「机器人」的那张卡，坐标取 OCR 读到的文字块中心，不再用 2026-09-26 的固定点。不要开 exactMatch：标题是「进化版机器人大逃杀」，整块字不等于「机器人」；OCR 把标题拆开时，含这三个字的那一块就是要点的地方。搜索区是面板卡片，不是全屏，避免点到大厅底下的模式名。"
+    },
+    "targetConfirmClick": {
+      "region": "modePanelSearch",
+      "any": ["选择模式"],
+      "nearAnchor": ["机器人"],
+      "nearMaxDx": 420,
+      "nearMaxDy": 240,
+      "minConfidence": 0.7,
+      "_note": "悬停后点同一张卡上的「选择模式」。面板中间那张主推卡也会写这四个字，所以必须落在含「机器人」的标题旁边，不能在整块面板里点到第一个「选择模式」。"
+    },
     "fillToggleClick": [86, 222],
     "rankedRoadCardClick": [2256, 1282],
     "challengeNextClick": [2500, 216],
@@ -511,7 +524,7 @@
     {
       "id": "lobby-change-mode",
       "priority": 60,
-      "states": ["LOBBY_READY_TRAINING", "LOBBY_READY_OTHER"],
+      "states": ["LOBBY_READY_TRAINING", "LOBBY_READY_UNRANKED", "LOBBY_READY_OTHER"],
       "action": "modeCardClick",
       "kind": "click",
       "actionClass": "idempotent",
@@ -537,19 +550,19 @@
       "priority": 55,
       "states": ["MODE_PANEL_TARGET_VISIBLE"],
       "action": "targetCardClick",
-      "kind": "click",
+      "kind": "clickText",
       "actionClass": "idempotent",
       "confirmMs": 2000,
       "maxAttempts": 3,
       "allowedNextStates": ["MODE_PANEL_TARGET_HOVERED", "LOBBY_READY_TARGET", "LOBBY_READY_TARGET_FILL_ON"],
-      "_note": "点卡片只是把焦点移过去，重复无害。坐标落在目标卡片的标题上。2026-09-26 改版后标题在训练栏中间那张卡的 x1941-2349 / y677-715，点击取标题中心 [2145, 696]。20260730-215512 实测这一击通常一步到位，悬停态只是兜底。"
+      "_note": "点含「机器人」的卡片标题，重复无害。位置来自面板区域 OCR，不依赖固定坐标。20260730-215512 实测这一击通常一步到位，悬停态只是兜底。迎新赛还在时这条根本不会轮到。"
     },
     {
       "id": "mode-panel-confirm-hovered",
       "priority": 55,
       "states": ["MODE_PANEL_TARGET_HOVERED"],
       "action": "targetConfirmClick",
-      "kind": "click",
+      "kind": "clickText",
       "actionClass": "commit",
       "confirmMs": 3000,
       "maxAttempts": 2,
@@ -567,6 +580,18 @@
       "maxAttempts": 2,
       "allowedNextStates": ["LOBBY_QUEUEING"],
       "_note": "大厅卡片标题还是迎新赛时直接按准备，不再打开面板去点机器人。没有等级门槛：标题在就排，标题换成普通匹配后这条规则失效，改由机器人卡接手。和 lobby-start-match 一样是 commit，只接受进入排队。"
+    },
+    {
+      "id": "lobby-start-unranked-fallback",
+      "priority": 45,
+      "states": ["LOBBY_READY_UNRANKED"],
+      "action": "startMatchClick",
+      "kind": "click",
+      "actionClass": "commit",
+      "confirmMs": 3000,
+      "maxAttempts": 2,
+      "allowedNextStates": ["LOBBY_QUEUEING"],
+      "_note": "机器人卡有限次找不到或选不中之后，才接受大厅同时写着「未上榜」和「三人赛」并按准备。优先级低于 lobby-change-mode，所以同一轮里先尝试打开面板。训练场和其他模式不在这个状态里，不能按准备。"
     },
     {
       "id": "lobby-start-match",

@@ -420,6 +420,14 @@ class Launcher:
                           error=final_status.get("reason") or "RECOVERABLE_ENVIRONMENT_ERROR")
             elif code == UPDATE_EXIT and self.request_mode is not None and target and target != commit:
                 self.save("UPDATE_READY", pid=None, error=None)
+            elif final_status.get("reason") == "WAITING_FIX":
+                # The game loop already escalated a repeated cycle. Do not
+                # spend the failure budget on two more restarts of the same
+                # pause; this revision waits until someone ships a fix.
+                failures = self.state["failures"]
+                failures[commit] = max(int(failures.get(commit, 0)), MAX_FAILURES)
+                self.state["failures"] = dict(list(failures.items())[-32:])
+                self.save("WAITING_FIX", pid=None, error="WAITING_FIX")
             else:
                 self.failure(commit)
                 reason = final_status.get("reason")

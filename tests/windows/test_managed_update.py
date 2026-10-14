@@ -180,6 +180,17 @@ class LauncherTest(unittest.TestCase):
         self.assertEqual(self.app.state["error"], "EA_RECOVERY_EXHAUSTED")
         self.assertEqual(self.app.state["stage"], "WAITING_CLEANUP")
         self.assertEqual(self.app.state["failures"], {})
+
+    def test_waiting_fix_exit_stops_without_another_retry(self):
+        self.worker(code=1)
+        launcher.write_json(self.app.root / "worker.json", {
+            "session": "current", "pid": 123, "reason": "WAITING_FIX"})
+        self.app.monitor("old")
+        self.assertEqual(self.app.state["stage"], "WAITING_FIX")
+        self.assertEqual(self.app.state["error"], "WAITING_FIX")
+        self.assertGreaterEqual(self.app.state["failures"]["old"], launcher.MAX_FAILURES)
+        reloaded = launcher.Launcher(self.repo)
+        self.assertFalse(reloaded.can_start("old"))
         reloaded = launcher.Launcher(self.repo)
         self.assertFalse(reloaded.can_start("old"))
         self.assertTrue(reloaded.can_start("new"))

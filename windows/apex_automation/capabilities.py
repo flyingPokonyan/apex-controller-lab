@@ -283,11 +283,15 @@ class CapabilityDispatcher:
         *,
         cycle_window_s: float = 180.0,
         cycle_threshold: int = 4,
+        cycle_repeat_limit: int = 3,
         jitter: Callable[[int, int], int] = random.randint,
     ) -> None:
+        if cycle_repeat_limit < 1:
+            raise ValueError("同一循环签名的升级次数必须至少为 1")
         self.capabilities = capabilities
         self.cycle_window_s = cycle_window_s
         self.cycle_threshold = cycle_threshold
+        self.cycle_repeat_limit = cycle_repeat_limit
         self.jitter = jitter
 
         self.pending: PendingAction | None = None
@@ -300,6 +304,8 @@ class CapabilityDispatcher:
         self._current_state: str | None = None
         self._current_state_since = 0.0
         self._cycle_paused = False
+        self._cycle_signature_counts: dict[tuple[str, ...], int] = {}
+        self._waiting_fix: dict[str, object] | None = None
 
     def reset_for_pause(self) -> None:
         """Drop cross-frame memory that a pause invalidates."""
@@ -371,6 +377,17 @@ class CapabilityDispatcher:
     def cycle_count(self, state: str) -> int:
         return sum(1 for _, entry in self._state_entries if entry == state)
 
+    def cycle_signature(self) -> tuple[str, ...]:
+        """The set of screens currently forming the loop, independent of order.
+
+        Lobby → panel → Esc → lobby is the same loop whichever screen happens
+        to be showing when the threshold is crossed. Counting the signature,
+        not the one state in the pause event, is what makes the third repeat
+        of that loop escalate instead of starting the count over.
+        """
+
+        return tuple(sorted({entry for _, entry in self._state_entries}))
+
     def drop_unsent(self, capability_id: str) -> None:
         """Forget a fire decision that has not been sent yet.
 
@@ -398,6 +415,8 @@ class CapabilityDispatcher:
         state: str,
         observation_version: int,
         now: float,
+        *,
+        reason: str = "INTRO_UNLOCK",
     ) -> Decision:
         """Fire a capability the screen dictionary did not select."""
 
@@ -406,7 +425,7 @@ class CapabilityDispatcher:
             state,
             observation_version,
             now,
-            reason="INTRO_UNLOCK",
+            reason=reason,
         )
 
     def confirm_pending(self, evidence_state: str) -> tuple[bool, PendingAction | None]:
@@ -462,6 +481,11 @@ class CapabilityDispatcher:
         # than on one state; otherwise an A-B-A-B cycle re-reports itself on
         # every alternation. The latch clears once the window has aged out,
         # which is also the only honest signal that the loop actually stopped.
+        if self._waiting_fix is not None:
+            # The same loop already came back after its pause window expired.
+            # Ageing the entries out must not resume it.
+            return Decision("pause", reason="WAITING_FIX", detail=dict(self._waiting_fix))
+
         looping = any(
             self.cycle_count(entry) > self.cycle_threshold
             for _, entry in self._state_entries
@@ -470,14 +494,23 @@ class CapabilityDispatcher:
             if not self._cycle_paused:
                 self._cycle_paused = True
                 self.pending = None
+                signature = self.cycle_signature()
+                repeats = self._cycle_signature_counts.get(signature, 0) + 1
+                self._cycle_signature_counts[signature] = repeats
+                detail: dict[str, object] = {
+                    "state": state,
+                    "entries": self.cycle_count(state),
+                    "windowS": self.cycle_window_s,
+                    "signature": list(signature),
+                    "repeats": repeats,
+                }
+                if repeats >= self.cycle_repeat_limit:
+                    self._waiting_fix = detail
+                    return Decision("pause", reason="WAITING_FIX", detail=detail)
                 return Decision(
                     "pause",
                     reason="CYCLE_DETECTED",
-                    detail={
-                        "state": state,
-                        "entries": self.cycle_count(state),
-                        "windowS": self.cycle_window_s,
-                    },
+                    detail=detail,
                 )
             return Decision("wait", reason="CYCLE_PAUSED")
         self._cycle_paused = False

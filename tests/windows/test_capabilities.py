@@ -416,6 +416,76 @@ class DispatcherTest(unittest.TestCase):
         dispatcher.confirm_pending("IN_MATCH")
         self.assertEqual(dispatcher.decide("IN_MATCH", 1, 0.5).capability.id, "melee")
 
+    def _drive_loop(self, dispatcher: CapabilityDispatcher, start: float, other: str) -> list[str]:
+        reasons: list[str] = []
+        for index in range(6):
+            moment = start + index * 10.0
+            dispatcher.note_state("LOBBY", moment)
+            decision = dispatcher.decide("LOBBY", int(moment * 10), moment)
+            reasons.append(decision.reason)
+            if decision.reason == "CYCLE_DETECTED":
+                self.assertIsInstance(decision.detail["signature"], list)
+                self.assertEqual(decision.detail["repeats"], dispatcher._cycle_signature_counts[tuple(decision.detail["signature"])])
+            if decision.kind != "fire":
+                continue
+            dispatcher.confirm_pending(other)
+            dispatcher.note_state(other, moment + 5)
+            other_decision = dispatcher.decide(other, int(moment * 10) + 1, moment + 5)
+            reasons.append(other_decision.reason)
+            if other_decision.kind == "fire":
+                dispatcher.confirm_pending("LOBBY")
+        return reasons
+
+    def test_the_same_loop_waits_for_a_fix_after_it_comes_back(self) -> None:
+        ready = click(
+            "ready", "LOBBY", action_class="commit",
+            allowed_next_states=("PANEL",), max_attempts=2,
+        )
+        card = click("card", "PANEL", allowed_next_states=("LOBBY",))
+        dispatcher = self._dispatcher(
+            ready, card, cycle_window_s=180.0, cycle_threshold=4, cycle_repeat_limit=2,
+        )
+
+        first = self._drive_loop(dispatcher, 0.0, "PANEL")
+        self.assertIn("CYCLE_DETECTED", first)
+        self.assertNotIn("WAITING_FIX", first)
+
+        # The window expires, but the signature count does not.
+        dispatcher.note_state("SUMMARY", 400.0)
+        self.assertEqual(dispatcher.decide("SUMMARY", 2, 400.0).reason, "NO_CAPABILITY")
+        dispatcher.reset_for_pause()
+        self.assertEqual(dispatcher._cycle_signature_counts[("LOBBY", "PANEL")], 1)
+
+        second = self._drive_loop(dispatcher, 420.0, "PANEL")
+        self.assertIn("WAITING_FIX", second)
+        self.assertEqual(dispatcher.decide("LOBBY", 3, 900.0).reason, "WAITING_FIX")
+        dispatcher.reset_for_pause()
+        self.assertEqual(dispatcher.decide("PANEL", 4, 901.0).reason, "WAITING_FIX")
+
+    def test_a_different_loop_does_not_inherit_the_previous_signature(self) -> None:
+        ready = click(
+            "ready", "LOBBY", action_class="commit",
+            allowed_next_states=("PANEL", "MENU"), max_attempts=2,
+        )
+        card = click("card", "PANEL", allowed_next_states=("LOBBY",))
+        menu = click("menu", "MENU", allowed_next_states=("LOBBY",))
+        dispatcher = self._dispatcher(
+            ready, card, menu,
+            cycle_window_s=180.0, cycle_threshold=4, cycle_repeat_limit=3,
+        )
+        self._drive_loop(dispatcher, 0.0, "PANEL")
+        dispatcher.note_state("SUMMARY", 400.0)
+        dispatcher.decide("SUMMARY", 1, 400.0)
+        second = self._drive_loop(dispatcher, 420.0, "MENU")
+        self.assertIn("CYCLE_DETECTED", second)
+        self.assertNotIn("WAITING_FIX", second)
+        self.assertEqual(dispatcher._cycle_signature_counts[("LOBBY", "PANEL")], 1)
+        self.assertEqual(dispatcher._cycle_signature_counts[("LOBBY", "MENU")], 1)
+
+    def test_cycle_repeat_limit_must_be_positive(self) -> None:
+        with self.assertRaisesRegex(ValueError, "升级次数"):
+            self._dispatcher(cycle_repeat_limit=0)
+
     def test_capability_set_loads_from_payload(self) -> None:
         payload = {
             "schemaVersion": 1,

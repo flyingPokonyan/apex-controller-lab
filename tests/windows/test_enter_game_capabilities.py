@@ -276,6 +276,7 @@ class EnterGameCapabilityTest(unittest.TestCase):
         self.assertEqual(
             set(detector.regions),
             {
+                "gameAccountRestriction",
                 "fullFrame",
                 "challengePanelTasks",
                 "titleCenter",
@@ -283,6 +284,7 @@ class EnterGameCapabilityTest(unittest.TestCase):
                 "bottomCenter",
                 "bottomRight",
                 "bottomLeftBack",
+                "modePanelSearch",
             },
         )
         self.assertEqual(self.capabilities.for_state("AUTH_REQUIRED"), ())
@@ -478,6 +480,7 @@ class EnterGameCapabilityTest(unittest.TestCase):
             "LOBBY_SELECT_REQUIRED": "选择",
             "LOBBY_READY_TARGET": "准备",
             "LOBBY_READY_WELCOME": "准备",
+            "LOBBY_READY_UNRANKED": "准备",
         }
         primary_button = self.payload["actions"]["startMatchClick"]
         for capability in self.capabilities.capabilities:
@@ -528,6 +531,50 @@ class EnterGameCapabilityTest(unittest.TestCase):
         ]
         self.assertEqual(set(welcome_terms), {"迎新赛"})
         self.assertEqual(set(welcome_terms), set(welcome_panel_terms))
+
+    def test_bot_card_search_is_a_substring_inside_the_panel(self) -> None:
+        card = self.payload["actions"]["targetCardClick"]
+        confirm = self.payload["actions"]["targetConfirmClick"]
+        welcome = self.payload["actions"]["introWelcomeModeClick"]
+        self.assertEqual(card["region"], "modePanelSearch")
+        self.assertEqual(card["any"], ["机器人"])
+        self.assertNotIn("exactMatch", card)
+        self.assertEqual(confirm["region"], "modePanelSearch")
+        self.assertEqual(confirm["nearAnchor"], ["机器人"])
+        self.assertNotIn("exactMatch", confirm)
+        self.assertTrue(welcome["exactMatch"])
+        self.assertEqual(welcome["any"], ["迎新赛"])
+        focus = next(c for c in self.capabilities.capabilities if c.id == "mode-panel-focus-target")
+        hovered = next(c for c in self.capabilities.capabilities if c.id == "mode-panel-confirm-hovered")
+        self.assertEqual(focus.kind, "clickText")
+        self.assertEqual(hovered.kind, "clickText")
+        fallback = next(
+            c for c in self.capabilities.capabilities if c.id == "lobby-start-unranked-fallback"
+        )
+        change = next(c for c in self.capabilities.capabilities if c.id == "lobby-change-mode")
+        self.assertEqual(fallback.states, ("LOBBY_READY_UNRANKED",))
+        self.assertEqual(fallback.action, "startMatchClick")
+        self.assertLess(fallback.priority, change.priority)
+        self.assertIn("LOBBY_READY_UNRANKED", change.states)
+        decision = self._dispatcher().decide("LOBBY_READY_UNRANKED", 1, 0.0)
+        self.assertEqual(decision.capability.id, "lobby-change-mode")
+
+        regions = parse_regions(json.loads(OVERLAYS.read_text(encoding="utf-8"))["regions"])
+        search = regions["modePanelSearch"]
+        self.assertNotEqual(search.roi, (0, 0, 2560, 1440))
+        self.assertEqual(search.roi, (40, 150, 2520, 1230))
+        provider = FullFrameOcrProvider(
+            FakeLayoutProvider(
+                (
+                    OcrToken("进化版机器人大逃杀", 0.99, (1700, 650, 2320, 720)),
+                    OcrToken("准备", 0.99, (1200, 1240, 1360, 1340)),
+                    OcrToken("新闻", 0.99, (200, 40, 400, 100)),
+                )
+            )
+        )
+        frame = np.zeros((1440, 2560, 3), dtype=np.uint8)
+        selected = provider.read(frame, search)
+        self.assertEqual([token.text for token in selected], ["进化版机器人大逃杀"])
 
     def test_welcome_is_played_directly_and_bots_only_when_that_title_is_gone(self) -> None:
         welcome = self._dispatcher().decide("LOBBY_READY_WELCOME", 1, 0.0)

@@ -414,6 +414,13 @@ class PlaySessionRunner:
                 error_code = "KNOWN_STATE_STALL_UNRECOVERED"
                 error_message = "已知页面的安全动作全部耗尽且画面仍未变化"
                 finish_detail["reason"] = error_message
+            elif outcome == "WAITING_FIX":
+                # The same screen loop latched, aged out, and latched again.
+                # Release the lease, keep the incident frame, and stop the
+                # worker on WAITING_FIX instead of pausing and resuming.
+                error_code = "WAITING_FIX"
+                error_message = "同一循环反复出现，已停止游玩并等待修复"
+                finish_detail["reason"] = error_message
             elif outcome == "FOREGROUND_LOST":
                 error_code = "FOREGROUND_UNRECOVERED"
                 error_message = "Apex 长时间不在前台，已停止游玩并释放租约"
