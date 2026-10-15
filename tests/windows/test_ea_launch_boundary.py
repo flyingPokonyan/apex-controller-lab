@@ -7,7 +7,7 @@ from unittest.mock import Mock, patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "windows"))
 from apex_automation.ea_app import EaAppAutomationError
-from apex_automation.ea_app_win32 import WindowsEaHybridDriver
+from apex_automation.ea_app_win32 import APEX_LAUNCH_TIMEOUT_S, WindowsEaHybridDriver
 
 
 class LaunchCleanupTest(unittest.TestCase):
@@ -36,7 +36,7 @@ class LaunchCleanupTest(unittest.TestCase):
         driver = self.driver(lambda now: False)
         result = driver.stop_apex(settle_launch=True)
         self.assertTrue(result.all_processes_exited)
-        self.assertEqual(self.now, 90)
+        self.assertEqual(self.now, APEX_LAUNCH_TIMEOUT_S)
         self.kill.assert_not_called()
 
     def test_normal_close_escalates_if_game_does_not_exit(self):
@@ -60,9 +60,9 @@ class LaunchCleanupTest(unittest.TestCase):
         driver._click_point = Mock(side_effect=EaAppAutomationError("input uncertain"))
         with self.assertRaises(EaAppAutomationError):
             driver._request_apex_launch(7, (1, 2))
-        self.assertEqual(driver._apex_launch_pending_until, 90)
+        self.assertEqual(driver._apex_launch_pending_until, APEX_LAUNCH_TIMEOUT_S)
         self.assertTrue(driver.stop_apex().all_processes_exited)
-        self.assertEqual(self.now, 90)
+        self.assertEqual(self.now, APEX_LAUNCH_TIMEOUT_S)
 
     def test_play_transition_to_empty_library_waits_for_delayed_game_not_a_ban(self):
         from test_ea_pages import EaLaunchRecoveryTest as Fixture
@@ -96,6 +96,40 @@ class LaunchCleanupTest(unittest.TestCase):
                         self.assertNotIn("account-banned", records)
                         self.assertEqual(stopped, [])
                 self.assertEqual(clicks, [(120, 460), (1150, 700)] + ([(1100, 700)] if explicit_ban else []))
+
+    def launch(self, game_starts_at):
+        from test_ea_pages import EaLaunchRecoveryTest as Fixture
+        now, clicks, records = [0.0], [], []
+        entry = Fixture.observation(("Apex Legends", 120, 460))
+        play = Fixture.observation(("Apex Legends", 800, 280), ("PLAY", 1150, 700))
+        frames = [entry]
+        driver = Fixture.driver(frames, clicks, records)
+        driver._observe = lambda _hwnd: frames.pop(0) if frames else play
+        driver.sleep = lambda seconds: now.__setitem__(0, now[0] + seconds)
+        driver._process_running = lambda name: name == "r5apex.exe" and now[0] >= game_starts_at
+        self.enterContext(patch("apex_automation.ea_app_win32.time.monotonic", side_effect=lambda: now[0]))
+        return driver, now, clicks, records
+
+    def test_play_shown_again_is_clicked_once_more_in_the_same_session(self):
+        driver, now, clicks, records = self.launch(game_starts_at=100)
+        driver.start_apex()
+        self.assertEqual(clicks, [(120, 460), (1150, 700), (1150, 700)])
+        self.assertEqual(records.count("apex-play-again"), 1)
+        self.assertGreaterEqual(now[0], 100)
+
+    def test_a_slow_first_launch_is_not_given_up_at_ninety_seconds(self):
+        driver, now, clicks, _records = self.launch(game_starts_at=150)
+        driver.start_apex()
+        self.assertGreaterEqual(now[0], 150)
+
+    def test_second_launch_is_the_last_before_cleanup(self):
+        from apex_automation.ea_app import EaApexStartFailed
+        driver, now, clicks, records = self.launch(game_starts_at=float("inf"))
+        with self.assertRaisesRegex(EaApexStartFailed, "未发现 Apex 进程"):
+            driver.start_apex()
+        self.assertEqual(clicks.count((1150, 700)), 2)
+        self.assertEqual(records.count("apex-play-again"), 1)
+        self.assertLess(now[0], 60 + APEX_LAUNCH_TIMEOUT_S + 10)
 
     def test_unreadable_process_list_cannot_prove_no_game(self):
         for failure in (Mock(returncode=1, stdout=""), subprocess.TimeoutExpired("tasklist", 10)):

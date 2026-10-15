@@ -142,7 +142,12 @@ EA_RESTART_TIMEOUT_S = 60.0
 EA_CACHE_RESTART_TIMEOUT_S = 120.0
 APP_RECOVERY_DIALOG_TIMEOUT_S = 15.0
 APEX_INSTALL_REPAIR_TIMEOUT_S = 180.0
-APEX_LAUNCH_TIMEOUT_S = 90.0
+# A new account's first launch took up to about 150 s in Forge's lease phases
+# (later launches under 40 s). At 90 s about one first launch in ten was given
+# up, signed out and logged in again, which is what triggered EA forced resets.
+APEX_LAUNCH_TIMEOUT_S = 180.0
+# Play shown again this long after a click means EA dropped that launch.
+APEX_RELAUNCH_AFTER_S = 60.0
 APEX_UPDATE_TIMEOUT_S = 2 * 60 * 60.0
 APEX_INSTALL_DIR = Path(r"D:\Apex")
 HELP_TERMS = ("help", "帮助")
@@ -2991,6 +2996,7 @@ class WindowsEaHybridDriver(EaPasswordRecoveryMixin):
         self.sleep(2.0)
         action_deadline = time.monotonic() + 15.0
         launch_deadline: float | None = None
+        relaunched = False
         update_deadline: float | None = None
         update_clicked_at = 0.0
         update_clicks = 0
@@ -3084,6 +3090,20 @@ class WindowsEaHybridDriver(EaPasswordRecoveryMixin):
                     self.notify("Apex 更新已完成，正在启动游戏")
                 launch_deadline = self._request_apex_launch(hwnd, point)
                 update_deadline = None
+                self.sleep(2.0)
+                continue
+            if (
+                point is not None
+                and launch_deadline is not None
+                and not relaunched
+                and now >= launch_deadline - APEX_LAUNCH_TIMEOUT_S + APEX_RELAUNCH_AFTER_S
+            ):
+                # Click once more in this session rather than signing out and
+                # logging the same account in again.
+                relaunched = True
+                self._record("apex-play-again", observation)
+                self.notify("EA 没有接住上一次启动，在当前登录里再点一次 Play")
+                launch_deadline = self._request_apex_launch(hwnd, point)
                 self.sleep(2.0)
                 continue
 
