@@ -14,7 +14,7 @@ CHECKPOINT_KEYS = (
     'skipped_ea_emails', 'already_registered_ea_emails',
 )
 RETRYABLE = frozenset({
-    'ea_network_error', 'ea_proxy_error', 'ea_action_timeout', 'ea_step_timeout',
+    'browser_unavailable', 'ea_network_error', 'ea_proxy_error', 'ea_action_timeout', 'ea_step_timeout',
     'myaccount_session_failed', 'ea_login_otp_missing', 'ea_login_otp_send_failed',
     'ea_login_otp_submit_failed', 'ea_create_submit_unconfirmed',
     'ea_register_failed', 'ea_technical_issue', 'ea_rate_limited',

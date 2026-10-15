@@ -92,6 +92,16 @@ class ResumeFlowTests(unittest.TestCase):
         self.create.assert_not_called()
         self.tile.assert_not_called()
 
+    def test_bitbrowser_failure_is_a_retryable_browser_error(self):
+        from apex_registration.utils.bitbrowser import BitBrowserBusy
+        flow.RUNTIME.operation = {'stage': 'open_register', 'name': 'browser_open'}
+        with patch.object(register, 'attach_browser', side_effect=BitBrowserBusy('请求频繁，请调整请求频率')):
+            code, result = self.run_flow({'ok':False, 'payload':{}})
+        self.assertEqual(code, 1)
+        self.assertEqual(result['error_code'], 'browser_unavailable')
+        self.assertEqual(result['stage'], 'open_register')
+        self.assertEqual(recovery_action(result), 'resume')
+
     def test_session_failure_does_not_erase_verified_ea(self):
         with patch.object(flow, 'ensure_myaccount_session', return_value=False):
             code, result = self.run_flow({'ok':False, 'payload':{}})

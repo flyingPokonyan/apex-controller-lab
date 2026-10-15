@@ -16,6 +16,7 @@ from .account_provider import HttpAccountProvider, LeaseProviderError
 from .atomic_files import replace_with_retry
 from apex_registration.config import DEFAULTS, config_path, load_config, environment
 from apex_registration.recovery import MAX_ATTEMPTS, completed, recovery_action
+from apex_registration.utils.bitbrowser import call_local_api
 
 
 def read_json(path, default=None):
@@ -70,9 +71,13 @@ class BitBrowser:
     def call(self, path, data=None):
         req = Request(self.url + path, data=json.dumps(data or {}).encode(),
                       headers={'Content-Type': 'application/json', **({'x-api-key': self.api_key} if self.api_key else {})})
-        with self.opener.open(req, timeout=10) as response:
-            body = json.loads(response.read())
-        if body.get('success') is not True:
+
+        def send():
+            with self.opener.open(req, timeout=10) as response:
+                return json.loads(response.read())
+        # Shares the machine-wide turn with registration children opening windows.
+        body = call_local_api(send, unreachable=(OSError,))
+        if not isinstance(body, dict) or body.get('success') is not True:
             raise RuntimeError('BitBrowser 接口调用失败：' + path)
         return body.get('data')
 

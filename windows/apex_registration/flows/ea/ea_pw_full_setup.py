@@ -36,6 +36,7 @@ from apex_registration.utils.browser_profile import (  # noqa: E402
     save_page_screenshot,
 )
 from apex_registration.utils.flow_runtime import FlowRuntime  # noqa: E402
+from apex_registration.utils.bitbrowser import BitBrowserError  # noqa: E402
 from apex_registration.recovery import restore_checkpoint, transport_failure
 
 from . import try_ea_once as protocol  # noqa: E402
@@ -1940,6 +1941,11 @@ def main() -> int:
             elif "Roxy" in name or "Roxy" in detail or "50100" in detail:
                 result["error_code"] = "roxy_unavailable"
                 result["error_message"] = f"RoxyBrowser 无法打开指纹窗口：{detail[:300]}"
+            elif isinstance(exc, BitBrowserError):
+                # Local browser trouble, not an EA outcome; recovery may retry it.
+                result["error_code"] = "browser_unavailable"
+                result["stage"] = RUNTIME.operation.get("stage") or result["stage"]
+                result["error_message"] = f"BitBrowser 无法打开指纹窗口：{detail[:300]}"
             else:
                 result["error_code"] = ("ea_network_error" if transport_failure(exc) else
                                         "ea_action_timeout" if isinstance(exc, PWTimeout) else "ea_full_setup_crashed")
