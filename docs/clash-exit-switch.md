@@ -1,38 +1,37 @@
-# Windows Runner 的 Clash 出口切换
+# Windows Runner 的网络出口：上报与 Clash 切换
 
-账号租约的 `exitCountry`（HK、US、JP）决定本机选择哪个节点。它表示注册出口的国家/地区，不要求重用注册时的 IP。没有 `clash` 配置时保持原行为。
+## 出口上报（所有机器，无需配置）
 
-将下面的 `clash` 对象合入该 Windows Runner 的 `windows/account-cycle.private.json`，节点名替换为本机 Clash 中的真实名称。私有配置和密钥不要提交。
+每次 EA 登录前，以及租约运行中每 30 分钟，Runner 探测两条路径并上报 Forge `POST /v1/runner/network-exits`：
+
+- **系统代理**：Windows 系统代理开启时，经它访问 `ipinfo.io`（失败再用 `ip-api.com`）。EA App 走这条路。
+- **直连**：不经任何代理。未开 TUN 时游戏 UDP 走这条路；开了 TUN 时它也会被 Clash 接管。
+
+只上报 IP、国家、地区、城市、ASN、运营商和 Clash 节点名，不上报代理地址或密钥。上报在后台进行，失败不会影响登录和游戏；网络中断时最多保留 10 条，随下一次上报补发。Forge 的 Runner 列表显示最近一次出口，并标出账号注册国家与出口国家不一致、或系统代理与直连出口不同的情况。
+
+## Clash 切换（可选，按机器开启）
+
+在该机器的 `windows/account-cycle.private.json` 合入：
 
 ```json
 {
   "clash": {
-    "apiBase": "http://127.0.0.1:9090",
-    "secret": "填写本机控制接口密钥",
-    "group": "游戏出口",
-    "nodes": {"HK": "香港节点", "US": "美国节点", "JP": "日本节点"},
-    "proxyUrl": "http://127.0.0.1:7890",
-    "verifyUrl": "https://ipinfo.io/json"
+    "apiBase": "http://127.0.0.1:9097",
+    "secret": "Clash Verge 设置里的 API 密钥",
+    "group": "Final"
   }
 }
 ```
 
-Clash 使用规则模式、开启 TUN、关闭系统代理和 IPv6；允许识别 Windows 进程（`find-process-mode` 不要设为 `off`）。`游戏出口` 应为可选择的节点组，节点需要支持游戏的 UDP 流量。控制接口和 HTTP/mixed 代理端口必须属于同一个 Clash 实例。
+`group` 是游戏流量实际使用的节点组。可在 Clash Verge 的「连接」页查看 `r5apex.exe` 的链路；本订阅未匹配规则的流量走 `Final`。
 
-把以下规则放在订阅的通用分流规则前面。节点组名称必须与 `clash.group` 完全相同；更换探测服务时同时更换域名规则。
+换号时（上一账号已退出、新账号登录前）Runner：
 
-```yaml
-rules:
-  - PROCESS-NAME,EADesktop.exe,游戏出口
-  - PROCESS-NAME,r5apex.exe,游戏出口
-  - DOMAIN,ipinfo.io,游戏出口
-  # 此处接原有的其他规则
-```
+1. 用 `tasklist` 确认 Apex 没在运行；在运行或无法确认时不切换。
+2. 从 `group` 的成员里找账号注册国家（HK / US / JP）的节点。成员可以是节点本身，也可以是 `HK` 这类选择组。按节点名里的国旗识别国家，「到期」「流量」这类说明条目自动排除。
+3. 随机排序，刚用过的节点排到后面，依次测延迟（`generate_204`，4 秒超时），用第一个通过的节点，最多测 6 个。
+4. 切换后核对组的当前节点，并断开 EA App 和 Apex 的旧连接。
 
-Runner 按 API 返回的顺序检查规则，识别 `ProcessName` 等实际 API 类型，并跳过被禁用的规则。游戏和出口探测必须都指向所切换的组；更靠前的规则若可能把流量送到别处，就给出调整规则的提示。只知道进程名时，单独一条 `PROCESS-PATH` 不能证明其安装路径正确，补充上述进程名规则即可。
+找不到可用节点、Clash 连不上、或游戏在运行时，保持当前节点继续登录，并把原因随出口上报。运行中的复查只读取 Clash 连接，报告游戏连接是否经过所选节点，从不切换。
 
-切换发生在退出上一个账号后、提交新账号登录前；已经登录当前账号时不切换。切换后只清理 `EADesktop.exe` 和 `r5apex.exe` 的旧连接，并通过指定的本机代理端口检查实际国家。控制密钥仅发送给本机控制接口，探测不携带密钥、不接受重定向，也不受 `NO_PROXY` 绕过。探测服务应返回包含 `country`/`countryCode`/`country_code` 和 `ip`/`query` 的 JSON；只返回两位国家代码的服务也能核对国家，但不能记录 IP。
-
-EA 创建 checkpoint 会单独保存注册出口，后续绑定或 2FA 重试不会覆盖；该事实沿用现有注册任务诊断字段展示。游戏登录前只检查一次出口，并在 Runner 日志中显示本次国家和 IP。没有新增监控、数据库表或环境恢复流程。HTTP 探测 IP 不等于已观测到游戏 UDP 的 IP；缺失历史国家时沿用 HK 默认值。
-
-本机测试验证接口和编排逻辑；Windows 首次启用仍需在自然换号时，核对 Clash 连接面板中 `EADesktop.exe`、`r5apex.exe` 的实际节点及 Runner 的登录、进局结果。配置检查与 HTTP 出口探测不能单独证明 Windows TUN 接管了所有游戏流量。
+游戏 UDP 要经过节点需开启 TUN，且游戏进程的规则指向 `group`。没开 TUN 时，Forge 会显示「游戏连接没有经过所选节点」或「系统代理与直连出口不同」。

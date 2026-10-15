@@ -874,10 +874,15 @@ def run_account_cycle(
                 from .registration_worker import RegistrationWorker
                 registration = RegistrationWorker(provider, settings, runs_root, maintenance=maintenance,
                     **({'sleep': maintenance.sleep} if maintenance is not None else {}))
+            exit_reporter = None
+            if isinstance(provider, account_provider.HttpAccountProvider):
+                from .network_exit import ExitReporter
+                exit_reporter = ExitReporter(provider)
             orchestrator = AccountOrchestrator(
                 provider=provider,
                 registration=registration,
                 exit_switch=exit_switch,
+                exit_reporter=exit_reporter,
                 ea_driver=ea_driver,
                 play_session=play_session,
                 checkpoint_store=AtomicCheckpointStore(

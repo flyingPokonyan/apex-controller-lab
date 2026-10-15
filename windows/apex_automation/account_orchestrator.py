@@ -8,7 +8,6 @@ import time
 from typing import Callable, Protocol
 import uuid
 
-from .clash_exit import ExitNotReady
 from .account_provider import (
     AccountLease,
     AccountProvider,
@@ -130,6 +129,7 @@ class AccountOrchestrator:
         maintenance=None,
         registration=None,
         exit_switch=None,
+        exit_reporter=None,
     ) -> None:
         self.provider = provider
         self.ea_driver = ea_driver
@@ -148,6 +148,8 @@ class AccountOrchestrator:
         self.maintenance = maintenance
         self.registration = registration
         self.exit_switch = exit_switch
+        self.exit_reporter = exit_reporter
+        self._exit_monitor = None
         self._phase_started_at = time.monotonic()
         self._checkpoint_lock = threading.Lock()
         self._provider_operation_lock = threading.RLock()
@@ -289,6 +291,9 @@ class AccountOrchestrator:
         if self._lease_keeper is not None:
             self._lease_keeper.stop()
             self._lease_keeper = None
+        if self._exit_monitor is not None:
+            self._exit_monitor.stop()
+            self._exit_monitor = None
 
     def _reconcile_server_release(self) -> bool:
         checkpoint = self._checkpoint
@@ -506,6 +511,16 @@ class AccountOrchestrator:
         )
         keeper.start()
         self._lease_keeper = keeper
+        reporter = getattr(self, "exit_reporter", None)
+        if reporter is not None:
+            from .network_exit import ExitMonitor
+
+            if self._exit_monitor is not None:
+                self._exit_monitor.stop()
+            self._exit_monitor = ExitMonitor(
+                reporter, (lease.lease_id, lease.lease_fence), clash=getattr(self, "exit_switch", None),
+                active=lambda: self._lease_keeper is keeper,
+            ).start()
         return keeper
 
     def _lease_gate(
@@ -609,12 +624,18 @@ class AccountOrchestrator:
     def _align_exit(self, lease: AccountLease) -> None:
         # Only the gap after the previous sign-out and before this login.
         # A session that is already the leased account keeps its exit.
+        # Neither switching nor reporting can stop the login.
+        clash = None
         switch = getattr(self, "exit_switch", None)
-        if switch is None:
-            return
-        observation = switch.prepare(lease.exit_country)
-        if isinstance(observation, dict):
-            self.notify(f"账号出口已对齐：{observation['country']}，IP {observation['ip'] or '未返回'}")
+        if switch is not None:
+            clash = switch.prepare(lease.exit_country)
+            if clash.get("node"):
+                self.notify(f"游戏出口切换到 {clash['node']}（{clash['delayMs']} ms）")
+            else:
+                self.notify(f"游戏出口未切换（{clash.get('error')}），沿用当前节点")
+        reporter = getattr(self, "exit_reporter", None)
+        if reporter is not None:
+            reporter.report_later("login", (lease.lease_id, lease.lease_fence), clash=clash)
 
     def _password_recovery_handler(self, lease):
         def recover(action, credentials):
@@ -1346,9 +1367,6 @@ class AccountOrchestrator:
                     error.reason_code,
                 )
             return self._pause(error.reason_code, manual=True)
-        except ExitNotReady as error:
-            self.notify(f"出口未对准，停止登录：{error}")
-            return self._pause("EXIT_COUNTRY_MISMATCH", manual=True)
         except Exception as error:
             self.notify(
                 f"账号编排异常：{type(error).__name__} @ {self._phase()}：{error}"
