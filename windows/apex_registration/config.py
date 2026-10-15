@@ -8,6 +8,8 @@ DEFAULTS = {
     'bitbrowserApiKey': '',
     'forgeProxy': 'direct',
     'timeoutSeconds': 1800,
+    # Newest Chrome kernel already downloaded in this BitBrowser; empty keeps 130.
+    'bitbrowserCore': '',
 }
 
 
@@ -26,7 +28,7 @@ def load_config(path):
         if not isinstance(supplied, dict):
             raise ValueError('registration.private.json 必须是 JSON 对象')
         data.update(supplied)
-    for key in ('bitbrowserUrl', 'bitbrowserApiKey', 'forgeProxy'):
+    for key in ('bitbrowserUrl', 'bitbrowserApiKey', 'forgeProxy', 'bitbrowserCore'):
         if not isinstance(data[key], str):
             raise ValueError('注册配置字段类型错误：' + key)
         data[key] = data[key].strip()
@@ -37,6 +39,8 @@ def load_config(path):
         transport = urlparse(data['forgeProxy'])
         if transport.scheme not in ('http', 'https') or not transport.hostname:
             raise ValueError('forgeProxy 应为 direct 或完整的 HTTP 代理地址')
+    if data['bitbrowserCore'] and not (data['bitbrowserCore'].isdigit() and 100 <= int(data['bitbrowserCore']) <= 999):
+        raise ValueError('bitbrowserCore 应为 BitBrowser 内核主版本号，例如 "136"')
     timeout = data['timeoutSeconds']
     if type(timeout) not in (int, float) or not 60 <= timeout <= 14400:
         raise ValueError('timeoutSeconds 应在 60 到 14400 秒之间')
@@ -44,8 +48,11 @@ def load_config(path):
 
 
 def environment(data):
-    return {
+    values = {
         'GAME_ACCOUNTS_BIT_API': data['bitbrowserUrl'],
         'GAME_ACCOUNTS_BIT_API_KEY': data['bitbrowserApiKey'],
         'FORGE_PROXY': data['forgeProxy'] or 'direct',
     }
+    if data.get('bitbrowserCore'):
+        values['GAME_ACCOUNTS_BIT_CORE'] = data['bitbrowserCore']
+    return values

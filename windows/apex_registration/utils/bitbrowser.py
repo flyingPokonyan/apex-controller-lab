@@ -146,6 +146,21 @@ def _chrome_major() -> str:
     return raw if raw.isdigit() else "130"
 
 
+def kernel_mismatch(actual_version: str, claimed_major: int) -> str | None:
+    """Why the opened kernel cannot carry this task's Chrome claim, if it cannot.
+
+    ``actual_version`` is the CDP product version, e.g. ``130.0.6723.117``.
+    An unreadable version is not treated as a mismatch.
+    """
+    head = str(actual_version or "").split("/")[-1].split(".")[0]
+    if not head.isdigit() or int(head) == int(claimed_major):
+        return None
+    return (
+        f"BitBrowser 实际内核 Chrome {head} 与本次声明的 Chrome {claimed_major} 不一致："
+        "请在 BitBrowser 中下载该内核，或把 registration.private.json 的 bitbrowserCore 改成已下载的内核"
+    )
+
+
 def _fingerprint() -> dict[str, Any]:
     """One Windows Chrome. Language and timezone follow the proxy exit."""
     major = _chrome_major()

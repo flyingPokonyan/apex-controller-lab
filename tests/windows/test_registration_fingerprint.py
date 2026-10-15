@@ -54,6 +54,28 @@ class FingerprintConsistencyTests(unittest.TestCase):
         self.assertEqual((pinned["coreVersion"], pinned["version"]), ("124", "124"))
         self.assertIn("Chrome/124.0.0.0", pinned["userAgent"])
 
+    def test_opened_kernel_must_match_the_claimed_chrome(self):
+        self.assertIsNone(bitbrowser.kernel_mismatch("130.0.6723.117", 130))
+        self.assertIsNone(bitbrowser.kernel_mismatch("Chrome/130.0.6723.117", 130))
+        self.assertIsNone(bitbrowser.kernel_mismatch("", 130))
+        message = bitbrowser.kernel_mismatch("136.0.7103.49", 130)
+        self.assertIn("Chrome 136", message)
+        self.assertIn("bitbrowserCore", message)
+
+    def test_ea_ids_take_several_real_shapes_and_keep_ea_rules(self):
+        import re
+        from apex_registration.utils.browser_profile import rand_gamer_id
+        samples = [rand_gamer_id() for _ in range(400)]
+        for value in samples:
+            self.assertRegex(value, r"^[A-Za-z][A-Za-z0-9_]{7,15}$")
+            self.assertFalse(any(word in value.lower() for word in ("ea", "origin", "admin", "support")), value)
+            self.assertIsNone(re.fullmatch(r"[A-Za-z2-7]{16}", value), value)
+            self.assertIsNone(re.search(r"(19|20)\d\d", value), value)
+        shapes = {("_" in v, bool(re.search(r"\d", v)), v != v.lower()) for v in samples}
+        self.assertGreaterEqual(len(shapes), 5)
+        self.assertLess(sum(1 for v in samples if re.fullmatch(r"[a-z]+_[a-z]+", v)), 80)
+        self.assertGreater(len(set(samples)), 380)
+
     def test_protocol_language_and_steam_locale_follow_the_exit(self):
         with patch.dict(os.environ, {"EA_REGISTER_COUNTRY": "JP"}, clear=False):
             os.environ.pop("EA_REGISTER_UTC_OFFSET", None)

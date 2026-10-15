@@ -211,8 +211,8 @@ _EA_ID_RE = re.compile(r"^[A-Za-z][A-Za-z0-9_]{3,15}$")
 _EA_ID_MIN = 8
 _EA_ID_MAX = 16
 _RESERVED_WORDS = ("ea", "origin", "admin", "support")
-# Less common given names. Top chart names plus a year (emma2001) are already
-# taken on EA and read as a default account.
+# Real EA IDs come in many shapes. One fixed template (lowercase name_thing)
+# made every new account look alike, so several common shapes are drawn.
 _GIVEN_NAME_WORDS = (
     "soren", "leif", "nils", "idris", "maren", "torin", "brynn", "silas",
     "callum", "freya", "orion", "cassia", "espen", "astrid", "ingrid",
@@ -223,17 +223,50 @@ _GIVEN_NAME_WORDS = (
     "pippa", "renzo", "tamsin", "weston", "arno", "bram", "cedric",
     "dorian", "elin", "farid", "greta", "helga", "ilya", "johan",
     "karim", "lars", "malin", "oskar", "pavel", "ramon", "saskia",
-    "tove", "vadim", "wynn",
+    "tove", "vadim", "wynn", "adrian", "alden", "amara", "anton",
+    "bianca", "camila", "carmen", "colin", "conor", "daria", "declan",
+    "elias", "emil", "esme", "felix", "fiona", "gavin", "hugo", "imogen",
+    "iris", "ivan", "jasper", "jonas", "julian", "kira", "lena", "levi",
+    "lucia", "luka", "milo", "mira", "nadia", "nico", "nora", "owen",
+    "paloma", "quinn", "rafael", "rory", "rowan", "selma", "simon",
+    "talia", "theo", "tobias", "vera", "viktor", "wren", "yara", "zane",
+    "zora", "abel", "boris", "clara", "dmitri", "edgar", "flora",
+    "hector", "ines", "jakob", "kamil", "linus", "matteo", "nadine",
+    "otto", "priya", "rasmus", "stefan", "tomas", "ursula", "vince",
 )
-# Specific, not the first animal everyone types. fox/wolf/moon/cloud plus a
-# year was taken immediately (cloud2001).
-_LIKED_THING_WORDS = (
+_SURNAME_WORDS = (
+    "holt", "marsh", "pryor", "quill", "rowe", "sato", "tanner", "vance",
+    "wilde", "yates", "abbot", "baird", "cole", "dalton", "ellis", "finch",
+    "grant", "hale", "ivers", "jensen", "keller", "lowe", "mercer", "nolan",
+    "oakes", "parr", "reid", "shaw", "thorne", "voss", "walsh", "york",
+    "ames", "blake", "crane", "doyle", "fenn", "gale", "hart", "irwin",
+    "joyce", "kerr", "lyle", "moss", "nash", "orton", "pike", "stone",
+    "trent", "vale", "ward", "berg", "dahl", "falk", "lund", "moller",
+    "nyberg", "strand", "varga", "novak", "kovac", "horvat", "rossi",
+    "conti", "moretti", "costa", "silva", "brandt", "fischer", "hoffman",
+    "kruger", "lang", "meyer", "richter", "schulz", "wagner", "zimmer",
+)
+_ADJECTIVE_WORDS = (
+    "quiet", "rapid", "amber", "lucky", "silent", "brave", "calm", "crimson",
+    "dusty", "fuzzy", "golden", "hollow", "icy", "jolly", "keen", "lunar",
+    "misty", "noble", "pale", "rusty", "salty", "tidy", "urban", "vivid",
+    "wild", "cosmic", "frosty", "gentle", "humble", "lazy", "mellow",
+    "nimble", "proud", "rogue", "sly", "stormy", "swift", "tiny", "witty",
+    "bold", "fancy", "grim", "neon", "polar", "scarlet", "sunny", "velvet",
+)
+_NOUN_WORDS = (
     "juniper", "heron", "marigold", "cedar", "pebble", "starling",
     "birch", "coral", "cactus", "harbor", "sparrow", "thistle",
     "fennel", "quartz", "lantern", "compass", "fiddle", "bramble",
     "sorrel", "yarrow", "saffron", "paprika", "nutmeg", "anise",
     "cairn", "fjord", "atoll", "mesa", "butte", "heath", "moor",
     "kiln", "cello", "banjo", "loom", "keel", "dune", "glen", "cove",
+    "otter", "falcon", "lynx", "raven", "badger", "comet", "ember",
+    "fable", "glacier", "jigsaw", "kettle", "lagoon", "nomad", "orchid",
+    "pixel", "quiver", "rocket", "saber", "tundra", "vortex", "walrus",
+    "zephyr", "anchor", "bandit", "cinder", "ferret", "gopher", "hornet",
+    "iguana", "jackal", "koala", "lemur", "magpie", "narwhal", "oriole",
+    "panda", "quokka", "robin", "salmon", "toucan", "wombat", "mango",
 )
 
 
@@ -254,7 +287,11 @@ def _clean_words(words: tuple[str, ...]) -> tuple[str, ...]:
 
 
 _GIVEN_NAMES = _clean_words(_GIVEN_NAME_WORDS)
-_LIKED_THINGS = _clean_words(_LIKED_THING_WORDS)
+_SURNAMES = _clean_words(_SURNAME_WORDS)
+_ADJECTIVES = _clean_words(_ADJECTIVE_WORDS)
+_NOUNS = _clean_words(_NOUN_WORDS)
+# The previous single template drew from these two lists.
+_LIKED_THINGS = _NOUNS
 
 
 def _valid_ea_id(candidate: str) -> str | None:
@@ -271,30 +308,42 @@ def _valid_ea_id(candidate: str) -> str | None:
     return candidate
 
 
-def _id_name_thing() -> str | None:
-    name = random.choice(_GIVEN_NAMES)
-    thing = random.choice(_LIKED_THINGS)
-    return _valid_ea_id(f"{name}_{thing}")
+def _cap(word: str) -> str:
+    return word[:1].upper() + word[1:]
 
 
-def _id_two_things() -> str | None:
-    left, right = random.sample(list(_LIKED_THINGS), 2)
-    return _valid_ea_id(f"{left}_{right}")
+def _digits(low: int, high: int) -> str:
+    # Birth years are the crowded default (emma2001 was already taken).
+    while True:
+        value = random.randint(low, high)
+        if not 1900 <= value <= 2099:
+            return str(value)
+
+
+# (weight, builder). Shapes seen on real gamer tags: FirstLast, name plus
+# digits, AdjectiveNoun, initials, and the occasional underscore.
+_ID_SHAPES = (
+    (20, lambda: _cap(random.choice(_GIVEN_NAMES)) + _cap(random.choice(_SURNAMES))),
+    (12, lambda: random.choice(_GIVEN_NAMES) + random.choice(_SURNAMES) + _digits(10, 99)),
+    (12, lambda: random.choice((str.lower, _cap))(random.choice(_GIVEN_NAMES)) + _digits(100, 9999)),
+    (14, lambda: _cap(random.choice(_ADJECTIVES)) + _cap(random.choice(_NOUNS))),
+    (8, lambda: random.choice(_ADJECTIVES) + random.choice(_NOUNS) + _digits(10, 999)),
+    (10, lambda: _cap(random.choice(_GIVEN_NAMES)) + random.choice(_SURNAMES)[0].upper() + _digits(10, 99)),
+    (8, lambda: random.choice(_NOUNS) + _digits(100, 9999)),
+    (8, lambda: f"{random.choice(_GIVEN_NAMES)}_{random.choice(_NOUNS)}"),
+    (4, lambda: f"{_cap(random.choice(_GIVEN_NAMES))}_{_cap(random.choice(_SURNAMES))}"),
+)
 
 
 def rand_gamer_id() -> str:
-    """Pronounceable handle. ASCII only; Juno rejects CJK in originId.
-
-    A less common given name plus one specific thing. Birth years and
-    fox/wolf/cloud are the crowded defaults, so they are not used.
-    """
-    builders = (_id_name_thing, _id_two_things)
-    weights = (78, 22)
-    for _ in range(40):
-        candidate = random.choices(builders, weights=weights)[0]()
+    """Pronounceable handle. ASCII only; Juno rejects CJK in originId."""
+    weights = [weight for weight, _build in _ID_SHAPES]
+    builders = [build for _weight, build in _ID_SHAPES]
+    for _ in range(60):
+        candidate = _valid_ea_id(random.choices(builders, weights=weights)[0]())
         if candidate:
             return candidate
-    return "soren_cairn"
+    return f"{random.choice(_GIVEN_NAMES)}{random.choice(_SURNAMES)}{_digits(10, 99)}"[:_EA_ID_MAX]
 
 
 def pick_register_country() -> str:

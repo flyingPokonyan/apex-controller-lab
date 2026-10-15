@@ -2,5 +2,6 @@
   "bitbrowserUrl": "http://127.0.0.1:54345",
   "bitbrowserApiKey": "",
   "forgeProxy": "direct",
-  "timeoutSeconds": 1800
+  "timeoutSeconds": 1800,
+  "bitbrowserCore": ""
 }

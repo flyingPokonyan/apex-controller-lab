@@ -23,6 +23,17 @@ class RegistrationConfigTests(unittest.TestCase):
         self.assertNotIn('CAPTCHALY_KEY', environment(data))
         self.assertEqual(environment(data)['FORGE_PROXY'], 'direct')
 
+    def test_bitbrowser_core_reaches_registration_children_only_when_set(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / 'registration.private.json'
+            self.assertNotIn('GAME_ACCOUNTS_BIT_CORE', environment(load_config(path)))
+            path.write_text(json.dumps(dict(bitbrowserCore='136')))
+            self.assertEqual(environment(load_config(path))['GAME_ACCOUNTS_BIT_CORE'], '136')
+            for bad in ('latest', '13', 136):
+                path.write_text(json.dumps(dict(bitbrowserCore=bad)))
+                with self.assertRaises(ValueError):
+                    load_config(path)
+
     def test_identity_replacement_preserves_registration_settings(self):
         with tempfile.TemporaryDirectory() as directory:
             identity = Path(directory) / 'account-cycle.private.json'

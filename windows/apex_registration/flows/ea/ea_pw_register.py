@@ -27,9 +27,10 @@ from playwright.sync_api import TimeoutError as PWTimeout
 from playwright.sync_api import sync_playwright
 
 
-from apex_registration.utils.bitbrowser import BitBrowserClient, uses_bitbrowser  # noqa: E402
+from apex_registration.utils.bitbrowser import BitBrowserClient, BitBrowserError, kernel_mismatch, uses_bitbrowser  # noqa: E402
 from apex_registration.utils.roxybrowser import RoxyBrowserClient, roxy_host, uses_roxybrowser_engine  # noqa: E402
 from apex_registration.utils.browser_profile import (  # noqa: E402
+    CHROME_MAJOR,
     PLAYWRIGHT_CHROME_ARGS,
     pick_register_country,
     playwright_context_options,
@@ -2046,6 +2047,13 @@ def attach_browser(playwright, *, proxy: str | None, seed: str, on_profile_opene
     if fingerprint_client is not None:
         try:
             browser = playwright.chromium.connect_over_cdp(opened["cdp"])
+            if uses_bitbrowser():
+                # The UA, client hints, TLS profile and Steam/captcha clients all
+                # claim CHROME_MAJOR; never register on a different engine.
+                log(f"BitBrowser kernel {browser.version} claimed Chrome {CHROME_MAJOR}")
+                mismatch = kernel_mismatch(browser.version, CHROME_MAJOR)
+                if mismatch:
+                    raise BitBrowserError(mismatch)
             if not browser.contexts:
                 raise RuntimeError("fingerprint CDP connected but has no context")
             context = browser.contexts[0]
