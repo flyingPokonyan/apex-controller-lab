@@ -624,15 +624,18 @@ class AccountOrchestrator:
     def _align_exit(self, lease: AccountLease) -> None:
         # Only the gap after the previous sign-out and before this login.
         # A session that is already the leased account keeps its exit.
-        # Neither switching nor reporting can stop the login.
+        # Neither switching nor reporting can stop the login. Without the
+        # device's Forge permission the Runner only reads its Clash.
         clash = None
         switch = getattr(self, "exit_switch", None)
-        if switch is not None:
+        if switch is not None and getattr(lease, "exit_switch", False):
             clash = switch.prepare(lease.exit_country)
             if clash.get("node"):
                 self.notify(f"游戏出口切换到 {clash['node']}（{clash['delayMs']} ms）")
             else:
                 self.notify(f"游戏出口未切换（{clash.get('error')}），沿用当前节点")
+        elif switch is not None:
+            clash = switch.current
         reporter = getattr(self, "exit_reporter", None)
         if reporter is not None:
             reporter.report_later("login", (lease.lease_id, lease.lease_fence), clash=clash)

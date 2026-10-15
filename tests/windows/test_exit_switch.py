@@ -4,10 +4,12 @@ from __future__ import annotations
 from dataclasses import replace
 from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+import io
 import json
 import os
 from pathlib import Path
 import random
+import socket
 import sys
 import tempfile
 import threading
@@ -20,12 +22,16 @@ sys.path.insert(0, str(REPOSITORY_ROOT / "windows"))
 
 from apex_automation.account_orchestrator import AccountOrchestrator
 from apex_automation.account_provider import FakeAccountProvider
+from apex_automation import clash_exit
 from apex_automation.clash_exit import (
+    ClashApi,
     ClashExitSwitch,
+    ClashUnavailable,
+    candidate_endpoints,
     candidate_routes,
     load_exit_switch,
     node_country,
-    _urllib_transport,
+    read_controller_settings,
 )
 from apex_automation.ea_app import EaAppAutomationError, EaIdentityFact, EaUiState
 from apex_automation.lease_keeper import LeaseKeeperSnapshot, LeaseKeeperState
@@ -38,7 +44,7 @@ INFO = ["到期: 2026-11-13", "流量: 15.63 GB / 400 GB"]
 
 
 class FakeClash:
-    """The subset of the mihomo controller API the Runner uses."""
+    """The subset of the mihomo controller API the Runner uses, as a ClashApi."""
 
     def __init__(self, *, dead=(), connections=None, down=False):
         leaves = HK + US + JP + INFO + ["🇸🇬 高级 专线 狮城 01"]
@@ -49,27 +55,29 @@ class FakeClash:
             "HK": {"type": "Selector", "now": HK[0], "all": HK},
             "US": {"type": "Selector", "now": US[0], "all": US},
             "JP": {"type": "Selector", "now": JP[0], "all": JP},
-            "Final": {"type": "Selector", "now": "Proxies", "all": ["Proxies", "DIRECT", "HK", "US", "JP"]},
+            # Same shape as the YToo profile: Final -> Proxies -> node.
+            "Final": {"type": "Selector", "now": "Proxies", "all": ["Proxies", "DIRECT"]},
         })
+        self.rules = [{"type": "GeoIP", "payload": "CN", "proxy": "DIRECT"}, {"type": "Match", "payload": "", "proxy": "Final"}]
         self.dead = set(dead)
         self.connections = connections or []
         self.down = down
         self.calls = []
-        self.headers = []
 
-    def __call__(self, method, url, *, headers, body, timeout):
+    def request(self, method, path, payload=None, *, timeout=10):
         if self.down:
-            raise OSError("connection refused")
-        path = unquote(url.split("127.0.0.1:9097", 1)[1])
+            raise ClashUnavailable("not_found")
+        path = unquote(path)
         self.calls.append((method, path))
-        self.headers.append(headers)
         if method == "GET" and path == "/proxies":
             return 200, json.dumps({"proxies": self.proxies}).encode()
+        if method == "GET" and path == "/rules":
+            return 200, json.dumps({"rules": self.rules}).encode()
         if method == "GET" and path.endswith("/delay?timeout=4000&url=http://www.gstatic.com/generate_204"):
             node = path[len("/proxies/"):].split("/delay")[0]
             return (504, b'{"message":"timeout"}') if node in self.dead else (200, b'{"delay":87}')
         if method == "PUT" and path.startswith("/proxies/"):
-            self.proxies[path[len("/proxies/"):]]["now"] = json.loads(body)["name"]
+            self.proxies[path[len("/proxies/"):]]["now"] = payload["name"]
             return 204, b""
         if method == "GET" and path == "/connections":
             return 200, json.dumps({"connections": self.connections}).encode()
@@ -83,13 +91,12 @@ class FakeClash:
             name = self.proxies[name]["now"]
         return name
 
-    def puts(self):
-        return [call for call in self.calls if call[0] == "PUT"]
+    def writes(self):
+        return [call for call in self.calls if call[0] in {"PUT", "DELETE"}]
 
 
-def switch(clash, *, running=False, seed=1):
-    return ClashExitSwitch(api_base="http://127.0.0.1:9097", secret="local-secret", group="Final",
-                           transport=clash, game_running=lambda: running, rng=random.Random(seed))
+def switch(clash, *, running=False, seed=1, group=None):
+    return ClashExitSwitch(api=clash, group=group, game_running=lambda: running, rng=random.Random(seed))
 
 
 class NodeChoiceTests(unittest.TestCase):
@@ -100,71 +107,193 @@ class NodeChoiceTests(unittest.TestCase):
         self.assertIsNone(node_country(INFO[0]))
         routes = candidate_routes(FakeClash().proxies, "Final", "HK")
         self.assertEqual(sorted(route[-1][1] for route in routes), sorted(HK))
+        self.assertEqual({route[0] for route in routes}, {("Final", "Proxies")})
+
+    def test_group_comes_from_the_final_match_rule(self):
+        clash = FakeClash()
+        runner = switch(clash)
+        self.assertEqual(runner.current()["group"], "Final")
+        self.assertEqual(runner.current()["node"], INFO[0])
+        self.assertEqual(clash.writes(), [])
 
     def test_switch_uses_a_live_node_of_the_country_and_closes_old_game_connections(self):
         clash = FakeClash(dead=HK[:3], connections=[
-            {"id": "c1", "metadata": {"process": "r5apex.exe"}, "chains": [INFO[0], "Proxies"]},
+            {"id": "c1", "metadata": {"process": "r5apex.exe"}, "chains": [INFO[0], "Proxies", "Final"]},
             {"id": "c2", "metadata": {"processPath": r"C:\\Program Files\\Chrome\\chrome.exe"}, "chains": ["DIRECT"]},
         ])
         facts = switch(clash).prepare("HK")
-        self.assertEqual(facts["node"], HK[3])
-        self.assertEqual(facts["delayMs"], 87)
-        self.assertIsNone(facts["error"])
+        self.assertEqual((facts["node"], facts["delayMs"], facts["error"], facts["group"]), (HK[3], 87, None, "Final"))
         self.assertEqual(clash.selected(), HK[3])
         self.assertIn(("DELETE", "/connections/c1"), clash.calls)
         self.assertNotIn(("DELETE", "/connections/c2"), clash.calls)
-        self.assertEqual(clash.headers[0]["Authorization"], "Bearer local-secret")
 
     def test_never_switches_while_apex_runs(self):
         clash = FakeClash()
-        facts = switch(clash, running=True).prepare("HK")
-        self.assertEqual(facts["error"], "game_running")
+        self.assertEqual(switch(clash, running=True).prepare("HK")["error"], "game_running")
         self.assertEqual(clash.calls, [])
-        broken = ClashExitSwitch(api_base="http://127.0.0.1:9097", secret="", group="Final", transport=clash,
-                                 game_running=Mock(side_effect=OSError("tasklist")))
+        broken = ClashExitSwitch(api=clash, game_running=Mock(side_effect=OSError("tasklist")))
         self.assertEqual(broken.prepare("HK")["error"], "game_running")
 
-    def test_no_live_node_or_unreachable_clash_keeps_the_current_selection(self):
+    def test_no_live_node_missing_clash_or_group_keeps_the_current_selection(self):
         clash = FakeClash(dead=US)
         self.assertEqual(switch(clash).prepare("US")["error"], "no_node")
-        self.assertEqual(clash.puts(), [])
-        self.assertEqual(switch(FakeClash(down=True)).prepare("HK")["error"], "clash_unreachable")
-        missing = ClashExitSwitch(api_base="http://127.0.0.1:9097", secret="", group="游戏出口",
-                                  transport=FakeClash(), game_running=lambda: False)
-        self.assertEqual(missing.prepare("HK")["error"], "group_missing")
+        self.assertEqual(clash.writes(), [])
+        self.assertEqual(switch(FakeClash(down=True)).prepare("HK")["error"], "clash_not_found")
+        self.assertEqual(switch(FakeClash(down=True)).game_route()["error"], "clash_not_found")
+        self.assertEqual(switch(FakeClash(), group="游戏出口").prepare("HK")["error"], "group_missing")
 
     def test_consecutive_accounts_spread_over_nodes(self):
         runner = switch(FakeClash())
         chosen = [runner.prepare("HK")["node"] for _ in range(4)]
         self.assertEqual(len(set(chosen)), 4)
 
-    def test_game_route_tells_whether_game_connections_use_the_node(self):
+    def test_game_route_counts_only_apex_connections(self):
         clash = FakeClash()
         runner = switch(clash)
         node = runner.prepare("JP")["node"]
-        clash.connections = [{"id": "c", "metadata": {"process": "r5apex.exe"}, "chains": [node, "JP", "Final"]}]
-        self.assertEqual(runner.game_route()["gameViaNode"], True)
-        clash.connections = [{"id": "c", "metadata": {"process": "r5apex.exe"}, "chains": ["DIRECT"]}]
+        writes = len(clash.writes())
+        ea = {"id": "e", "metadata": {"process": "EADesktop.exe"}, "chains": [node, "Proxies", "Final"]}
+        clash.connections = [ea, {"id": "c", "metadata": {"process": "r5apex.exe"}, "chains": [node, "Proxies", "Final"]}]
+        self.assertEqual((runner.game_route()["gameConnections"], runner.game_route()["gameViaNode"]), (1, True))
+        clash.connections = [ea, {"id": "c", "metadata": {"process": "r5apex_dx12.exe"}, "chains": ["DIRECT"]}]
         facts = runner.game_route()
         self.assertEqual((facts["node"], facts["country"], facts["gameConnections"], facts["gameViaNode"]), (node, "JP", 1, False))
-        clash.connections = []
-        self.assertIsNone(runner.game_route()["gameViaNode"])
+        # An accelerator that takes Apex traffic leaves only EA App connections in Clash.
+        clash.connections = [ea]
+        facts = runner.game_route()
+        self.assertEqual((facts["gameConnections"], facts["gameViaNode"]), (0, None))
+        self.assertEqual(len(clash.writes()), writes)  # Reading the route never writes.
+
+
+class DiscoveryTests(unittest.TestCase):
+    def test_controller_settings_are_read_from_verge_runtime_config(self):
+        text = "\n".join([
+            "mixed-port: 7897",
+            "external-controller: ''",
+            "external-controller-pipe: \\\\.\\pipe\\verge-mihomo",
+            "external-controller-unix: /tmp/verge/verge-mihomo.sock",
+            "secret: 'abc''def'",
+            "tun:",
+            "  enable: true",
+        ])
+        settings = read_controller_settings(text)
+        self.assertEqual(settings["external-controller"], "")
+        self.assertEqual(settings["external-controller-pipe"], r"\\.\pipe\verge-mihomo")
+        self.assertEqual(settings["secret"], "abc'def")
+        self.assertEqual(read_controller_settings('external-controller-pipe: "\\\\\\\\.\\\\pipe\\\\x"')["external-controller-pipe"], r"\\.\pipe\x")
+
+    def test_endpoints_prefer_the_config_then_defaults_and_stay_local(self):
+        with tempfile.TemporaryDirectory() as directory:
+            config = Path(directory) / "clash-verge.yaml"
+            config.write_text("external-controller: 127.0.0.1:9191\nexternal-controller-unix: /tmp/x.sock\n"
+                              "external-controller-pipe: \\\\.\\pipe\\custom\nsecret: s3\n", encoding="utf-8")
+            endpoints = candidate_endpoints(paths=[config])
+            far = candidate_endpoints(api_base="http://10.0.0.5:9090", paths=[])
+        local = "pipe" if os.name == "nt" else "unix"
+        first = endpoints[0]
+        self.assertEqual(first[0], local)
+        self.assertIn(("http", "http://127.0.0.1:9191", "s3"), endpoints)
+        self.assertEqual(endpoints[-2:], [("http", "http://127.0.0.1:9097", ""), ("http", "http://127.0.0.1:9090", "")])
+        self.assertNotIn("http://10.0.0.5:9090", [address for _, address, _ in far])
+
+    def test_api_uses_first_answering_endpoint_and_sends_secret(self):
+        seen = []
+
+        def http(address, method, path, headers, body, timeout):
+            seen.append((address, path, headers.get("Authorization")))
+            if address.endswith(":9097"):
+                raise ConnectionRefusedError()
+            return 200, b'{"version":"v1.19"}'
+
+        api = ClashApi(lambda: [("http", "http://127.0.0.1:9097", ""), ("http", "http://127.0.0.1:9090", "k")],
+                       exchanges={"http": http})
+        self.assertEqual(api.request("GET", "/proxies")[0], 200)
+        self.assertEqual(seen[-1], ("http://127.0.0.1:9090", "/proxies", "Bearer k"))
+        with self.assertRaises(ClashUnavailable) as caught:
+            ClashApi(lambda: [], exchanges={}).request("GET", "/proxies")
+        self.assertEqual(str(caught.exception), "not_found")
+
+    def test_chunked_http_response_is_read_from_a_stream(self):
+        raw = b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\n5\r\n{\"a\":\r\n2\r\n1}\r\n0\r\n\r\n"
+        self.assertEqual(clash_exit._read_response(io.BytesIO(raw), "GET"), (200, b'{"a":1}'))
+
+    @unittest.skipUnless(hasattr(socket, "AF_UNIX") and os.name != "nt", "Unix socket controller")
+    def test_unix_socket_exchange(self):
+        directory = tempfile.mkdtemp(dir="/tmp")
+        self.addCleanup(lambda: __import__("shutil").rmtree(directory, ignore_errors=True))
+        path = os.path.join(directory, "c.sock")
+        server = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        server.bind(path)
+        server.listen(1)
+        received = []
+
+        def serve():
+            conn, _ = server.accept()
+            with conn:
+                data = b""
+                while b"\r\n\r\n" not in data:
+                    data += conn.recv(4096)
+                received.append(data)
+                conn.sendall(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\n{}")
+            server.close()
+
+        threading.Thread(target=serve, daemon=True).start()
+        self.assertEqual(clash_exit._unix_exchange(path, "GET", "/version", {}, None, 5), (200, b"{}"))
+        self.assertTrue(received[0].startswith(b"GET /version HTTP/1.1\r\n"))
+
+    @unittest.skipUnless(os.name == "nt", "Windows named pipe controller")
+    def test_named_pipe_exchange(self):
+        import ctypes
+        import uuid
+        from ctypes import wintypes
+
+        kernel = ctypes.WinDLL("kernel32", use_last_error=True)
+        kernel.CreateNamedPipeW.restype = wintypes.HANDLE
+        kernel.CreateNamedPipeW.argtypes = [wintypes.LPCWSTR, wintypes.DWORD, wintypes.DWORD, wintypes.DWORD,
+                                            wintypes.DWORD, wintypes.DWORD, wintypes.DWORD, wintypes.LPVOID]
+        kernel.ConnectNamedPipe.argtypes = [wintypes.HANDLE, wintypes.LPVOID]
+        kernel.ReadFile.argtypes = [wintypes.HANDLE, wintypes.LPVOID, wintypes.DWORD, ctypes.POINTER(wintypes.DWORD), wintypes.LPVOID]
+        kernel.WriteFile.argtypes = [wintypes.HANDLE, wintypes.LPCVOID, wintypes.DWORD, ctypes.POINTER(wintypes.DWORD), wintypes.LPVOID]
+        for name in ("FlushFileBuffers", "DisconnectNamedPipe", "CloseHandle"):
+            getattr(kernel, name).argtypes = [wintypes.HANDLE]
+        name = r"\\.\pipe\apex-test-" + uuid.uuid4().hex
+        handle = kernel.CreateNamedPipeW(name, 3, 0, 1, 65536, 65536, 0, None)  # duplex, byte mode
+        self.assertNotEqual(handle, wintypes.HANDLE(-1).value)
+        received = []
+
+        def serve():
+            kernel.ConnectNamedPipe(handle, None)
+            buffer, count, data = ctypes.create_string_buffer(65536), wintypes.DWORD(), b""
+            while b"\r\n\r\n" not in data:
+                kernel.ReadFile(handle, buffer, 65536, ctypes.byref(count), None)
+                data += buffer.raw[:count.value]
+            received.append(data)
+            reply = b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\n5\r\n{\"a\":\r\n2\r\n1}\r\n0\r\n\r\n"
+            kernel.WriteFile(handle, reply, len(reply), ctypes.byref(count), None)
+            kernel.FlushFileBuffers(handle)
+            kernel.DisconnectNamedPipe(handle)
+            kernel.CloseHandle(handle)
+
+        threading.Thread(target=serve, daemon=True).start()
+        self.assertEqual(clash_exit._pipe_exchange(name, "GET", "/version", {}, None, 5), (200, b'{"a":1}'))
+        self.assertTrue(received[0].startswith(b"GET /version HTTP/1.1\r\n"))
 
 
 class ConfigTests(unittest.TestCase):
-    def test_private_config_without_clash_stays_disabled_and_secret_is_not_echoed(self):
+    def test_without_private_config_the_runner_discovers_clash_itself(self):
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "account-cycle.private.json"
+            self.assertIsNone(load_exit_switch(path).configured_group)
             path.write_text(json.dumps({"schemaVersion": 1, "deviceId": "dev"}), encoding="utf-8")
-            self.assertIsNone(load_exit_switch(path))
-            path.write_text(json.dumps({"clash": {"apiBase": "http://10.1.2.3:9097", "secret": "do-not-log", "group": "Final"}}), encoding="utf-8")
+            self.assertIsInstance(load_exit_switch(path), ClashExitSwitch)
+            path.write_text(json.dumps({"clash": {"apiBase": "http://10.1.2.3:9097", "secret": "do-not-log"}}), encoding="utf-8")
             with self.assertRaises(ValueError) as caught:
                 load_exit_switch(path)
             self.assertNotIn("do-not-log", str(caught.exception))
-            path.write_text(json.dumps({"clash": {"apiBase": "http://127.0.0.1:9097", "secret": "s", "group": "Final"}}), encoding="utf-8")
-            self.assertEqual(load_exit_switch(path).group, "Final")
+            path.write_text(json.dumps({"clash": {"group": "游戏出口"}}), encoding="utf-8")
+            self.assertEqual(load_exit_switch(path).configured_group, "游戏出口")
 
-    def test_old_lease_without_a_country_is_hong_kong(self):
+    def test_old_lease_without_a_country_is_hong_kong_and_switching_is_off(self):
         from datetime import timedelta
         from apex_automation.account_provider import HttpAccountProvider, ProviderHttpResponse
 
@@ -180,10 +309,12 @@ class ConfigTests(unittest.TestCase):
             return HttpAccountProvider("https://runner.example/v1/runner/account-leases", "provider-secret-token",
                                        client_version="0.5.1", transport=transport)
 
-        self.assertEqual(provider().claim("claim_1", "LEVEL_TO_TARGET").exit_country, "HK")
-        self.assertEqual(provider(exitCountry="jp").claim("claim_2", "LEVEL_TO_TARGET").exit_country, "JP")
+        old = provider().claim("claim_1", "LEVEL_TO_TARGET")
+        self.assertEqual((old.exit_country, old.exit_switch), ("HK", False))
+        new = provider(exitCountry="jp", exitSwitch=True).claim("claim_2", "LEVEL_TO_TARGET")
+        self.assertEqual((new.exit_country, new.exit_switch), ("JP", True))
 
-    def test_controller_transport_ignores_ambient_proxies(self):
+    def test_http_controller_ignores_ambient_proxies(self):
         received = []
 
         class Handler(BaseHTTPRequestHandler):
@@ -200,8 +331,8 @@ class ConfigTests(unittest.TestCase):
         threading.Thread(target=server.serve_forever, daemon=True).start()
         try:
             with patch.dict(os.environ, {"HTTP_PROXY": "http://127.0.0.1:9", "NO_PROXY": ""}):
-                status, _ = _urllib_transport("GET", f"http://127.0.0.1:{server.server_port}/proxies",
-                                              headers={}, body=None, timeout=5)
+                status, _ = clash_exit._http_exchange(f"http://127.0.0.1:{server.server_port}", "GET", "/proxies",
+                                                      {}, None, 5)
         finally:
             server.shutdown()
             server.server_close()
@@ -268,9 +399,9 @@ class IdleKeeper:
 
 
 class ExitOrchestratorTests(unittest.TestCase):
-    def _run(self, *, signed_in, switch, reporter=None, country="HK"):
+    def _run(self, *, signed_in, switch, reporter=None, country="HK", allowed=True):
         lease = replace(FakeAccountProvider.lease("acct_1", now=datetime.now(timezone.utc)),
-                        expected_ea_account_id="ea_1", exit_country=country)
+                        expected_ea_account_id="ea_1", exit_country=country, exit_switch=allowed)
         with tempfile.TemporaryDirectory() as directory:
             log = []
             # The fake provider cannot hand out credentials, so a reached login stops right after this note.
@@ -300,6 +431,16 @@ class ExitOrchestratorTests(unittest.TestCase):
         self.assertLess(switched, log.index("EA 开始自动登录"))
         self.assertEqual(node_country(clash.selected()), "HK")
 
+    def test_without_device_permission_the_runner_only_reads_clash(self):
+        clash = FakeClash()
+        reporter = Mock()
+        log, _ = self._run(signed_in=False, switch=switch(clash), reporter=reporter, allowed=False)
+        self.assertFalse(any(item.startswith("游戏出口") for item in log))
+        self.assertIn("EA 开始自动登录", log)
+        reader = reporter.report_later.call_args.kwargs["clash"]
+        self.assertEqual(reader()["node"], INFO[0])
+        self.assertEqual(clash.writes(), [])
+
     def test_an_already_signed_in_account_does_not_switch_mid_session(self):
         runner = Mock()
         reporter = Mock()
@@ -307,7 +448,6 @@ class ExitOrchestratorTests(unittest.TestCase):
         runner.prepare.assert_not_called()
         reporter.report_later.assert_not_called()
         self.assertNotIn("EA 开始自动登录", log)
-
 
 if __name__ == "__main__":
     unittest.main()

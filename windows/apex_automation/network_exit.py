@@ -130,7 +130,13 @@ class ExitReporter:
         self._pending: list[dict] = []
         self._lock = threading.Lock()
 
-    def report(self, reason: str, lease: tuple[str, int] | None, *, clash: dict | None = None) -> dict:
+    def report(self, reason: str, lease: tuple[str, int] | None, *, clash=None) -> dict:
+        """``clash`` is a facts dict, or a reader called here, off the account cycle."""
+        if callable(clash):
+            try:
+                clash = clash()
+            except Exception:
+                clash = None
         observation = self.observe_exit()
         body = {
             "schemaVersion": 1,
@@ -158,7 +164,7 @@ class ExitReporter:
                 self._pending.pop(0)
         return body
 
-    def report_later(self, reason: str, lease: tuple[str, int] | None, *, clash: dict | None = None) -> None:
+    def report_later(self, reason: str, lease: tuple[str, int] | None, *, clash=None) -> None:
         threading.Thread(target=self._quiet, args=(reason, lease, clash), daemon=True,
                          name="network-exit-report").start()
 

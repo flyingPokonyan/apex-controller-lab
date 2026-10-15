@@ -147,6 +147,7 @@ class AccountLease:
     ring_progress: int | None = None
     ring_target: int | None = None
     exit_country: str = "HK"
+    exit_switch: bool = False
 
     def __post_init__(self) -> None:
         if self.lease_fence < 1:
@@ -647,6 +648,7 @@ class HttpAccountProvider:
             ring_progress=ring_progress,
             ring_target=ring_target,
             exit_country=exit_country,
+            exit_switch=payload.get("exitSwitch") is True,
         )
         known_account = self._lease_accounts.get(lease.lease_id)
         if known_account is not None and known_account != lease.account_id:
