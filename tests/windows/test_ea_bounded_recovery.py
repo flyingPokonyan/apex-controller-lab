@@ -76,7 +76,7 @@ class BoundedRecoveryTest(unittest.TestCase):
         driver.restart_app.assert_not_called()
         driver._restart_ea_process.assert_not_called()
 
-    def test_password_rejection_keeps_its_existing_password_reset_path(self):
+    def test_password_rejection_is_reported_without_restarting_ea(self):
         driver = self.driver()
         driver._sign_in_once = Mock(side_effect=EaCredentialsRejected('confirmed rejection'))
         with self.assertRaises(EaCredentialsRejected):

@@ -36,7 +36,7 @@ class PendingOperation(str, Enum):
     CREDENTIALS = "CREDENTIALS"
     RENEW = "RENEW"
     OTP = "OTP"
-    PASSWORD_RESET = "PASSWORD_RESET"
+    PASSWORD_RESET = "PASSWORD_RESET"  # Retired; older checkpoints may still name it.
     CLOSE = "CLOSE"
 
 

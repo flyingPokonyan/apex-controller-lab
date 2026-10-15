@@ -46,7 +46,6 @@ from .ea_app import (
 )
 from .ea_evidence import EaLoginEvidence, is_sensitive_text
 from .ea_login_input import read_focused_account
-from .ea_password_recovery import EaPasswordRecoveryMixin
 from .ea_process import (
     EaDesktopInstallation,
     desktop_app_creationflags,
@@ -259,7 +258,7 @@ class _LoginRestart(Exception):
     """BACK TO SIGN-IN was used; the caller must type the login again."""
 
 
-class WindowsEaHybridDriver(EaPasswordRecoveryMixin):
+class WindowsEaHybridDriver:
     """Win32/OCR fallback for the EA CEF surface that exposes no inner UIA tree."""
 
     def __init__(
@@ -1932,6 +1931,20 @@ class WindowsEaHybridDriver(EaPasswordRecoveryMixin):
         return cls._anchor(placed, LOGIN_BACK_TERMS, exact=True,
                            x_range=(0.02, 0.40), y_range=(0.04, 0.35))
 
+    def _trusted_control(self, observation, terms, *, y_range=(0.20, 0.95)):
+        placed = replace(observation, tokens=tuple(
+            token for token in observation.tokens if token.confidence >= 0.85
+        ))
+        point = self._anchor(placed, terms, exact=True, x_range=(0.05, 0.95), y_range=y_range)
+        for term in terms:
+            if point is not None:
+                break
+            point = phrase_point(placed.tokens, placed.rect, term,
+                                 x_range=(0.05, 0.95), y_range=y_range)
+        if point is None:
+            raise EaAppAutomationError("EA 页面未找到可信操作控件")
+        return point
+
     def _return_to_account_page(
         self, hwnd: int, observation: EaObservation,
     ) -> EaObservation:
@@ -1939,7 +1952,7 @@ class WindowsEaHybridDriver(EaPasswordRecoveryMixin):
         # potentially by another lease. Masked email copy cannot bind it to
         # these credentials. Start each new login with its own identifier.
         if observation.page is EaPage.RESET_SUCCESS:
-            point = self._recovery_control(observation, ("signin",), y_range=(0.25, 0.80))
+            point = self._trusted_control(observation, ("signin",), y_range=(0.25, 0.80))
             self._click_point(hwnd, *point)
             observation = self._wait_for_page(hwnd, (EaPage.EMAIL,), timeout_s=20.0)
         intermediate = (EaPage.PASSWORD, EaPage.OTP_METHOD, EaPage.OTP,
@@ -2013,10 +2026,11 @@ class WindowsEaHybridDriver(EaPasswordRecoveryMixin):
         if self.evidence is not None:
             self.notify(f"EA 登录证据目录：{self.evidence.rotate()}")
             self.evidence.protect(credentials.login_identifier, credentials.password)
-        recovery_attempted = False
         expired_restarts = 0
-        # One password recovery and one expired-session restart, at most.
-        for _attempt in range(3):
+        # One expired-session restart, at most. A rejected password is never
+        # reset here: EA forced resets marked accounts that were banned later,
+        # so Forge stops the account instead.
+        for _attempt in range(2):
             self._login_identifier_verified = False
             hwnd = self._ea_window()
             self._dismiss_expired_session(hwnd)
@@ -2058,30 +2072,6 @@ class WindowsEaHybridDriver(EaPasswordRecoveryMixin):
                     break
                 expired_restarts += 1
                 self.notify("EA 会话已过期，已返回登录页，重新登录")
-            except EaCredentialsRejected:
-                if recovery_attempted:
-                    raise
-                recovery_attempted = True
-                try:
-                    credentials = self._recover_password(hwnd, credentials, otp_supplier) or credentials
-                except EaCaptchaRequired as error:
-                    try:
-                        self._leave_recovery_captcha(hwnd)
-                    except EaAppAutomationError:
-                        pass
-                    self._record("password-recovery-failed", getattr(self, "_password_recovery_observation", None))
-                    raise EaCredentialsRejected("EA 密码恢复遇到 Captcha，跳过本次账号") from error
-                except EaAccountBanned:
-                    raise
-                except EaAppAutomationError as error:
-                    self._record("password-recovery-failed", getattr(self, "_password_recovery_observation", None))
-                    self.notify(str(error))
-                    if getattr(self, "_password_recovery_observation", None) is not None:
-                        try:
-                            self._leave_recovery_captcha(hwnd)
-                        except EaAppAutomationError:
-                            pass
-                    raise EaCredentialsRejected("EA 密码恢复未完成，凭据仍需核对") from error
         raise EaAppAutomationError("EA 会话过期后重新登录仍未完成")
 
     def _choose_otp_method(
