@@ -12,6 +12,14 @@ class EaAppAutomationError(RuntimeError):
     reason_code = "EA_UI_UNKNOWN"
 
 
+class EaWindowUnavailable(EaAppAutomationError):
+    """No EA window with content yet.
+
+    EA closes its login window the moment a sign-in succeeds and paints the
+    main window several seconds later; in between there is nothing to read.
+    """
+
+
 class EaCaptureUnavailable(EaAppAutomationError):
     """The screen could not be read at all, so no page can be named.
 
@@ -91,6 +99,10 @@ class EaApexStartFailed(EaAppAutomationError):
 
 class EaApexDownloadRequired(EaApexStartFailed):
     """The signed-in game hub is stale and only exposes Download."""
+
+
+class EaApexControlMissing(EaApexStartFailed):
+    """EA never showed the Apex entry or a Play/Update control; nothing was launched."""
 
 
 class EaOtpUnavailable(EaAppAutomationError):

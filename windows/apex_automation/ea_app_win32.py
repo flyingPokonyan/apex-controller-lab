@@ -28,6 +28,7 @@ from .ea_app import (
     EaAccountBanned,
     EaRestrictionUnconfirmed,
     EaAppAutomationError,
+    EaApexControlMissing,
     EaApexDownloadRequired,
     EaApexStartFailed,
     EaCaptchaRequired,
@@ -42,6 +43,7 @@ from .ea_app import (
     EaOtpUnavailable,
     EaUiState,
     EaUiRecoveryExhausted,
+    EaWindowUnavailable,
     OtpChallenge,
 )
 from .ea_evidence import EaLoginEvidence, is_sensitive_text
@@ -138,6 +140,16 @@ IDENTITY_BANDS = (
 )
 INPUT_SETTLE_S = 0.8
 MAX_OTP_ATTEMPTS = 3
+# After a submit EA's main window stayed blank or showed a spinner for 8–20 s
+# before painting the signed-in page (Forge evidence, 2026-10-16).
+SIGNIN_SETTLE_S = 30.0
+# 16 of 18 identity mismatches from 2026-10-07 to 10-16 were read within
+# seconds of sign-in while EA's account panel was still loading; the same
+# accounts verified on their next lease. A real other account stays put.
+IDENTITY_MISMATCH_HOLD_S = 10.0
+IDENTITY_VERIFY_TIMEOUT_S = 30.0
+# EA took longer than 25 s to show its login page after Sign out (lease 3076).
+SIGNOUT_TIMEOUT_S = 45.0
 EA_RESTART_TIMEOUT_S = 60.0
 EA_CACHE_RESTART_TIMEOUT_S = 120.0
 APP_RECOVERY_DIALOG_TIMEOUT_S = 15.0
@@ -149,6 +161,9 @@ APEX_LAUNCH_TIMEOUT_S = 180.0
 # Play shown again this long after a click means EA dropped that launch.
 APEX_RELAUNCH_AFTER_S = 60.0
 APEX_UPDATE_TIMEOUT_S = 2 * 60 * 60.0
+# How long the Apex page may show no Play, Update or Download after a click.
+APEX_ACTION_WAIT_S = 15.0
+APEX_ENTRY_RETRIES = 2
 APEX_INSTALL_DIR = Path(r"D:\Apex")
 HELP_TERMS = ("help", "帮助")
 APP_RECOVERY_TERMS = ("apprecovery", "应用恢复", "应用程序恢复")
@@ -469,8 +484,8 @@ class WindowsEaHybridDriver(EaPasswordRecoveryMixin):
                 continue
             if time.monotonic() >= deadline:
                 if saw_blank:
-                    raise EaAppAutomationError("EA 可见窗口没有可识别内容，已忽略空白窗口")
-                raise EaAppAutomationError("恢复窗口后仍没有发现可见的 EA App 主窗口")
+                    raise EaWindowUnavailable("EA 可见窗口没有可识别内容，已忽略空白窗口")
+                raise EaWindowUnavailable("恢复窗口后仍没有发现可见的 EA App 主窗口")
             self.sleep(0.5)
 
     def _choose_ea_window(self, matches: list[tuple[int, int]]) -> int | None:
@@ -1854,7 +1869,12 @@ class WindowsEaHybridDriver(EaPasswordRecoveryMixin):
         self._focus(hwnd)
         self._tap(VK_RETURN)
         self.sleep(3.0)
-        after_enter = self._observe(hwnd)
+        try:
+            after_enter = self._observe(hwnd)
+        except EaWindowUnavailable:
+            # EA closes the login window as soon as it accepts the form. The
+            # identity wait that follows reads whatever window comes next.
+            return "enter"
         if after_enter.page is not observation.page:
             return "enter"
         return self._click_target(
@@ -2092,6 +2112,32 @@ class WindowsEaHybridDriver(EaPasswordRecoveryMixin):
     ) -> EaIdentityFact:
         return self._with_ui_recovery("signin", lambda: self._sign_in_once(credentials, otp_supplier))
 
+    def _signin_surface(self) -> tuple[int, EaObservation]:
+        """The page a sign-in attempt starts from, once EA has painted one.
+
+        A retry often begins while EA is swapping its login window for the
+        main window, which is blank or shows a spinner for several seconds.
+        That frame is not a page to judge. Only a page still unknown after
+        the wait is one this attempt cannot start from.
+        """
+
+        deadline = time.monotonic() + SIGNIN_SETTLE_S
+        while True:
+            try:
+                hwnd = self._ea_window()
+                self._dismiss_expired_session(hwnd)
+                observation = self._observe(hwnd)
+            except EaWindowUnavailable:
+                if time.monotonic() >= deadline:
+                    raise
+                self.sleep(2.0)
+                continue
+            if observation.page is EaPage.UNKNOWN:
+                observation = self._dismiss_library_tour(hwnd, observation)
+            if observation.page is not EaPage.UNKNOWN or time.monotonic() >= deadline:
+                return hwnd, observation
+            self.sleep(2.0)
+
     def _sign_in_once(
         self,
         credentials: SecretCredentials,
@@ -2105,9 +2151,7 @@ class WindowsEaHybridDriver(EaPasswordRecoveryMixin):
         # One password recovery and one expired-session restart, at most.
         for _attempt in range(3):
             self._login_identifier_verified = False
-            hwnd = self._ea_window()
-            self._dismiss_expired_session(hwnd)
-            observation = self._observe(hwnd)
+            hwnd, observation = self._signin_surface()
             self._record("signin-start", observation)
             if observation.page is EaPage.CAPTCHA:
                 raise EaCaptchaRequired("EA App 出现 Captcha，已暂停")
@@ -2303,9 +2347,13 @@ class WindowsEaHybridDriver(EaPasswordRecoveryMixin):
         self._type_secret(otp.code)
         self.sleep(INPUT_SETTLE_S)
         submit = self._submit(hwnd, self._observe(hwnd), OTP_SUBMIT_RATIO)
+        try:
+            submitted = self._observe(hwnd)
+        except EaWindowUnavailable:
+            submitted = None
         self._record(
             "otp-submitted",
-            self._observe(hwnd),
+            submitted,
             fieldTarget=target,
             submitTarget=submit,
         )
@@ -2331,8 +2379,12 @@ class WindowsEaHybridDriver(EaPasswordRecoveryMixin):
             expected_ea_account_id = getattr(self, "_expected_ea_account_id", None) or None
         while time.monotonic() < deadline:
             self.sleep(2.0)
-            hwnd = self._ea_window_for_identity(hwnd)
-            observation = self._observe(hwnd)
+            try:
+                hwnd = self._ea_window_for_identity(hwnd)
+                observation = self._observe(hwnd)
+            except EaWindowUnavailable:
+                # Login window gone, main window not painted yet.
+                continue
             observation = self._dismiss_library_tour(hwnd, observation)
             self._raise_if_account_banned(hwnd, observation)
             # Whatever EA puts on screen here gets a frame the first time it
@@ -2427,10 +2479,11 @@ class WindowsEaHybridDriver(EaPasswordRecoveryMixin):
         )
 
     def verify_identity(self, expected_ea_account_id: str) -> EaIdentityFact:
-        deadline = time.monotonic() + 20.0
+        deadline = time.monotonic() + IDENTITY_VERIFY_TIMEOUT_S
         seen: list[str] = []
         alternate = None
         alternate_count = 0
+        alternate_since = 0.0
         observation: EaObservation | None = None
         while time.monotonic() < deadline:
             hwnd = self._ea_window()
@@ -2469,11 +2522,15 @@ class WindowsEaHybridDriver(EaPasswordRecoveryMixin):
                 elif (match is None and identity.verified
                       and observation.page is EaPage.SIGNED_IN):
                     seen.append(mask_identity(identity.ea_account_id))
+                    if alternate != identity.ea_account_id:
+                        alternate_since = time.monotonic()
                     alternate_count = alternate_count + 1 if alternate == identity.ea_account_id else 1
                     alternate = identity.ea_account_id
                     # Three unrelated or low-confidence OCR guesses do not
-                    # establish a stable alternate identity.
-                    if alternate_count >= 3:
+                    # establish a stable alternate identity, and neither does
+                    # a corner read while EA's account panel is still loading.
+                    if (alternate_count >= 3
+                            and time.monotonic() - alternate_since >= IDENTITY_MISMATCH_HOLD_S):
                         self._record("identity-mismatch", observation, observed=seen)
                         raise EaIdentityMismatch(
                             "EA App 当前稳定 EA ID 与租约不一致"
@@ -3061,12 +3118,7 @@ class WindowsEaHybridDriver(EaPasswordRecoveryMixin):
             observation = self._dismiss_cloud_upload_error(hwnd, observation)
             observation = self._dismiss_library_tour(hwnd, observation)
             self._raise_if_account_banned(hwnd, observation)
-            point = self._anchor(
-                observation,
-                ("apexlegends",),
-                x_range=(0.0, 0.30),
-                y_range=(0.15, 0.90),
-            )
+            point = self._apex_entry_point(observation)
             if point is not None:
                 self._record("apex-entry", observation)
                 self._click_point(hwnd, *point)
@@ -3074,9 +3126,9 @@ class WindowsEaHybridDriver(EaPasswordRecoveryMixin):
             self.sleep(1.0)
         else:
             self._record("apex-entry-missing", self._observe(hwnd))
-            raise EaApexStartFailed("EA App 未找到左侧 Apex Legends 游戏入口")
+            raise EaApexControlMissing("EA App 未找到左侧 Apex Legends 游戏入口")
         self.sleep(2.0)
-        action_deadline = time.monotonic() + 15.0
+        action_deadline = time.monotonic() + APEX_ACTION_WAIT_S
         launch_deadline: float | None = None
         relaunched = False
         update_deadline: float | None = None
@@ -3084,6 +3136,7 @@ class WindowsEaHybridDriver(EaPasswordRecoveryMixin):
         update_clicks = 0
         cloud_recovery_clicks = 0
         update_wait_notice_at = 0.0
+        entry_retries = 0
 
         while True:
             if any(self._process_running(name) for name in APEX_EXECUTABLES):
@@ -3100,8 +3153,20 @@ class WindowsEaHybridDriver(EaPasswordRecoveryMixin):
                 and now >= action_deadline
             ):
                 observation = self._observe(hwnd)
+                # A new account's library tour can pop up right after the
+                # entry click and swallow it, leaving EA on Home. Clicking the
+                # entry again is harmless on the Apex page itself.
+                entry = self._apex_entry_point(observation)
+                if entry is not None and entry_retries < APEX_ENTRY_RETRIES:
+                    entry_retries += 1
+                    self._record("apex-entry", observation, attempt=entry_retries + 1)
+                    self.notify("EA 没有打开 Apex 页面，再点一次左侧 Apex Legends")
+                    self._click_point(hwnd, *entry)
+                    action_deadline = time.monotonic() + APEX_ACTION_WAIT_S
+                    self.sleep(2.0)
+                    continue
                 self._record("apex-play-missing", observation)
-                raise EaApexStartFailed("EA App Apex 页面未找到 Play 或 Update 按钮")
+                raise EaApexControlMissing("EA App Apex 页面未找到 Play 或 Update 按钮")
 
             try:
                 observation = self._observe(hwnd)
@@ -3217,6 +3282,16 @@ class WindowsEaHybridDriver(EaPasswordRecoveryMixin):
                 self.notify("Apex 仍在更新，Runner 会继续等待")
                 update_wait_notice_at = now + 300.0
             self.sleep(2.0)
+
+    def _apex_entry_point(self, observation: EaObservation) -> tuple[int, int] | None:
+        """Apex Legends in EA's left column, under Installed or Free-to-play."""
+
+        return self._anchor(
+            observation,
+            ("apexlegends",),
+            x_range=(0.0, 0.30),
+            y_range=(0.15, 0.90),
+        )
 
     def _request_apex_launch(self, hwnd: int, point: tuple[int, int]) -> float:
         # Record before input: a partially successful click can start EA's
@@ -3422,13 +3497,22 @@ class WindowsEaHybridDriver(EaPasswordRecoveryMixin):
         except EaAppAutomationError:
             self._record("signout-item-failed")
             return False
-        deadline = time.monotonic() + 25.0
+        deadline = time.monotonic() + SIGNOUT_TIMEOUT_S
         confirmed = False
         cloud_sync_skipped = False
         upload_signout_retries = 0
         while time.monotonic() < deadline:
             self.sleep(1.0)
-            observation = self._observe(hwnd)
+            try:
+                observation = self._observe(hwnd)
+                if observation.page is EaPage.UNKNOWN and not observation.tokens:
+                    # Signing out swaps the main window for the login window,
+                    # which can sit behind a blank main frame for a while.
+                    # A dialog with text is handled below as before.
+                    hwnd = self._ea_window()
+                    observation = self._observe(hwnd)
+            except EaWindowUnavailable:
+                continue
             upload_notice = self._contains_any(observation, CLOUD_UPLOAD_ERROR_TERMS)
             observation = self._dismiss_cloud_upload_error(hwnd, observation)
             observation = self._cancel_interrupted_cloud_launch(hwnd, observation)
@@ -3474,6 +3558,9 @@ class WindowsEaHybridDriver(EaPasswordRecoveryMixin):
                     self._record("signout-confirm-failed", observation)
                     return False
                 confirmed = True
-        final_observation = self._observe(hwnd)
+        try:
+            final_observation = self._observe(hwnd)
+        except EaWindowUnavailable:
+            final_observation = None
         self._record("signout-timeout", final_observation)
         return False

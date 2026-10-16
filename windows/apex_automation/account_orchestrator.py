@@ -25,6 +25,7 @@ from .ea_app import (
     EaAccountBanned,
     EaAppAutomationError,
     EaCacheCleanupFailed,
+    EaApexControlMissing,
     EaApexDownloadRequired,
     EaApexStartFailed,
     EaAppDriver,
@@ -1234,6 +1235,7 @@ class AccountOrchestrator:
                 return lease_gate
 
             self._update_checkpoint(workflow_phase=WorkflowPhase.APEX_STARTING)
+            restart_reason: str | None = None
             try:
                 self.ea_driver.start_apex()
             except EaApexDownloadRequired:
@@ -1244,7 +1246,6 @@ class AccountOrchestrator:
                 lease_gate = self._lease_gate(keeper)
                 if lease_gate is not None:
                     return lease_gate
-                first_failure: EaApexStartFailed | None = None
                 try:
                     self.ea_driver.repair_apex_installation()
                     lease_gate = self._lease_gate(keeper)
@@ -1252,45 +1253,45 @@ class AccountOrchestrator:
                         return lease_gate
                     self.ea_driver.start_apex()
                 except EaApexStartFailed as error:
-                    first_failure = error
-
-                if first_failure is None:
-                    self.notify("EA App 已完成现有文件登记并启动 Apex")
+                    restart_reason = f"EA App 首次登记或启动未完成，自动执行一次 Restart app 后复查：{error}"
                 else:
-                    self.notify(
-                        "EA App 首次登记或启动未完成，自动执行一次 "
-                        f"Restart app 后复查：{first_failure}"
+                    self.notify("EA App 已完成现有文件登记并启动 Apex")
+            except EaApexControlMissing as error:
+                # EA showed no entry or Play, so nothing was launched. A stuck
+                # page usually recovers after a restart, far cheaper than a new login.
+                restart_reason = f"EA App 未显示 Apex 启动入口，自动执行一次 Restart app 后复查：{error}"
+            if restart_reason is not None:
+                self.notify(restart_reason)
+                lease_gate = self._lease_gate(keeper)
+                if lease_gate is not None:
+                    return lease_gate
+                self.ea_driver.restart_app()
+                lease_gate = self._lease_gate(keeper)
+                if lease_gate is not None:
+                    return lease_gate
+                expected = lease.expected_ea_account_id
+                if not expected:
+                    raise EaAppAutomationError("租约缺少可验证的 EA 稳定账号 ID")
+                identity_fact = self.ea_driver.verify_identity(expected)
+                if (
+                    not identity_fact.verified
+                    or identity_fact.ea_account_id != expected
+                ):
+                    raise EaAppAutomationError(
+                        "EA App 重启后登录身份无法与租约账号匹配"
                     )
+                try:
+                    self.ea_driver.start_apex()
+                except EaApexDownloadRequired:
+                    self.notify(
+                        "EA App Restart 后仍显示 Download，"
+                        "执行最后一次现有文件登记"
+                    )
+                    self.ea_driver.repair_apex_installation()
                     lease_gate = self._lease_gate(keeper)
                     if lease_gate is not None:
                         return lease_gate
-                    self.ea_driver.restart_app()
-                    lease_gate = self._lease_gate(keeper)
-                    if lease_gate is not None:
-                        return lease_gate
-                    expected = lease.expected_ea_account_id
-                    if not expected:
-                        raise EaAppAutomationError("租约缺少可验证的 EA 稳定账号 ID")
-                    identity_fact = self.ea_driver.verify_identity(expected)
-                    if (
-                        not identity_fact.verified
-                        or identity_fact.ea_account_id != expected
-                    ):
-                        raise EaAppAutomationError(
-                            "EA App 重启后登录身份无法与租约账号匹配"
-                        )
-                    try:
-                        self.ea_driver.start_apex()
-                    except EaApexDownloadRequired:
-                        self.notify(
-                            "EA App Restart 后仍显示 Download，"
-                            "执行最后一次现有文件登记"
-                        )
-                        self.ea_driver.repair_apex_installation()
-                        lease_gate = self._lease_gate(keeper)
-                        if lease_gate is not None:
-                            return lease_gate
-                        self.ea_driver.start_apex()
+                    self.ea_driver.start_apex()
             lease_gate = self._lease_gate_after_apex_start(keeper)
             if lease_gate is not None:
                 return lease_gate

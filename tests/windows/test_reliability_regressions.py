@@ -55,14 +55,19 @@ class IdentityEvidenceTest(unittest.TestCase):
                 driver = self.driver([self.fact("other", trusted)] * 3 + [self.fact("wanted")], [page] * 4)
                 self.assertTrue(driver.verify_identity("wanted").verified)
 
-    def test_three_consistent_trusted_wrong_badges_still_reject(self):
+    def test_consistent_trusted_wrong_badges_still_reject(self):
         driver = self.driver(self.fact("wrong-account"))
         with self.assertRaises(EaIdentityMismatch):
             driver.verify_identity("wanted")
-        self.assertEqual(driver._identity.call_count, 3)
+        # Held for the 10 s a loading account panel needs, one read a second.
+        self.assertEqual(driver._identity.call_count, 11)
+
+    def test_a_wrong_badge_while_ea_is_still_loading_does_not_reject(self):
+        driver = self.driver([self.fact("loading-corner")] * 5 + [self.fact("wanted")])
+        self.assertEqual(driver.verify_identity("wanted").ea_account_id, "wanted")
 
     def test_authentication_page_never_verifies_even_if_expected_text_is_visible(self):
-        driver = self.driver(self.fact("wanted"), [EaPage.PASSWORD] * 20)
+        driver = self.driver(self.fact("wanted"), [EaPage.PASSWORD] * 40)
         driver._matching_identity.return_value = self.fact("wanted")
         with self.assertRaises(EaIdentityUnconfirmed):
             driver.verify_identity("wanted")
