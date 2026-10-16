@@ -793,32 +793,88 @@ class WindowsEaHybridDriver(EaPasswordRecoveryMixin):
             y_range=(0.45, 0.90),
         )
 
+    @staticmethod
+    def _left_aligned_block(tokens: Sequence[OcrToken], head: OcrToken) -> str:
+        """Normalized text of the block whose lines start at `head`'s left edge.
+
+        A dialog wraps its heading and copy when the EA window is narrow, and
+        OCR returns side-panel words between those lines. Reading the block by
+        its left edge, line by line, keeps a wrapped sentence whole.
+        """
+
+        def middle(token):
+            return (token.roi[1] + token.roi[3]) / 2
+
+        starts = sorted((
+            token for token in tokens
+            if abs(token.roi[0] - head.roi[0]) <= 12 and token.roi[1] >= head.roi[1] - 4
+        ), key=middle)
+        parts: list[str] = []
+        for start in starts:
+            line, end = [start], start
+            while True:
+                # A line split into several boxes continues just right of the last one.
+                following = [
+                    token for token in tokens
+                    if token not in line
+                    and abs(middle(token) - middle(start)) <= (start.roi[3] - start.roi[1]) * 0.6
+                    and end.roi[2] - 4 <= token.roi[0] <= end.roi[2] + 40
+                ]
+                if not following:
+                    break
+                end = min(following, key=lambda token: token.roi[0])
+                line.append(end)
+            parts.extend(token.normalized for token in line)
+        return "".join(parts)
+
+    @classmethod
+    def _cloud_upload_notice(cls, observation: EaObservation) -> OcrToken | None:
+        """The heading token of the upload-failed notice, read even when wrapped."""
+
+        placed = tuple(token for token in observation.tokens
+                       if token.confidence >= 0.80 and token.roi is not None)
+        left, top, right, bottom = observation.rect
+        width, height = max(1, right - left), max(1, bottom - top)
+        for head in placed:
+            if not any(head.normalized.startswith(term[:8]) for term in CLOUD_UPLOAD_ERROR_TERMS):
+                continue
+            x = ((head.roi[0] + head.roi[2]) / 2 - left) / width
+            y = ((head.roi[1] + head.roi[3]) / 2 - top) / height
+            if not (0.25 <= x <= 0.80 and 0.25 <= y <= 0.70):
+                continue
+            text = cls._left_aligned_block(placed, head)
+            if (any(term in text for term in CLOUD_UPLOAD_ERROR_TERMS)
+                    and any(term in text for term in CLOUD_UPLOAD_LOCAL_SAVE_TERMS)):
+                return head
+        return None
+
+    @classmethod
+    def _cloud_upload_error_visible(cls, observation: EaObservation) -> bool:
+        return (cls._contains_any(observation, CLOUD_UPLOAD_ERROR_TERMS)
+                or cls._cloud_upload_notice(observation) is not None)
+
     @classmethod
     def _cloud_upload_error_point(
         cls, observation: EaObservation,
     ) -> tuple[int, int] | None:
         # The upload notice has only OK. It acknowledges the error; it does
         # not skip sync, close EA, or prove the session has been signed out.
+        head = cls._cloud_upload_notice(observation)
+        if head is None:
+            return None
         placed = replace(observation, tokens=tuple(
             token for token in observation.tokens if token.confidence >= 0.80
         ))
-        title = next((
-            point for term in CLOUD_UPLOAD_ERROR_TERMS
-            if (point := phrase_point(placed.tokens, placed.rect, term,
-                                      x_range=(0.25, 0.80), y_range=(0.25, 0.70))) is not None
-        ), None)
-        if title is None or not cls._contains_any(placed, CLOUD_UPLOAD_LOCAL_SAVE_TERMS):
-            return None
         button = cls._anchor(placed, ("ok", "确定"), exact=True,
                              x_range=(0.40, 0.85), y_range=(0.40, 0.90))
-        if button is None or button[1] <= title[1]:
+        if button is None or button[1] <= (head.roi[1] + head.roi[3]) // 2:
             return None
         return button
 
     def _dismiss_cloud_upload_error(
         self, hwnd: int, observation: EaObservation,
     ) -> EaObservation:
-        if not self._contains_any(observation, CLOUD_UPLOAD_ERROR_TERMS):
+        if not self._cloud_upload_error_visible(observation):
             return observation
         clear_samples = 0
         for attempt in range(1, 3):
@@ -832,7 +888,7 @@ class WindowsEaHybridDriver(EaPasswordRecoveryMixin):
             for _ in range(4):
                 self.sleep(1.0)
                 observation = self._observe(hwnd)
-                visible = self._contains_any(observation, CLOUD_UPLOAD_ERROR_TERMS)
+                visible = self._cloud_upload_error_visible(observation)
                 clear = not visible and observation.page in (
                     EaPage.SIGNED_IN, EaPage.BANNED, *PRE_LOGIN_PAGES,
                 )
@@ -842,7 +898,7 @@ class WindowsEaHybridDriver(EaPasswordRecoveryMixin):
                     return observation
             # Retry only if the same known dialog is still visible. An empty
             # capture or a different page is never permission to click again.
-            if not self._contains_any(observation, CLOUD_UPLOAD_ERROR_TERMS):
+            if not self._cloud_upload_error_visible(observation):
                 break
         self._record("cloud-upload-error-stuck", observation)
         raise EaAppAutomationError("EA 云端上传失败提示未能确认关闭，已停止点击")

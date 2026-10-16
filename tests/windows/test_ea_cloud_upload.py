@@ -89,6 +89,35 @@ class CloudUploadRecoveryTest(unittest.TestCase):
             replace(self.dialog, tokens=title + self.dialog.tokens[1:])
         ), (1515, 867))
 
+    def wrapped(self):
+        data = json.loads((Path(__file__).parent / "fixtures" / "ea-cloud-upload-wrapped.json").read_text())
+        return EaObservation(
+            tuple(data["rect"]), np.zeros((1, 1), dtype=np.uint8),
+            tuple(OcrToken(t["text"], t["confidence"], tuple(t["roi"])) for t in data["tokens"]),
+            EaPage.SIGNED_IN,
+        )
+
+    def test_notice_wrapped_at_a_narrow_window_still_finds_its_ok(self):
+        # 10-16 06:17: heading and copy wrapped, side text sat between the
+        # lines, and the Runner stopped with the notice still open.
+        dialog = self.wrapped()
+        self.assertTrue(WindowsEaHybridDriver._cloud_upload_error_visible(dialog))
+        self.assertEqual(WindowsEaHybridDriver._cloud_upload_error_point(dialog), (1062, 660))
+
+    def test_wrapped_notice_still_needs_its_local_save_copy_and_heading(self):
+        dialog = self.wrapped()
+        without_copy = tuple(t for t in dialog.tokens if not t.text.startswith(("Don't worry", "saved locally")))
+        other_heading = tuple(OcrToken("Failed to launch the game", t.confidence, t.roi)
+                              if t.text.startswith("Failed to upload") else t for t in dialog.tokens)
+        for tokens in (without_copy, other_heading):
+            with self.subTest(first=tokens[2].text):
+                self.assertIsNone(WindowsEaHybridDriver._cloud_upload_error_point(replace(dialog, tokens=tokens)))
+
+    def test_signout_dismisses_a_wrapped_notice(self):
+        driver = self.driver([self.clear, self.clear, self.login])
+        self.assertIs(driver._dismiss_cloud_upload_error(1, self.wrapped()), self.clear)
+        self.assertEqual(self.clicks, [(1062, 660)])
+
     def test_blank_frame_does_not_prove_dismissal(self):
         driver = self.driver([self.blank, self.clear, self.clear])
         self.assertIs(driver._dismiss_cloud_upload_error(1, self.dialog), self.clear)

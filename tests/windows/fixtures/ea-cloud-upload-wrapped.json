@@ -1,0 +1,301 @@
+{
+ "rect": [
+  192,
+  104,
+  1728,
+  936
+ ],
+ "tokens": [
+  {
+   "text": "Add-ons",
+   "confidence": 0.99989,
+   "roi": [
+    682,
+    313,
+    756,
+    334
+   ]
+  },
+  {
+   "text": "Standard",
+   "confidence": 0.99995,
+   "roi": [
+    739,
+    411,
+    800,
+    431
+   ]
+  },
+  {
+   "text": "Failed to upload game",
+   "confidence": 0.99891,
+   "roi": [
+    827,
+    403,
+    1056,
+    429
+   ]
+  },
+  {
+   "text": "data to the cloud",
+   "confidence": 0.98933,
+   "roi": [
+    828,
+    430,
+    1007,
+    453
+   ]
+  },
+  {
+   "text": "Last played",
+   "confidence": 0.9998,
+   "roi": [
+    704,
+    470,
+    787,
+    490
+   ]
+  },
+  {
+   "text": "Don't worry, your game is still",
+   "confidence": 0.99864,
+   "roi": [
+    827,
+    466,
+    1057,
+    489
+   ]
+  },
+  {
+   "text": "Connection failed",
+   "confidence": 0.99995,
+   "roi": [
+    1526,
+    461,
+    1675,
+    481
+   ]
+  },
+  {
+   "text": "saved locally. However, if you use",
+   "confidence": 0.9974,
+   "roi": [
+    827,
+    488,
+    1083,
+    508
+   ]
+  },
+  {
+   "text": "Time played",
+   "confidence": 0.98647,
+   "roi": [
+    704,
+    522,
+    791,
+    543
+   ]
+  },
+  {
+   "text": "your account on multiple",
+   "confidence": 0.9999,
+   "roi": [
+    827,
+    508,
+    1024,
+    530
+   ]
+  },
+  {
+   "text": "devices, it may result in the loss",
+   "confidence": 0.98736,
+   "roi": [
+    828,
+    530,
+    1077,
+    550
+   ]
+  },
+  {
+   "text": "Release date",
+   "confidence": 0.98947,
+   "roi": [
+    1147,
+    514,
+    1242,
+    537
+   ]
+  },
+  {
+   "text": "Feb 4, 2019",
+   "confidence": 0.94896,
+   "roi": [
+    1342,
+    515,
+    1427,
+    536
+   ]
+  },
+  {
+   "text": "We couldn't connect you to other players.",
+   "confidence": 0.99988,
+   "roi": [
+    1476,
+    508,
+    1722,
+    530
+   ]
+  },
+  {
+   "text": "If the problem persists, try restarting the",
+   "confidence": 0.99746,
+   "roi": [
+    1478,
+    529,
+    1721,
+    549
+   ]
+  },
+  {
+   "text": "of saved data. Launching the",
+   "confidence": 0.98187,
+   "roi": [
+    828,
+    551,
+    1055,
+    571
+   ]
+  },
+  {
+   "text": "app.",
+   "confidence": 0.9999,
+   "roi": [
+    1582,
+    549,
+    1617,
+    571
+   ]
+  },
+  {
+   "text": "game again from this machine",
+   "confidence": 0.99555,
+   "roi": [
+    827,
+    570,
+    1065,
+    594
+   ]
+  },
+  {
+   "text": "CERO",
+   "confidence": 0.99993,
+   "roi": [
+    1157,
+    562,
+    1199,
+    583
+   ]
+  },
+  {
+   "text": "should resolve the issue.",
+   "confidence": 0.99995,
+   "roi": [
+    829,
+    594,
+    1020,
+    611
+   ]
+  },
+  {
+   "text": "1Z7以FH8",
+   "confidence": 0.53096,
+   "roi": [
+    1154,
+    609,
+    1202,
+    626
+   ]
+  },
+  {
+   "text": " IMPORT FRIENDS",
+   "confidence": 0.96213,
+   "roi": [
+    1490,
+    609,
+    1654,
+    629
+   ]
+  },
+  {
+   "text": "Violence",
+   "confidence": 0.99987,
+   "roi": [
+    1221,
+    625,
+    1272,
+    639
+   ]
+  },
+  {
+   "text": "OK",
+   "confidence": 0.98391,
+   "roi": [
+    1048,
+    650,
+    1077,
+    670
+   ]
+  },
+  {
+   "text": "Sales tax may apply for your region",
+   "confidence": 0.99906,
+   "roi": [
+    1149,
+    663,
+    1355,
+    680
+   ]
+  },
+  {
+   "text": "Steam",
+   "confidence": 0.99945,
+   "roi": [
+    1546,
+    656,
+    1593,
+    674
+   ]
+  },
+  {
+   "text": "Legal disclosures",
+   "confidence": 0.99897,
+   "roi": [
+    1150,
+    676,
+    1249,
+    693
+   ]
+  },
+  {
+   "text": "No friends found",
+   "confidence": 0.98786,
+   "roi": [
+    1559,
+    673,
+    1671,
+    693
+   ]
+  },
+  {
+   "text": "PlayStation",
+   "confidence": 0.99979,
+   "roi": [
+    1544,
+    718,
+    1624,
+    741
+   ]
+  }
+ ],
+ "source": "D163 2026-10-16 06:17 cloud-upload notice at a 1536 px EA window: heading and copy wrap and interleave with side text. RapidOCR 3.9.2 on the window crop; dialog area only, no account identifiers."
+}
