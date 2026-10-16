@@ -199,6 +199,33 @@ class RegistrationWorkerTests(unittest.TestCase):
         self.worker.bit.cleanup.assert_not_called()
         self.ea.ensure_started.assert_not_called()
 
+    def test_an_unsent_result_does_not_stop_the_other_task(self):
+        # 10-16: a brief outage failed one task's upload; the whole round
+        # stopped and the other task's Steam registration was killed.
+        running = self.child(0)
+        running.poll.side_effect = [None] * 6 + [0] * 40
+        children = {'task-0': self.child(1), 'task-1': running}
+        offline = LeaseProviderError('offline', code='PROVIDER_UNREACHABLE', retryable=True)
+        with patch.object(self.worker, 'launch', side_effect=lambda task, work, **kw: children[task['id']]), \
+                patch.object(self.worker, 'retry_action', return_value='stop'), \
+                patch.object(self.worker, 'mark_interrupted', side_effect=[offline, None]) as upload:
+            self.worker.run_batch(self.batch(2), self.ea)
+        self.assertEqual(upload.call_count, 2)
+        running.terminate.assert_not_called()
+        self.assertEqual(len(self.finishes()), 1)
+
+    def test_a_result_still_unsent_keeps_the_batch_open_without_killing_anything(self):
+        offline = LeaseProviderError('offline', code='PROVIDER_UNREACHABLE', retryable=True)
+        child = self.child(1)
+        with patch.object(self.worker, 'launch', return_value=child), \
+                patch.object(self.worker, 'retry_action', return_value='stop'), \
+                patch.object(self.worker, 'mark_interrupted', side_effect=offline) as upload:
+            self.worker.run_batch(self.batch(), self.ea)
+        self.assertGreater(upload.call_count, 2)
+        child.terminate.assert_not_called()
+        self.assertEqual(self.finishes(), [])
+        self.assertEqual(self.worker.request.call_args.args[2]['state'], 'blocked')
+
     def test_current_game_recovery_bypasses_ea_preflight(self):
         self.worker.request.side_effect = [{'batch': None}, {'action': 'game', 'recoverGame': True}]
         self.assertFalse(self.worker.before_game(self.ea))

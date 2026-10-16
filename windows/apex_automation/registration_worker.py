@@ -62,6 +62,10 @@ def process_alive(pid):
         return False
 
 
+# Retries, ten seconds apart, for results left unsent when a round ends.
+UNSENT_RETRIES = 6
+
+
 class BitBrowser:
     def __init__(self, url, api_key=''):
         self.url = url.rstrip('/')
@@ -262,6 +266,24 @@ class RegistrationWorker:
         write_json(work / 'started.json', dict(started, pid=child.pid))
         processes[task['id']] = (child, time.monotonic(), work, task)
 
+    def upload_interrupted(self, task, directory):
+        """Send a stopped task's saved result; False when Forge cannot be reached now."""
+        try:
+            self.mark_interrupted(task, directory)
+            return True
+        except LeaseProviderError as exc:
+            if not exc.retryable:
+                raise
+            self.local_event(directory, 'result_upload', outcome='pending', message='成果回传暂未送达，稍后重试')
+            return False
+
+    def retry_unsent(self, unsent):
+        """Retry saved results; returns how many are still waiting."""
+        for task_id, (task, work) in list(unsent.items()):
+            if self.upload_interrupted(task, work):
+                del unsent[task_id]
+        return len(unsent)
+
     def mark_interrupted(self, task, directory):
         payload = read_json(directory / 'forge_pending_result.json') or read_json(directory / 'forge_final_result.json')
         latest = read_json(directory / 'ea_full_setup_result.json')
@@ -327,6 +349,7 @@ class RegistrationWorker:
                 self.spawn(task, work, processes, recovering=bool(started),
                            sync_only=action in {'stop', 'upload'})
             next_heartbeat = 0
+            unsent = {}
             while processes:
                 self.pulse('REGISTERING')
                 events = []
@@ -365,11 +388,15 @@ class RegistrationWorker:
                                         error_message='注册步骤或总耗时超过恢复预算，已保留完成的阶段',
                                         stage=operation.get('stage') or result.get('stage', 'checkout'))
                                     write_json(work / 'ea_full_setup_result.json', result)
-                            self.mark_interrupted(task, work)
+                            if not self.upload_interrupted(task, work):
+                                # Forge was briefly unreachable. The result is kept on
+                                # disk; the other tasks keep running and it is sent again.
+                                unsent[task_id] = (task, work)
                         receipt = read_json(work / 'forge_receipt.json')
                         self.local_event(work, 'result_upload', outcome=receipt.get('state', 'pending'), message='成果回传已确认' if receipt else '等待确认成果回传')
                         del processes[task_id]
                 if time.monotonic() >= next_heartbeat:
+                    self.retry_unsent(unsent)
                     try:
                         self.heartbeat(batch_id, 'running', events)
                         self.flush_diagnostics(batch, directory)
@@ -378,6 +405,14 @@ class RegistrationWorker:
                     next_heartbeat = time.monotonic() + 15
                 if processes:
                     self.sleep(1)
+            for _ in range(UNSENT_RETRIES):
+                if not self.retry_unsent(unsent):
+                    break
+                self.sleep(10)
+            if unsent:
+                # Nothing is running any more; the batch stays open and the next
+                # boundary uploads the saved results without registering again.
+                raise RuntimeError('注册成果暂未回传，网络恢复后自动补传')
             for _ in range(10):
                 if not self.flush_diagnostics(batch, directory):
                     break
