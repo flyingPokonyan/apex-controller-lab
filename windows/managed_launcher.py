@@ -613,6 +613,46 @@ class Launcher:
             executor.shutdown(wait=True, cancel_futures=True)
 
 
+QUICK_EDIT_MODE = 0x0040
+EXTENDED_FLAGS = 0x0080
+
+
+def disable_console_quick_edit(kernel32=None):
+    """Keep a click in this console from freezing the Runner.
+
+    With QuickEdit a click starts a text selection, and while one is open
+    every print to the console blocks, the worker's included: a stray click
+    during remote access stopped D163 for 1 h 45 min on 2026-10-16. Scrolling,
+    Ctrl+C and closing the window still work; copying text needs Edit > Mark.
+    True only when this call turned QuickEdit off.
+    """
+    try:
+        import ctypes
+        if kernel32 is None:
+            if os.name != "nt":
+                return False
+            from ctypes import wintypes
+            kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+            kernel32.CreateFileW.restype = wintypes.HANDLE
+            kernel32.CreateFileW.argtypes = (wintypes.LPCWSTR, wintypes.DWORD, wintypes.DWORD,
+                                             wintypes.LPVOID, wintypes.DWORD, wintypes.DWORD, wintypes.HANDLE)
+        # The console's own input buffer, even if stdin is redirected.
+        handle = kernel32.CreateFileW("CONIN$", 0xC0000000, 0x3, None, 3, 0, None)
+        if not handle or handle == ctypes.c_void_p(-1).value:
+            return False
+        try:
+            mode = ctypes.c_ulong()
+            if not kernel32.GetConsoleMode(handle, ctypes.byref(mode)):
+                return False
+            if not mode.value & QUICK_EDIT_MODE:
+                return False
+            return bool(kernel32.SetConsoleMode(handle, (mode.value & ~QUICK_EDIT_MODE) | EXTENDED_FLAGS))
+        finally:
+            kernel32.CloseHandle(handle)
+    except Exception:
+        return False
+
+
 def main():
     parser = argparse.ArgumentParser(description="Managed Apex Runner launcher")
     parser.add_argument("--repo", required=True)
@@ -626,6 +666,8 @@ def main():
     root = repo.root / "windows/runs/managed"
     try:
         with FileLock(root / "launcher.lock"):
+            if disable_console_quick_edit():
+                print("[managed] 已关闭 CMD 快速编辑模式：点击窗口不会再让 Runner 暂停。", flush=True)
             # -I excludes the script directory. Add only this stdlib launcher
             # directory; the publisher never imports the worker environment.
             sys.path.insert(0, str(Path(__file__).resolve().parent))
