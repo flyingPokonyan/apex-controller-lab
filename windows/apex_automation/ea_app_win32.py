@@ -218,6 +218,9 @@ PRE_LOGIN_PAGES = (
     EaPage.RESET_SUCCESS,
 )
 GW_OWNER = 4
+GA_ROOT = 2
+GWL_STYLE = -16
+WS_POPUP = 0x80000000
 
 
 if sys.platform == "win32":
@@ -360,6 +363,8 @@ class WindowsEaHybridDriver(EaPasswordRecoveryMixin):
         self.user32.GetWindowLongW.restype = ctypes.c_long
         self.user32.WindowFromPoint.argtypes = [wintypes.POINT]
         self.user32.WindowFromPoint.restype = wintypes.HWND
+        self.user32.GetAncestor.argtypes = [wintypes.HWND, wintypes.UINT]
+        self.user32.GetAncestor.restype = wintypes.HWND
         self.user32.ShowWindow.argtypes = [wintypes.HWND, ctypes.c_int]
         self.user32.ShowWindow.restype = wintypes.BOOL
         self.user32.SetForegroundWindow.argtypes = [wintypes.HWND]
@@ -1197,9 +1202,30 @@ class WindowsEaHybridDriver(EaPasswordRecoveryMixin):
         # Check more than the centre: a console line can cross into EA's
         # rectangle while most of its text still belongs to a covering app.
         y = (y1 + y2) // 2
-        return all(self._window_belongs_to_ea(hwnd, int(
+        return all(self._point_window_belongs_to_ea(hwnd, int(
             self.user32.WindowFromPoint(wintypes.POINT(x, y)) or 0
         )) for x in (x1 + 1, (x1 + x2) // 2, x2 - 1))
+
+    def _point_window_belongs_to_ea(self, hwnd: int, candidate: int) -> bool:
+        if self._window_belongs_to_ea(hwnd, candidate):
+            return True
+        # EA's main menu and its Help submenu are unowned popup windows, so
+        # they have no parent/owner chain back to the frame. Accept a visible
+        # popup of the frame's own process; another root window of EA (a blank
+        # sibling, an old frame) is not a popup and stays excluded.
+        if not candidate:
+            return False
+        root = int(self.user32.GetAncestor(candidate, GA_ROOT) or candidate)
+        if not self.user32.IsWindowVisible(root):
+            return False
+        if not int(self.user32.GetWindowLongW(root, GWL_STYLE)) & WS_POPUP:
+            return False
+        pids = []
+        for window in (hwnd, root):
+            pid = wintypes.DWORD()
+            self.user32.GetWindowThreadProcessId(window, ctypes.byref(pid))
+            pids.append(int(pid.value))
+        return bool(pids[0]) and pids[0] == pids[1]
 
     def _record(
         self,

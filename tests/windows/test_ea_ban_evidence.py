@@ -127,6 +127,35 @@ class CaptureSourceTest(unittest.TestCase):
 
     def test_each_part_of_token_must_belong_to_the_requested_window(self):
         driver = self.driver()
-        driver.user32 = SimpleNamespace(WindowFromPoint=Mock(side_effect=[7, 7, 99]))
+        driver.user32 = SimpleNamespace(WindowFromPoint=Mock(side_effect=[7, 7, 99]),
+            GetAncestor=lambda hwnd, _: hwnd, IsWindowVisible=Mock(return_value=True),
+            GetWindowLongW=Mock(return_value=0x10CF0000))  # a covering overlapped window
         driver._window_belongs_to_ea = lambda root, child: root == child
         self.assertFalse(WindowsEaHybridDriver._token_belongs_to_window(driver, 7, dialog().tokens[0]))
+
+    def menu_driver(self, *, style, pids):
+        # EA's main menu is an unowned popup over the frame: no parent/owner chain.
+        driver = self.driver()
+
+        def thread_process(hwnd, ref):
+            ref._obj.value = pids[hwnd]
+            return 1
+
+        driver.user32 = SimpleNamespace(
+            WindowFromPoint=Mock(return_value=55), GetAncestor=Mock(return_value=55),
+            IsWindowVisible=Mock(return_value=True), GetWindowLongW=Mock(return_value=style),
+            GetWindowThreadProcessId=thread_process)
+        driver._window_belongs_to_ea = lambda root, child: root == child
+        return driver
+
+    def test_popup_menu_of_the_ea_process_keeps_its_text(self):
+        help_item = OcrToken('Help', .99, (203, 259, 245, 282))
+        driver = self.menu_driver(style=-0x70000000, pids={7: 42, 55: 42})  # WS_POPUP|WS_VISIBLE
+        self.assertTrue(WindowsEaHybridDriver._token_belongs_to_window(driver, 7, help_item))
+
+    def test_popup_of_another_process_or_a_second_ea_root_is_still_rejected(self):
+        help_item = OcrToken('Help', .99, (203, 259, 245, 282))
+        other_process = self.menu_driver(style=-0x70000000, pids={7: 42, 55: 99})
+        self.assertFalse(WindowsEaHybridDriver._token_belongs_to_window(other_process, 7, help_item))
+        overlapped_root = self.menu_driver(style=0x10CF0000, pids={7: 42, 55: 42})
+        self.assertFalse(WindowsEaHybridDriver._token_belongs_to_window(overlapped_root, 7, help_item))

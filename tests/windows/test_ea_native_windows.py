@@ -32,8 +32,8 @@ class NativeEaWindowsTest(unittest.TestCase):
         self.api.DestroyWindow.argtypes = [wintypes.HWND]
         self.api.DestroyWindow.restype = wintypes.BOOL
 
-    def window(self, title, *, visible=False, owner=None, ex_style=0, class_name="STATIC"):
-        style = 0x00CF0000 | (0x10000000 if visible else 0)  # OVERLAPPEDWINDOW / VISIBLE
+    def window(self, title, *, visible=False, owner=None, ex_style=0, class_name="STATIC", style=0x00CF0000):
+        style |= 0x10000000 if visible else 0  # default OVERLAPPEDWINDOW; VISIBLE
         hwnd = self.api.CreateWindowExW(ex_style, class_name, title, style,
             100, 100, 800, 700, owner, None, None, None)
         self.assertTrue(hwnd, f"CreateWindowExW failed: {ctypes.GetLastError()}")
@@ -87,6 +87,16 @@ class NativeEaWindowsTest(unittest.TestCase):
             self.driver._observation_source(main)
         self.api.ShowWindow(main, 6)
         self.assertFalse(self.driver._alive(main))
+
+    def test_unowned_popup_menu_of_the_same_process_keeps_its_text(self):
+        main = self.window("EA", visible=True, class_name="BUTTON")
+        self.driver._focus(main)
+        # EA's main menu: an unowned, topmost popup of the EA process.
+        menu = self.window("", visible=True, class_name="BUTTON", style=0x80000000,
+                           ex_style=0x00000008 | 0x00000080)
+        self.assertEqual(self.api.WindowFromPoint(wintypes.POINT(350, 310)), menu)
+        token = OcrToken('Help', .99, (200, 300, 500, 320))
+        self.assertTrue(self.driver._token_belongs_to_window(main, token))
 
 
 if __name__ == "__main__":
