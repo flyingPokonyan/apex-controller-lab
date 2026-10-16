@@ -20,7 +20,7 @@ import sys
 import time
 from pathlib import Path
 from typing import Any
-from urllib.parse import urlparse
+from urllib.parse import unquote, urlparse
 
 import requests
 from bs4 import BeautifulSoup
@@ -578,8 +578,28 @@ def _proxy_transport_error(exc: BaseException) -> bool:
 
 
 def _rotate_sticky_proxy(raw_proxy: str, seed: str) -> str:
-    """Replace the 1024 sticky sid. A dead exit stays dead for its whole TTL."""
-    return with_sticky_session(raw_proxy, seed)
+    """Replace the sticky session but keep the exit country it was pinned to.
+
+    A dead exit stays dead for its whole TTL. Without an explicit region,
+    with_sticky_session pins HK, which moved US and JP tasks to Hong Kong.
+    """
+    try:
+        user = unquote(urlparse(raw_proxy).username or "")
+    except ValueError:
+        user = ""
+    match = re.search(r"-region-([A-Za-z]{2})(?:-|$)", user)
+    return with_sticky_session(raw_proxy, seed, region=match.group(1).upper() if match else None)
+
+
+def rotate_steam_exit(seed: str) -> str | None:
+    """Move Steam (and the EA step after it) to a fresh sticky exit."""
+    raw = os.environ.get("EA_PROXY", "").strip() or os.environ.get("STEAM_PROXY", "").strip()
+    if not raw:
+        return None
+    rotated = _rotate_sticky_proxy(raw, seed)
+    os.environ["EA_PROXY"] = rotated
+    os.environ["STEAM_PROXY"] = rotated
+    return as_http_forward_proxy(rotated)
 
 
 def open_steam_join(proxy_url: str | None, email: str):
@@ -619,6 +639,35 @@ def open_steam_join(proxy_url: str | None, email: str):
     raise RuntimeError("Steam join page did not load")
 
 
+STEAM_CAPTCHA_EXIT_ROTATIONS = 1
+
+
+def join_steam(proxy_url: str | None, email: str):
+    """Open the join page and read init_id; returns session, proxy URL, proxy info, init_id."""
+    session, r, proxy_info = open_steam_join(proxy_url, email)
+    if proxy_info is not None:
+        proxy_url = proxy_info["url"]
+        PROXY_FILE.write_text(
+            f"{proxy_info['proxyAddress']}:{proxy_info['proxyPort']}:"
+            f"{proxy_info['proxyLogin']}:{proxy_info['proxyPassword']}\n"
+        )
+        PROXY_FILE.chmod(0o600)
+    soup = BeautifulSoup(r.content, "html.parser")
+    init_el = soup.find("input", {"id": "init_id"})
+    init_id = init_el["value"] if init_el and init_el.get("value") else None
+    if not init_id:
+        log("init_id missing on first page load, will retry later")
+    else:
+        log(f"init_id={init_id[:16]}...")
+    return session, proxy_url, proxy_info, init_id
+
+
+def mail_error_summary(error: BaseException) -> str:
+    """Error class and a short message without tokens, links or addresses."""
+    text = re.sub(r"https?://\S+|[\w.+-]+@[\w-]+\.[\w.]+|\b[\w-]{40,}\b", "…", str(error))
+    return f"{type(error).__name__}: {text[:160]}"
+
+
 def main() -> int:
     ARTIFACT_ROOT.mkdir(parents=True, exist_ok=True, mode=0o700)
     OUT_LOG.write_text("")
@@ -642,27 +691,14 @@ def main() -> int:
     )
     log(f"captcha_provider={captcha_provider} key_loaded={bool(captcha_key)}")
 
-    session, r, proxy_info = open_steam_join(proxy_url, email_data["email"])
-    if proxy_info is not None:
-        proxy_url = proxy_info["url"]
-        PROXY_FILE.write_text(
-            f"{proxy_info['proxyAddress']}:{proxy_info['proxyPort']}:"
-            f"{proxy_info['proxyLogin']}:{proxy_info['proxyPassword']}\n"
-        )
-        PROXY_FILE.chmod(0o600)
-    soup = BeautifulSoup(r.content, "html.parser")
-    init_el = soup.find("input", {"id": "init_id"})
-    init_id = init_el["value"] if init_el and init_el.get("value") else None
-    if not init_id:
-        log("init_id missing on first page load, will retry later")
-    else:
-        log(f"init_id={init_id[:16]}...")
+    session, proxy_url, proxy_info, init_id = join_steam(proxy_url, email_data["email"])
 
     headers = steam_join_headers()
     sessionid = None
     email_requested_at = time.time()
     mailbox_index = 0
     captcha_retries = 0
+    exit_rotations = 0
     last_verify = {}
     last_error_code = "steam_email_rejected"
 
@@ -785,6 +821,17 @@ def main() -> int:
             captcha_retries += 1
             log("Steam captcha rejected; retrying with a fresh token")
             continue
+        if error_code == "steam_captcha_rejected" and exit_rotations < STEAM_CAPTCHA_EXIT_ROTATIONS:
+            # Rejections stick to one exit: fresh tokens on the same exit kept
+            # failing while other tasks passed first time. Try a new exit in
+            # the same country once before giving the task up.
+            rotated = rotate_steam_exit(f"{email_data['email']}-captcha-{int(time.time())}")
+            if rotated:
+                exit_rotations += 1
+                captcha_retries = 0
+                log("Steam rejected 3 captcha tokens on this exit; switching to a new sticky exit")
+                session, proxy_url, proxy_info, init_id = join_steam(rotated, email_data["email"])
+                continue
         OUT_RESULT.write_text(json.dumps({
             "success": False,
             "stage": "captcha_verify" if error_code == "steam_captcha_rejected" else "submit_email",
@@ -792,6 +839,7 @@ def main() -> int:
             "email": email_data["email"],
             "skipped_steam_emails": skipped_steam_emails,
             "steam_success": vj.get("success"),
+            "exit_rotations": exit_rotations,
         }, ensure_ascii=False, indent=2))
         OUT_RESULT.chmod(0o600)
         log(f"FAIL captcha/email step: {vj}")
@@ -811,6 +859,10 @@ def main() -> int:
 
     log("wait steam verification mail via Graph")
     verified = False
+    # Steam's mail arrived within 80 s for both 10-15 timeouts, so record which
+    # part of the wait failed instead of only "timeout".
+    mail_wait = {"graph_errors": 0, "last_graph_error": None, "link_found": False,
+                 "link_open_status": None, "last_check": None}
     wait_seconds = mail_wait_seconds()
     wait_started = time.monotonic()
     while time.monotonic() - wait_started < wait_seconds:
@@ -826,6 +878,7 @@ def main() -> int:
         except Exception:
             cj = {}
         log(f"checkemailverified={cj}")
+        mail_wait["last_check"] = cj.get("success")
         if cj.get("success") == 1:
             verified = True
             break
@@ -838,11 +891,15 @@ def main() -> int:
                 after_ts=email_requested_at - 10,
             )
             if link:
+                mail_wait["link_found"] = True
                 log(f"found verify link: {link[:80]}...")
                 gr = session.get(link, headers={"User-Agent": UA, "Referer": JOIN_URL}, timeout=45)
+                mail_wait["link_open_status"] = gr.status_code
                 log(f"open verify link status={gr.status_code} len={len(gr.text)}")
                 time.sleep(3)
         except Exception as e:
+            mail_wait["graph_errors"] += 1
+            mail_wait["last_graph_error"] = mail_error_summary(e)
             log(f"graph/mail error: {e}")
         remaining = wait_seconds - (time.monotonic() - wait_started)
         if remaining > 0:
@@ -867,6 +924,7 @@ def main() -> int:
                 "error_code": "steam_email_verify_timeout",
                 "email": email_data["email"],
                 "mail_wait_seconds": wait_seconds,
+                **mail_wait,
             }, ensure_ascii=False, indent=2))
             OUT_RESULT.chmod(0o600)
             log(f"email verify timeout after {wait_seconds}s, last={cj}")

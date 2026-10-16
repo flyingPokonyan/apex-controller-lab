@@ -3,7 +3,9 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import Mock, patch
+from urllib.parse import unquote, urlparse
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2] / 'windows'))
 from apex_registration import cli
@@ -117,3 +119,53 @@ class RegistrationEgressTests(unittest.TestCase):
             self.assertEqual(steam.graph_access_token({'client_id': 'client', 'refresh_token': 'refresh'}), 'access')
             self.assertIsNone(steam.graph_find_steam_link('access', after_ts=0))
             self.assertEqual(factory.call_count, 2)
+
+    def test_steam_exit_rotation_keeps_the_task_country(self):
+        for raw, country in (
+                ('http://login-region-US-sid-abc12345-t-60:pw@us.1024proxy.io:3000', 'US'),
+                ('http://acct-zone-custom-region-JP-session-12345678-sessTime-60:pw@global.rotgb.trustsource.live:6000', 'JP')):
+            rotated = steam._rotate_sticky_proxy(raw, 'another-seed')
+            user = unquote(urlparse(rotated).username)
+            self.assertNotEqual(rotated, raw)
+            self.assertIn(f'-region-{country}', user)
+            self.assertNotIn('-region-HK', user)
+
+    def test_three_captcha_rejections_move_to_one_new_exit_in_the_same_country(self):
+        raw = 'http://login-region-US-sid-abc12345-t-60:pw@us.1024proxy.io:3000'
+        session = Mock()
+        session.cookies.get_dict.return_value = {}
+
+        def post(url, **_):
+            response = Mock()
+            response.json.return_value = ({'sitekey': 'key', 'gid': '1'} if 'refreshcaptcha' in url
+                                          else {'success': 101})
+            return response
+
+        session.post.side_effect = post
+        joins = []
+
+        def join(proxy_url, email):
+            joins.append(proxy_url)
+            return session, Mock(content=b'<input id="init_id" value="init-1">'), steam.parse_proxy(proxy_url)
+
+        with tempfile.TemporaryDirectory() as tmp, \
+                patch.dict(steam.os.environ, {'EA_PROXY': raw, 'STEAM_PROXY': raw}, clear=True), \
+                patch.multiple(steam, ARTIFACT_ROOT=Path(tmp), OUT_LOG=Path(tmp) / 'log', OUT_ERR=Path(tmp) / 'err',
+                               OUT_RESULT=Path(tmp) / 'result.json', PROXY_FILE=Path(tmp) / 'proxy',
+                               load_captcha_provider=Mock(return_value='captchaly'),
+                               load_captchaly_key=Mock(return_value='key'),
+                               load_email_line=Mock(return_value={'email': 'fixture@example.com'}),
+                               load_mailbox_pool=lambda primary: [primary], open_steam_join=join,
+                               captchaly_bind_proxy=Mock(return_value=None),
+                               solve_hcaptcha_enterprise=Mock(return_value=SimpleNamespace(
+                                   token='token', deducted=1, duration=1))):
+            self.assertEqual(steam.main(), 2)
+            result = json.loads((Path(tmp) / 'result.json').read_text())
+            rotated = steam.os.environ['EA_PROXY']
+        self.assertEqual((result['error_code'], result['exit_rotations']), ('steam_captcha_rejected', 1))
+        self.assertEqual(len(joins), 2)
+        verify_calls = [c for c in session.post.call_args_list if 'ajaxverifyemail' in c.args[0]]
+        self.assertEqual(len(verify_calls), 6)
+        self.assertNotEqual(rotated, raw)
+        self.assertIn('-region-US', unquote(urlparse(rotated).username))
+        self.assertEqual(steam.os.environ.get('STEAM_PROXY'), None)  # patch.dict restored the environment
