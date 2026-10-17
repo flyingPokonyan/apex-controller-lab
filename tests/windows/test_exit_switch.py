@@ -147,6 +147,17 @@ class NodeChoiceTests(unittest.TestCase):
         chosen = [runner.prepare("HK")["node"] for _ in range(4)]
         self.assertEqual(len(set(chosen)), 4)
 
+    def test_nodes_other_accounts_used_go_last_and_the_accounts_own_node_first(self):
+        runner = switch(FakeClash())
+        self.assertEqual(runner.prepare("HK", avoid=HK[1:])["node"], HK[0])
+        self.assertEqual(switch(FakeClash()).prepare("HK", prefer=[HK[2]], avoid=[HK[0]])["node"], HK[2])
+
+    def test_an_avoided_node_is_still_used_when_nothing_else_answers(self):
+        # Least recently used first: HK 02 was used longest ago by another account.
+        clash = FakeClash(dead=[HK[0]])
+        facts = switch(clash).prepare("HK", avoid=[HK[2], HK[1], HK[3]])
+        self.assertEqual((facts["node"], facts["error"]), (HK[2], None))
+
     def test_game_route_counts_only_apex_connections(self):
         clash = FakeClash()
         runner = switch(clash)
@@ -313,6 +324,11 @@ class ConfigTests(unittest.TestCase):
         self.assertEqual((old.exit_country, old.exit_switch), ("HK", False))
         new = provider(exitCountry="jp", exitSwitch=True).claim("claim_2", "LEVEL_TO_TARGET")
         self.assertEqual((new.exit_country, new.exit_switch), ("JP", True))
+        self.assertEqual((old.exit_avoid_nodes, old.exit_prefer_nodes), ((), ()))
+        hinted = provider(exitAvoidNodes=[HK[1], 7, ""], exitPreferNodes=[HK[2]]).claim("claim_3", "LEVEL_TO_TARGET")
+        self.assertEqual((hinted.exit_avoid_nodes, hinted.exit_prefer_nodes), ((HK[1],), (HK[2],)))
+        # A malformed hint never rejects the lease.
+        self.assertEqual(provider(exitAvoidNodes="HK").claim("claim_4", "LEVEL_TO_TARGET").exit_avoid_nodes, ())
 
     def test_http_controller_ignores_ambient_proxies(self):
         received = []
@@ -423,6 +439,20 @@ class ExitOrchestratorTests(unittest.TestCase):
         reason, lease_ref = reporter.report_later.call_args.args
         self.assertEqual((reason, lease_ref), ("login", (lease.lease_id, lease.lease_fence)))
         self.assertEqual(reporter.report_later.call_args.kwargs["clash"]["error"], "no_node")
+
+    def test_lease_hints_reach_the_switch(self):
+        clash = FakeClash()
+        lease = replace(FakeAccountProvider.lease("acct_1", now=datetime.now(timezone.utc)),
+                        expected_ea_account_id="ea_1", exit_country="HK", exit_switch=True,
+                        exit_avoid_nodes=tuple(HK[:3]))
+        with tempfile.TemporaryDirectory() as directory:
+            AccountOrchestrator(
+                provider=FakeAccountProvider([lease]), ea_driver=Driver([], signed_in=False),
+                play_session=object(), checkpoint_store=AtomicCheckpointStore(Path(directory) / "status.json"),
+                device_id="device_1", capture_source=object(), notify=lambda _: None,
+                exit_switch=switch(clash), lease_keeper_factory=IdleKeeper,
+            ).run_once()
+        self.assertEqual(clash.selected(), HK[3])
 
     def test_switch_happens_before_sign_in(self):
         clash = FakeClash()

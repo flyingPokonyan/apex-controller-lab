@@ -630,7 +630,8 @@ class AccountOrchestrator:
         clash = None
         switch = getattr(self, "exit_switch", None)
         if switch is not None and getattr(lease, "exit_switch", False):
-            clash = switch.prepare(lease.exit_country)
+            clash = switch.prepare(lease.exit_country, avoid=lease.exit_avoid_nodes,
+                                   prefer=lease.exit_prefer_nodes)
             if clash.get("node"):
                 self.notify(f"游戏出口切换到 {clash['node']}（{clash['delayMs']} ms）")
             else:
@@ -1120,9 +1121,13 @@ class AccountOrchestrator:
                         run_id=result.run_id,
                         error_code=result.error_code,
                     )
+                # Apex leaving the foreground (a crash dialog, another window) is
+                # over once Apex is stopped, EA signed out and the lease closed:
+                # the managed loop backs off and continues instead of stopping
+                # until someone resumes it. A stalled screen still stops for a look.
                 if (
                     result.status not in {"TARGET_REACHED", "FAILED"}
-                    and result.error_code != "LEASE_UNRECOVERED"
+                    and result.error_code not in {"LEASE_UNRECOVERED", "FOREGROUND_UNRECOVERED"}
                 ):
                     return self._pause(
                         result.error_code or "SESSION_ENDED_WITHOUT_TARGET",

@@ -23,6 +23,11 @@ RETRY_EXIT = 74
 RELOAD_EXIT = 76
 BUSY_EXIT = 73
 MAX_FAILURES = 3
+# EA cleanup that ran out of recovery steps is usually a network outage or a
+# dialog EA left open. Once the update check reaches GitHub again, the
+# launcher resumes it the way an operator would, a bounded number of times.
+CLEANUP_RETRY_S = 600
+CLEANUP_AUTO_RESUMES = 3
 
 
 class LauncherError(RuntimeError):
@@ -310,6 +315,22 @@ class Launcher:
         self.state["failures"] = dict(list(failures.items())[-32:])
         self.next_start = time.monotonic() + min(300, 30 * 2 ** min(failures[commit] - 1, 4))
 
+    def cleanup_error(self):
+        left = CLEANUP_AUTO_RESUMES - int(self.state.get("cleanupAutoResumes", 0))
+        return "EA_RECOVERY_EXHAUSTED AUTO_RETRY" if left > 0 else "EA_RECOVERY_EXHAUSTED"
+
+    def cleanup_retry_due(self):
+        if int(self.state.get("cleanupAutoResumes", 0)) >= CLEANUP_AUTO_RESUMES:
+            return False
+        return time.time() - float(self.state.get("cleanupBlockedAt") or 0) >= CLEANUP_RETRY_S
+
+    def retry_cleanup(self):
+        attempt = int(self.state.get("cleanupAutoResumes", 0)) + 1
+        self.state.pop("cleanupBlockedCommit", None)
+        self.state.update(resumeWorker=True, cleanupAutoResumes=attempt)
+        self.next_start = 0
+        print(f"[managed] 网络已恢复，自动重试 EA 清理（第 {attempt} 次，共 {CLEANUP_AUTO_RESUMES} 次）", flush=True)
+
     def can_start(self, commit):
         return (not self.state.get("operatorStopped")
                 and self.state.get("cleanupBlockedCommit") != commit
@@ -409,7 +430,7 @@ class Launcher:
                 # The checkpoint deliberately retains this lease and pause.
                 # Restarting it cannot recover and is not a build failure.
                 self.save("WAITING_CLEANUP", pid=None, cleanupBlockedCommit=commit,
-                          error="EA_RECOVERY_EXHAUSTED")
+                          cleanupBlockedAt=time.time(), error=self.cleanup_error())
             elif code == RETRY_EXIT:
                 attempts = int(self.state["recoveryFailures"].get(commit, 0)) + 1
                 self.state["recoveryFailures"][commit] = attempts
@@ -463,6 +484,7 @@ class Launcher:
             self.completed = completed
             self.state["failures"][commit] = 0
             self.state["recoveryFailures"][commit] = 0
+            self.state["cleanupAutoResumes"] = 0
             self.state["retryAfter"] = 0
             self.save("RUNNING", error=None)
         mode, reason = update_mode(status, now=time.time(), started=self.started, phase_started=self.phase_started)
@@ -506,6 +528,7 @@ class Launcher:
             self.state["failures"] = {}
             self.state["recoveryFailures"] = {}
             self.state["retryAfter"] = 0
+            self.state["cleanupAutoResumes"] = 0
             self.next_start = 0
         target = None
         next_fetch = 0.0
@@ -534,6 +557,7 @@ class Launcher:
                         self.state["failures"] = {}
                         self.state["recoveryFailures"] = {}
                         self.state["retryAfter"] = 0
+                        self.state["cleanupAutoResumes"] = 0
                         self.next_start = 0
                     check_now.unlink(missing_ok=True)
                     next_fetch = 0
@@ -593,7 +617,10 @@ class Launcher:
                         elif self.state.get("operatorStopped"):
                             self.save("OPERATOR_STOPPED")
                         elif self.state.get("cleanupBlockedCommit") == head:
-                            self.save("WAITING_CLEANUP", error="EA_RECOVERY_EXHAUSTED")
+                            if checked and future is None and self.cleanup_retry_due():
+                                self.retry_cleanup()
+                            else:
+                                self.save("WAITING_CLEANUP", error=self.cleanup_error())
                         elif self.state["failures"].get(head, 0) >= MAX_FAILURES:
                             self.save("WAITING_FIX")
                 time.sleep(1)

@@ -177,9 +177,56 @@ class LauncherTest(unittest.TestCase):
         launcher.write_json(self.app.root / "worker.json", {
             "session": "current", "pid": 123, "reason": "EA_RECOVERY_EXHAUSTED"})
         self.app.monitor("old")
-        self.assertEqual(self.app.state["error"], "EA_RECOVERY_EXHAUSTED")
+        self.assertEqual(self.app.state["error"], "EA_RECOVERY_EXHAUSTED AUTO_RETRY")
         self.assertEqual(self.app.state["stage"], "WAITING_CLEANUP")
         self.assertEqual(self.app.state["failures"], {})
+
+    def blocked_cleanup_run(self, *, fetch, blocked_minutes_ago, used=0):
+        """One pass of the launcher loop with this commit blocked on EA cleanup."""
+        self.app.state.update(installed="old", running="old", cleanupBlockedCommit="old",
+                              cleanupBlockedAt=time.time() - blocked_minutes_ago * 60,
+                              cleanupAutoResumes=used, stage="WAITING_CLEANUP", operatorStopped=False)
+        self.repo.head.return_value = "old"
+        self.repo.fetch.side_effect = fetch
+        future = Future()
+        try:
+            future.set_result(fetch())
+        except Exception as error:
+            future.set_exception(error)
+        executor = Mock()
+        executor.submit.return_value = future
+        self.app.start = Mock()
+        self.seen = []
+
+        def sleep(_):
+            self.seen.append((self.app.state["stage"], self.app.state.get("error")))
+            if len(self.seen) == 3:
+                raise KeyboardInterrupt
+        with patch.object(launcher, "ThreadPoolExecutor", return_value=executor), \
+                patch.object(launcher.time, "sleep", side_effect=sleep):
+            self.app.run()
+        return self.app.start
+
+    def test_blocked_cleanup_resumes_by_itself_once_the_network_is_back(self):
+        start = self.blocked_cleanup_run(fetch=lambda: "old", blocked_minutes_ago=11)
+        start.assert_called_with("old")
+        self.assertTrue(self.app.state["resumeWorker"])
+        self.assertEqual(self.app.state["cleanupAutoResumes"], 1)
+        self.assertNotIn("cleanupBlockedCommit", self.app.state)
+
+    def test_blocked_cleanup_waits_while_the_network_is_down_or_too_soon(self):
+        def offline():
+            raise launcher.LauncherError("git.exe: fetch failed (128) TLS")
+        self.blocked_cleanup_run(fetch=offline, blocked_minutes_ago=30).assert_not_called()
+        self.assertEqual(self.app.state["cleanupBlockedCommit"], "old")
+        self.blocked_cleanup_run(fetch=lambda: "old", blocked_minutes_ago=2).assert_not_called()
+        self.assertEqual(self.seen[-1], ("WAITING_CLEANUP", "EA_RECOVERY_EXHAUSTED AUTO_RETRY"))
+
+    def test_blocked_cleanup_needs_a_person_after_three_automatic_tries(self):
+        start = self.blocked_cleanup_run(fetch=lambda: "old", blocked_minutes_ago=60,
+                                         used=launcher.CLEANUP_AUTO_RESUMES)
+        start.assert_not_called()
+        self.assertEqual(self.seen[-1], ("WAITING_CLEANUP", "EA_RECOVERY_EXHAUSTED"))
 
     def test_waiting_fix_exit_stops_without_another_retry(self):
         self.worker(code=1)

@@ -2078,6 +2078,12 @@ class AccountOrchestratorTest(unittest.TestCase):
                 "RELEASED",
                 AccountCycleOutcome.PAUSED,
             ),
+            (
+                "PLAYED",
+                "FOREGROUND_UNRECOVERED",
+                "RELEASED",
+                AccountCycleOutcome.COMPLETED,
+            ),
         )
         for status, error_code, expected_outcome, expected_cycle in cases:
             with self.subTest(status=status), tempfile.TemporaryDirectory() as directory:
@@ -2592,6 +2598,51 @@ class AccountOrchestratorTest(unittest.TestCase):
             self.assertFalse(store.load().has_lease)
             self.assertLess(log.index("apex.stop"), log.index("ea.sign_out"))
             self.assertEqual(sleeps, [1.0])
+
+
+    def test_apex_leaving_the_foreground_closes_safely_and_the_managed_loop_continues(self) -> None:
+        from apex_automation.managed_runtime import ManagedRuntime
+        import itertools
+
+        class ForegroundLost(FakeManagedSession):
+            def run(self, identity, *args, **kwargs):
+                result = super().run(identity, *args, **kwargs)
+                return replace(result, status="PLAYED", level=15, error_code="FOREGROUND_UNRECOVERED")
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            lease = replace(FakeAccountProvider.lease("acct_1"), expected_ea_account_id="ea_1")
+            provider = FakeAccountProvider([lease], credentials={
+                "acct_1": SecretCredentials("login@example.test", "password"),
+            }, otp_factory=lambda challenge_id, started_at: OtpCode(
+                code="123456", challenge_id=challenge_id, received_at=started_at,
+                expires_at=started_at + timedelta(minutes=1)))
+            log, notices, sleeps = [], [], []
+            store = AtomicCheckpointStore(root / "account-cycle-status.json")
+            orchestrator = None
+
+            def sleep(delay):
+                sleeps.append(delay)
+                if delay >= 30:
+                    orchestrator.stop()
+
+            orchestrator = AccountOrchestrator(
+                provider=provider, ea_driver=FakeEaDriver(log, "ea_1"),
+                play_session=ForegroundLost(log, FakeDrain(accepted_through=12)),
+                checkpoint_store=store, device_id="device_1", capture_source=object(),
+                sleep=sleep, notify=notices.append, completion_poll_s=0.1,
+                operation_id_factory=lambda counter=itertools.count(): f"op_{next(counter)}",
+                maintenance=ManagedRuntime(root / "managed", "fixture"),
+            )
+            # Before: the pause outlived the closed lease, so every restart
+            # exited at once and the launcher stopped on WAITING_FIX.
+            self.assertEqual(orchestrator.run_forever(idle_s=30), 0)
+            close_call = [item for item in provider.calls if item[0] == "close"][-1]
+            self.assertEqual((close_call[1][3], close_call[1][6]), ("RELEASED", "FOREGROUND_UNRECOVERED"))
+            checkpoint = store.load()
+            self.assertFalse(checkpoint.has_lease)
+            self.assertIs(checkpoint.run_state, OrchestratorRunState.ACTIVE)
+            self.assertIn("账号已安全收口：FOREGROUND_UNRECOVERED；30 秒后自动重试", notices)
 
 
 class PausedClaimRegistrationTest(unittest.TestCase):

@@ -148,6 +148,8 @@ class AccountLease:
     ring_target: int | None = None
     exit_country: str = "HK"
     exit_switch: bool = False
+    exit_avoid_nodes: tuple[str, ...] = ()
+    exit_prefer_nodes: tuple[str, ...] = ()
 
     def __post_init__(self) -> None:
         if self.lease_fence < 1:
@@ -590,6 +592,13 @@ class HttpAccountProvider:
         return value.astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
 
     @staticmethod
+    def _node_names(value: object) -> tuple[str, ...]:
+        """Optional node ordering hints; anything malformed is ignored, never fatal."""
+        if not isinstance(value, list):
+            return ()
+        return tuple(item for item in value[:100] if isinstance(item, str) and 0 < len(item) <= 200)
+
+    @staticmethod
     def _exit_country(payload: Mapping[str, object]) -> str:
         if "exitCountry" not in payload:
             return "HK"
@@ -649,6 +658,8 @@ class HttpAccountProvider:
             ring_target=ring_target,
             exit_country=exit_country,
             exit_switch=payload.get("exitSwitch") is True,
+            exit_avoid_nodes=self._node_names(payload.get("exitAvoidNodes")),
+            exit_prefer_nodes=self._node_names(payload.get("exitPreferNodes")),
         )
         known_account = self._lease_accounts.get(lease.lease_id)
         if known_account is not None and known_account != lease.account_id:

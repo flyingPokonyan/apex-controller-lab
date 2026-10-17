@@ -306,8 +306,14 @@ class ClashExitSwitch:
         facts.update(values)
         return facts
 
-    def prepare(self, country: str) -> dict:
-        """Switch between accounts. Returns the facts sent to Forge."""
+    def prepare(self, country: str, *, avoid=(), prefer=()) -> dict:
+        """Switch between accounts. Returns the facts sent to Forge.
+
+        Forge lists this account's own earlier nodes (``prefer``) and the nodes
+        other accounts used lately on any machine (``avoid``, least recently
+        used first). They only order the choice: an avoided node is still
+        used when nothing else answers.
+        """
         try:
             try:
                 running = self._game_running()
@@ -321,9 +327,18 @@ class ClashExitSwitch:
                 return self._facts(country=country, error="group_missing")
             routes = candidate_routes(proxies, group, country)
             self._rng.shuffle(routes)
-            # Spread accounts: nodes used most recently go to the back.
-            recent = self._recent
-            routes.sort(key=lambda route: len(recent) - recent.index(route[-1][1]) if route[-1][1] in recent else 0)
+            # Spread accounts: Forge's lists first, then this machine's own
+            # recent picks go to the back.
+            recent, avoid, prefer = self._recent, list(avoid), list(prefer)
+
+            def rank(route):
+                node = route[-1][1]
+                if node in prefer:
+                    return 0, prefer.index(node)
+                if node in avoid:
+                    return 2, avoid.index(node)
+                return 1, len(recent) - recent.index(node) if node in recent else 0
+            routes.sort(key=rank)
             for route in routes[:MAX_TESTS]:
                 node = route[-1][1]
                 delay = self._delay(node)
