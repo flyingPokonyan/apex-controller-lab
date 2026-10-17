@@ -146,18 +146,17 @@ class RegistrationEgressTests(unittest.TestCase):
         self.assertEqual((geo.ip, geo.asn, geo.org), ('192.0.2.2', 1234, 'ISP'))
         self.assertTrue(session.proxies['https'].startswith('socks5h:'))
 
-    def test_steam_mail_uses_explicit_proxy_and_direct_mode_ignores_system_proxy(self):
-        with patch.dict(cli.os.environ, {'STEAM_PROXY': 'socks5://fixture:secret@proxy.example:3000',
-                'HTTPS_PROXY': 'http://ambient.example', 'NO_PROXY': 'graph.microsoft.com'}, clear=True):
+    def test_steam_mail_uses_the_machine_network_not_the_registration_proxy(self):
+        with patch.dict(cli.os.environ, {'STEAM_PROXY': 'socks5://fixture:secret@proxy.example:3000'}, clear=True):
             with steam.graph_client() as client:
-                self.assertFalse(client.trust_env)
-                self.assertEqual(client.proxies['https'], 'socks5h://fixture:secret@proxy.example:3000')
+                self.assertTrue(client.trust_env)
+                self.assertEqual(client.proxies, {})
             cli.os.environ['ACCOUNT_FLOW_DIRECT'] = '1'
             with steam.graph_client() as client:
                 self.assertFalse(client.trust_env)
                 self.assertEqual(client.proxies, {})
 
-    def test_both_steam_mail_calls_use_the_assigned_proxy_client(self):
+    def test_both_steam_mail_calls_use_the_mail_client(self):
         with patch.object(steam, 'graph_client') as factory:
             factory.return_value.post.return_value.json.return_value = {'access_token': 'access'}
             factory.return_value.get.return_value.status_code = 200

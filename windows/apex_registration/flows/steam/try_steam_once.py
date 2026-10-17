@@ -323,14 +323,13 @@ def load_email_line() -> dict[str, str]:
 
 
 def graph_client() -> requests.Session:
+    # The mailbox is read over this machine's own network, as the EA flow reads
+    # its codes; only Steam itself goes through the task's registration proxy.
+    # The residential proxy failed Graph reads (29 ProxyErrors in one wait)
+    # while the Steam mail had already arrived.
     client = requests.Session()
-    client.trust_env = False
-    proxy = os.environ.get('STEAM_PROXY', '').strip() or os.environ.get('EA_PROXY', '').strip()
-    if proxy and not direct_mode():
-        parsed = urlparse(proxy)
-        if parsed.scheme == 'socks5':
-            proxy = parsed._replace(scheme='socks5h').geturl()
-        client.proxies = {'http': proxy, 'https': proxy}
+    if direct_mode():
+        client.trust_env = False
     return client
 
 
