@@ -162,6 +162,12 @@ def apply_bundle(output_dir: Path, payload: dict) -> str:
         os.environ['EA_PROXY'] = str(runtime['proxyUrl'])
         os.environ['EA_PROXY_VENDOR'] = str(runtime.get('proxyVendor') or '')
         os.environ['CAPTCHALY_KEY'] = str(runtime.get('steamCaptchaKey') or '')
+        # Registration-exit experiment: 'node' signs EA up through a free Clash node.
+        arm = runtime.get('registrationExit')
+        avoid = runtime.get('exitAvoidNodes')
+        os.environ['EA_REGISTRATION_EXIT'] = arm if arm in ('node', 'residential') else ''
+        os.environ['EA_EXIT_AVOID_NODES'] = json.dumps(
+            [item for item in avoid[:100] if isinstance(item, str)] if isinstance(avoid, list) else [])
         # Select relative to the original assignment, not the last retry's vendor.
         # Existing tasks without a pool keep their assigned vendor and draw a new exit.
         pool = runtime.get('proxies') or {}
@@ -478,7 +484,7 @@ def proxy_vendor(proxy_url: str) -> str:
     return host or "proxy"
 
 
-def remember_exit(output_dir: Path, geo=None) -> None:
+def remember_exit(output_dir: Path, geo=None, *, node=None) -> None:
     from .utils.egress import exit_fields, public_exit
     provider = os.environ.get('EA_PROXY_VENDOR', '')
     if not provider:
@@ -489,7 +495,7 @@ def remember_exit(output_dir: Path, geo=None) -> None:
         provider, geo = 'direct', None
     fact = public_exit(dict(provider=provider, attempt=int(os.environ.get('APEX_REGISTRATION_ATTEMPT', '1')),
         ip=getattr(geo, 'ip', ''), country=getattr(geo, 'country', ''),
-        asn=getattr(geo, 'asn', None), org=getattr(geo, 'org', '') or getattr(geo, 'isp', '')))
+        asn=getattr(geo, 'asn', None), org=getattr(geo, 'org', '') or getattr(geo, 'isp', ''), node=node))
     (output_dir / 'proxy_exit.json').unlink(missing_ok=True)
     if fact is None:
         return
@@ -510,6 +516,45 @@ def remember_creation_exit(output_dir: Path, result: dict) -> None:
     fact = public_exit(read_json(output_dir, 'proxy_exit.json'))
     if fact:
         write_private_json(path, fact)
+
+
+def use_node_exit(output_dir: Path) -> None:
+    """Registration-exit experiment: sign EA up through a Clash node no other account used lately.
+
+    Steam keeps its residential proxy. The node stays selected, so this
+    account's first login leaves through it too. Any problem falls back to the
+    residential proxy, and Forge records the exit actually used.
+    """
+    if os.environ.get('EA_REGISTRATION_EXIT') != 'node' or os.environ.get('SKIP_EA_REGISTER') == '1':
+        return
+    region = os.environ.get('EA_REGISTER_COUNTRY', '').strip().upper()
+    try:
+        avoid = json.loads(os.environ.get('EA_EXIT_AVOID_NODES') or '[]')
+    except ValueError:
+        avoid = []
+    from apex_automation.clash_exit import load_exit_switch, local_proxy_url
+    from .utils.proxy_probe import probe_exit
+    private = (Path(os.environ['APEX_RUNNER_CONFIG']).expanduser() if os.environ.get('APEX_RUNNER_CONFIG')
+               else ROOT / 'account-cycle.private.json')
+    try:
+        facts = load_exit_switch(private if private.exists() else None).prepare(
+            region, avoid=avoid if isinstance(avoid, list) else [])
+    except Exception as exc:  # A broken Clash never stops a registration.
+        facts = {'node': None, 'error': type(exc).__name__}
+    node = facts.get('node')
+    if not node:
+        sys.stderr.write(f"EA 注册没切到 {region} 节点（{facts.get('error')}），改用住宅代理。\n")
+        return
+    proxy = local_proxy_url()
+    geo, error = probe_exit(proxy)
+    if geo is None or str(geo.country or '').upper() != region:
+        sys.stderr.write(f"节点 {node} 的出口不在 {region}（{getattr(geo, 'country', None) or error}），改用住宅代理。\n")
+        return
+    os.environ['EA_PROXY'] = proxy
+    os.environ['EA_PROXY_VENDOR'] = 'clash'
+    pin_us_timezone(geo)
+    remember_exit(output_dir, geo, node=node)
+    sys.stderr.write(f"EA 注册走 Clash 节点 {node}（{geo.ip}），Steam 仍用住宅代理。\n")
 
 
 def pin_us_timezone(geo) -> None:
@@ -719,6 +764,7 @@ def main(argv=None) -> int:
             runtime.start('steam_register', 'steam_register', '创建 Steam 账号', 600)
             register_steam_then_record(output_dir)
             try_sync_result(output_dir, finished=False)
+        use_node_exit(output_dir)
     except Exception as exc:
         sys.stderr.write(save_failure(output_dir, runtime.operation.get('stage', 'checkout'), exc) + "\n")
         if (output_dir / "windows_trial.json").exists():

@@ -8,7 +8,7 @@ from pathlib import Path
 def public_exit(raw):
     if not isinstance(raw, dict):
         return None
-    provider = raw.get('provider') if raw.get('provider') in ('711', '1024', 'resin', 'direct') else ''
+    provider = raw.get('provider') if raw.get('provider') in ('711', '1024', 'resin', 'direct', 'clash') else ''
     try:
         ip = str(ipaddress.ip_address(str(raw.get('ip') or '')))
     except ValueError:
@@ -23,7 +23,13 @@ def public_exit(raw):
     attempt = raw.get('attempt', 1)
     if type(attempt) is not int or not 1 <= attempt <= 100 or not (provider or ip or country):
         return None
-    return dict(attempt=attempt, provider=provider, ip=ip, country=country, asn=asn, org=org)
+    fact = dict(attempt=attempt, provider=provider, ip=ip, country=country, asn=asn, org=org)
+    # The Clash node an EA registration went through; Forge prefers it for this account's games.
+    node = raw.get('node')
+    if provider == 'clash' and isinstance(node, str) and 0 < len(node) <= 120 \
+            and not re.search(r'://|@|[\x00-\x1f]|(?i:password|token|secret|authorization)\s*[:=]', node):
+        fact['node'] = node
+    return fact
 
 
 def exit_fields(directory):

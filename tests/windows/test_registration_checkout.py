@@ -204,6 +204,12 @@ class WindowsCheckoutTests(unittest.TestCase):
             windows.apply_bundle(output, payload)
             self.assertEqual(windows.os.environ['EA_PROXY'], payload['registration']['proxyUrl'])
             self.assertEqual(windows.os.environ['CAPTCHALY_KEY'], 'fixture-captcha')
+            # Without the experiment there is no node step.
+            self.assertEqual(windows.os.environ['EA_REGISTRATION_EXIT'], '')
+            payload['registration'].update(registrationExit='node', exitAvoidNodes=['JP 02', 7])
+            windows.apply_bundle(output, payload)
+            self.assertEqual(windows.os.environ['EA_REGISTRATION_EXIT'], 'node')
+            self.assertEqual(json.loads(windows.os.environ['EA_EXIT_AVOID_NODES']), ['JP 02'])
             windows.os.environ['EA_PROXY'] = 'different'
             with patch.object(windows, 'checkout_bundle', side_effect=AssertionError('must reuse assigned task')):
                 windows.prepare_bundle(output)

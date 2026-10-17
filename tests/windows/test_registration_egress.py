@@ -16,6 +16,52 @@ from apex_registration.flows.steam import try_steam_once as steam
 
 
 class RegistrationEgressTests(unittest.TestCase):
+    def node_arm(self, *, node='🇭🇰 高级 专线 香港 02', country='HK', arm='node'):
+        """Run the node step with a fake Clash; returns (environment, prepare mock, output facts)."""
+        from apex_automation import clash_exit
+        switch = Mock()
+        switch.prepare.return_value = {'node': node, 'error': None if node else 'no_node'}
+        residential = 'http://user:secret@us.1024proxy.io:3000'
+        with tempfile.TemporaryDirectory() as directory, patch.dict(cli.os.environ, {
+                'EA_REGISTRATION_EXIT': arm, 'EA_REGISTER_COUNTRY': 'HK', 'EA_PROXY': residential,
+                'EA_PROXY_VENDOR': '1024', 'APEX_REGISTRATION_ATTEMPT': '1',
+                'EA_EXIT_AVOID_NODES': json.dumps(['🇭🇰 高级 专线 香港 01']),
+                'APEX_RUNNER_CONFIG': str(Path(directory) / 'missing.json')}, clear=True), \
+                patch.object(clash_exit, 'load_exit_switch', return_value=switch), \
+                patch.object(clash_exit, 'local_proxy_url', return_value='http://127.0.0.1:7897'), \
+                patch.object(proxy_probe, 'probe_exit', return_value=(ProxyExit(country=country, ip='192.0.2.9'), None)):
+            output = Path(directory)
+            cli.use_node_exit(output)
+            return dict(cli.os.environ), switch.prepare, exit_fields(output)
+
+    def test_node_arm_signs_ea_up_through_a_free_clash_node(self):
+        environ, prepare, facts = self.node_arm()
+        prepare.assert_called_once_with('HK', avoid=['🇭🇰 高级 专线 香港 01'])
+        self.assertEqual((environ['EA_PROXY'], environ['EA_PROXY_VENDOR']), ('http://127.0.0.1:7897', 'clash'))
+        self.assertEqual((facts['exit']['provider'], facts['exit']['node'], facts['exit']['ip']),
+                         ('clash', '🇭🇰 高级 专线 香港 02', '192.0.2.9'))
+
+    def test_node_arm_falls_back_to_the_residential_proxy(self):
+        for case in ({'node': None}, {'country': 'JP'}):
+            with self.subTest(case=case):
+                environ, _, facts = self.node_arm(**case)
+                self.assertEqual(environ['EA_PROXY_VENDOR'], '1024')
+                self.assertIn('1024proxy', environ['EA_PROXY'])
+                self.assertNotIn('exit', facts)
+        environ, prepare, _ = self.node_arm(arm='residential')
+        prepare.assert_not_called()
+
+    def test_only_a_clash_exit_keeps_its_node_and_the_local_port_comes_from_verge(self):
+        from apex_automation.clash_exit import local_proxy_url
+        self.assertEqual(public_exit({'provider': 'clash', 'node': 'JP 02', 'country': 'JP'})['node'], 'JP 02')
+        self.assertNotIn('node', public_exit({'provider': '1024', 'node': 'JP 02', 'country': 'JP'}))
+        self.assertNotIn('node', public_exit({'provider': 'clash', 'node': 'http://a@b', 'country': 'JP'}))
+        with tempfile.TemporaryDirectory() as directory:
+            config = Path(directory) / 'clash-verge.yaml'
+            config.write_text('mode: rule\nmixed-port: 7899\n', encoding='utf-8')
+            self.assertEqual(local_proxy_url([config]), 'http://127.0.0.1:7899')
+            self.assertEqual(local_proxy_url([Path(directory) / 'missing.yaml']), 'http://127.0.0.1:7897')
+
     def test_creation_exit_survives_a_new_country_on_resume_and_supervisor_upload(self):
         with tempfile.TemporaryDirectory() as directory, patch.dict(cli.os.environ, {
                 'EA_PROXY_VENDOR': '711', 'APEX_REGISTRATION_ATTEMPT': '1'}, clear=True):

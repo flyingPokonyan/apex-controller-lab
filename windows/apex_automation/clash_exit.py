@@ -98,6 +98,21 @@ def read_controller_settings(text: str) -> dict[str, str]:
     return settings
 
 
+DEFAULT_MIXED_PORT = 7897
+
+
+def local_proxy_url(paths: list[Path] | None = None) -> str:
+    """Clash Verge's local HTTP proxy, which leaves through the node selected now."""
+    for path in verge_config_paths() if paths is None else paths:
+        try:
+            match = re.search(r"^mixed-port:[ \t]*(\d+)", path.read_text(encoding="utf-8", errors="replace"), re.M)
+        except OSError:
+            continue
+        if match:
+            return f"http://127.0.0.1:{int(match.group(1))}"
+    return f"http://127.0.0.1:{DEFAULT_MIXED_PORT}"
+
+
 def verge_config_paths() -> list[Path]:
     homes = []
     if os.environ.get("APPDATA"):
