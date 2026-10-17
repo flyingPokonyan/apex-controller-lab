@@ -148,6 +148,12 @@ SIGNIN_SETTLE_S = 30.0
 # accounts verified on their next lease. A real other account stays put.
 IDENTITY_MISMATCH_HOLD_S = 10.0
 IDENTITY_VERIFY_TIMEOUT_S = 30.0
+# Lease 3094 (2026-10-17): after this Runner typed and confirmed the account,
+# its password and the authenticator code, EA painted Home but its account
+# panel stayed a loading skeleton for minutes, so no EA ID was readable and
+# the login was failed. With no other account on screen, the account this
+# sign-in entered is the one EA signed in.
+SIGNED_IN_PANEL_GRACE_S = 20.0
 # EA took longer than 25 s to show its login page after Sign out (lease 3076).
 SIGNOUT_TIMEOUT_S = 45.0
 EA_RESTART_TIMEOUT_S = 60.0
@@ -2110,7 +2116,20 @@ class WindowsEaHybridDriver(EaPasswordRecoveryMixin):
         credentials: SecretCredentials,
         otp_supplier: Callable[[OtpChallenge], OtpCode],
     ) -> EaIdentityFact:
+        self._entered_credentials = False
+        self._signed_in_as = None
         return self._with_ui_recovery("signin", lambda: self._sign_in_once(credentials, otp_supplier))
+
+    def _own_sign_in(self, expected_ea_account_id: str | None,
+                     read: EaIdentityFact | None) -> EaIdentityFact | None:
+        """The leased account, when this sign-in entered it and EA shows no other."""
+
+        if not expected_ea_account_id or not getattr(self, "_entered_credentials", False):
+            return None
+        if read is not None and not identity_matches(expected_ea_account_id, read.ea_account_id):
+            return None
+        self._signed_in_as = expected_ea_account_id
+        return EaIdentityFact(ea_account_id=expected_ea_account_id, source="signin-flow", verified=True)
 
     def _signin_surface(self) -> tuple[int, EaObservation]:
         """The page a sign-in attempt starts from, once EA has painted one.
@@ -2171,6 +2190,10 @@ class WindowsEaHybridDriver(EaPasswordRecoveryMixin):
                 # the password into the account box.
                 submit = self._submit_password(hwnd, observation, credentials)
                 self.notify(f"EA 密码已提交（{submit}）")
+                # Sticky across this sign-in's retries: EA's session now belongs
+                # to the account typed and confirmed in the account box.
+                if getattr(self, "_login_identifier_verified", False):
+                    self._entered_credentials = True
             elif observation.page not in (EaPage.OTP, EaPage.SIGNED_IN):
                 self._record("signin-wrong-page", observation)
                 raise EaAppAutomationError(
@@ -2371,6 +2394,7 @@ class WindowsEaHybridDriver(EaPasswordRecoveryMixin):
         deadline = time.monotonic() + timeout_s
         observation: EaObservation | None = None
         seen_pages: set[EaPage] = set()
+        signed_in_since: float | None = None
         otp_attempts = 0
         selected_method: OtpMethod | None = None
         pending_identity = None
@@ -2445,6 +2469,7 @@ class WindowsEaHybridDriver(EaPasswordRecoveryMixin):
             # corner crop makes of the text sitting there.
             if observation.page in PRE_LOGIN_PAGES:
                 pending_identity = None
+                signed_in_since = None
                 continue
             identity = self._identity(hwnd)
             # Empty or untrusted badge OCR is not a veto on a trusted match
@@ -2472,6 +2497,17 @@ class WindowsEaHybridDriver(EaPasswordRecoveryMixin):
                 )
                 return identity
             pending_identity = None
+            if observation.page is not EaPage.SIGNED_IN:
+                signed_in_since = None
+                continue
+            if signed_in_since is None:
+                signed_in_since = time.monotonic()
+            if time.monotonic() - signed_in_since >= SIGNED_IN_PANEL_GRACE_S:
+                own = self._own_sign_in(expected_ea_account_id, identity)
+                if own is not None:
+                    self._record("signed-in", observation, identity=mask_identity(own.ea_account_id),
+                                 identitySource=own.source)
+                    return own
         self._record("signin-timeout", observation)
         page = "NONE" if observation is None else observation.page.value
         raise EaAppAutomationError(
@@ -2541,6 +2577,13 @@ class WindowsEaHybridDriver(EaPasswordRecoveryMixin):
             else:
                 alternate, alternate_count = None, 0
             self.sleep(1.0)
+        if (not seen and observation is not None and observation.page is EaPage.SIGNED_IN
+                and getattr(self, "_signed_in_as", None) == expected_ea_account_id):
+            # Still no readable EA ID, and none other seen: this lease's own
+            # sign-in established the account (see SIGNED_IN_PANEL_GRACE_S).
+            self._record("identity-verified", observation,
+                         identity=mask_identity(expected_ea_account_id), identitySource="signin-flow")
+            return EaIdentityFact(ea_account_id=expected_ea_account_id, source="signin-flow", verified=True)
         self._record("identity-timeout", observation, observed=seen or None)
         raise EaIdentityUnconfirmed(
             "EA App 页面没有可验证的稳定 EA ID"
@@ -3421,6 +3464,7 @@ class WindowsEaHybridDriver(EaPasswordRecoveryMixin):
         return None
 
     def sign_out(self) -> bool:
+        self._signed_in_as = None
         return self._with_ui_recovery("signout", self._sign_out_once)
 
     def _sign_out_once(self) -> bool:

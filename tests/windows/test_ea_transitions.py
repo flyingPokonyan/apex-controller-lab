@@ -28,7 +28,9 @@ from apex_automation.account_provider import FakeAccountProvider, OtpCode, Secre
 from apex_automation.ea_app import (
     EaApexControlMissing,
     EaApexStartFailed,
+    EaAppAutomationError,
     EaIdentityFact,
+    EaIdentityUnconfirmed,
     EaWindowUnavailable,
 )
 from apex_automation.ea_app_win32 import EaObservation, WindowsEaHybridDriver
@@ -193,6 +195,59 @@ class SignInWindowSwapTest(unittest.TestCase):
         self.assertIs(found, identity)
         self.assertNotIn("signin-wrong-page", driver.records)
         self.assertEqual(driver.records.count("signin-start"), 1)
+
+
+class AccountPanelSkeletonTest(unittest.TestCase):
+    """Lease 3094: our own sign-in reached Home, the account panel never loaded."""
+
+    def identity_wait(self, driver, clock):
+        with patch("apex_automation.ea_app_win32.time.monotonic", clock):
+            return driver._await_identity(
+                1, otp_supplier=Mock(), otp_methods=(),
+                initial_challenge_started_at=datetime.now(timezone.utc),
+                expected_ea_account_id="ea_1",
+            )
+
+    def skeleton_driver(self, clock, *, entered=True, read=None):
+        driver = bare_driver(clock)
+        driver._ea_window_for_identity = lambda hwnd: hwnd
+        driver._ea_window = lambda: 1
+        driver._observe = lambda _hwnd: SIGNED_IN
+        driver._identity = lambda _hwnd: read
+        driver._matching_identity = lambda *_args, **_kwargs: None
+        driver._entered_credentials = entered
+        driver._signed_in_as = None
+        return driver
+
+    def test_own_sign_in_continues_when_no_account_id_ever_loads(self) -> None:
+        clock = Clock()
+        driver = self.skeleton_driver(clock)
+        found = self.identity_wait(driver, clock)
+        self.assertEqual((found.ea_account_id, found.source, found.verified), ("ea_1", "signin-flow", True))
+        self.assertEqual(driver.records[-1], "signed-in")
+        self.assertLess(clock.now, 30.0)
+        # The identity check that follows accepts the same sign-in.
+        with patch("apex_automation.ea_app_win32.time.monotonic", clock):
+            verified = driver.verify_identity("ea_1")
+        self.assertEqual((verified.ea_account_id, verified.source), ("ea_1", "signin-flow"))
+        self.assertEqual(driver.records[-1], "identity-verified")
+
+    def test_a_session_this_sign_in_did_not_enter_still_times_out(self) -> None:
+        clock = Clock()
+        driver = self.skeleton_driver(clock, entered=False)
+        with self.assertRaises(EaAppAutomationError):
+            self.identity_wait(driver, clock)
+        self.assertEqual(driver.records[-1], "signin-timeout")
+        with patch("apex_automation.ea_app_win32.time.monotonic", clock):
+            with self.assertRaises(EaIdentityUnconfirmed):
+                driver.verify_identity("ea_1")
+
+    def test_another_readable_account_is_never_assumed_to_be_ours(self) -> None:
+        clock = Clock()
+        driver = self.skeleton_driver(clock, read=EaIdentityFact("someone_else", "badge", False))
+        with self.assertRaises(EaAppAutomationError):
+            self.identity_wait(driver, clock)
+        self.assertIsNone(driver._signed_in_as)
 
 
 class SignOutWindowSwapTest(unittest.TestCase):
