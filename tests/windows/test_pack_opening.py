@@ -8,7 +8,8 @@ import numpy as np
 sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "windows"))
 from apex_automation.ocr_obstacles import OcrToken
 from apex_automation.pack_opening import (
-    ESC_SCAN, SPACE_SCAN, PackLimits, PackOpener, grid_settled, heirloom_visible,
+    ESC_SCAN, SPACE_SCAN, PackLimits, PackOpener, classify, grid_settled, heirloom_visible,
+    open_button, select_count,
 )
 
 
@@ -48,6 +49,7 @@ class World:
         self.result = result
         self.clock = clock
         self.phase = "lobby"
+        self.maxed = False
         self.blank = np.zeros((100, 200, 3), np.uint8)
         self.sender = None
 
@@ -70,9 +72,10 @@ class World:
             "select": (
                 token("开启组合包", (8, 4, 70, 18)),
                 token("22", (10, 20, 40, 55)),
-                token("升级22个", (80, 50, 130, 68)),
+                token("升级22个" if self.maxed else "升级1个", (80, 50, 130, 68)),
+                token("开启 22 个" if self.maxed else "开启 1 个", (90, 72, 140, 88)),
                 token("最高", (150, 70, 190, 90)),
-            ),
+            ) + ((token("11个超额组合包打开时不适用于火花奖励计数器", (60, 92, 160, 99)),) if self.maxed else ()),
             "hold": (token("按住打开", (80, 60, 140, 80)),),
             "result": (token("组合包奖励", (8, 8, 80, 24)),),
             "reward": (token("已获得奖励", (40, 10, 140, 30)),),
@@ -99,7 +102,9 @@ class Sender:
             self.world.phase = "intro"
         elif self.world.phase == "intro":
             self.world.phase = "select"
-        elif self.world.phase == "select":
+        elif self.world.phase == "select" and (x, y) == (170, 80):
+            self.world.maxed = True
+        elif self.world.phase == "select" and (x, y) == (115, 80):
             self.world.phase = "hold"
 
     def move_to(self, x, y):
@@ -179,6 +184,8 @@ class PackOpeningTest(unittest.TestCase):
         self.assertIn(("click", "lobby", 175, 79), sender.events)
         self.assertIn(("click", "intro", 100, 87), sender.events)
         self.assertIn(("click", "select", 170, 80), sender.events)
+        self.assertIn(("click", "select", 115, 80), sender.events)
+        self.assertFalse(any(event[0] == "click" and event[2:] == (105, 59) for event in sender.events))
         self.assertIn(("key", ESC_SCAN, "result"), sender.events)
         self.assertIn(("key", SPACE_SCAN, "reward"), sender.events)
         self.assertFalse(sender.held)
@@ -393,3 +400,18 @@ class LobbyEntryTest(unittest.TestCase):
         opener.guard.expected = {"r5apex.exe"}
         self.assertTrue(opener._click((2253, 1100), "lobby-card"))
         self.assertEqual(sender.clicks, [(2253, 1100)])
+
+
+class RealPageTokensTest(unittest.TestCase):
+    """OCR of the 10-19 20:54 frames from Runner 1."""
+
+    def test_the_open_page_after_max_is_still_the_open_page(self):
+        tokens = (token("开启组合包", (95, 100, 514, 197)), token("21", (270, 285, 388, 373)),
+                  token("升级21个", (1459, 1107, 1585, 1142)), token("开启21个", (1409, 1235, 1602, 1289)),
+                  token("最高", (2041, 1233, 2139, 1293)),
+                  token("11个超额组合包打开时不适用于火花奖励计数器", (1229, 1343, 1784, 1381)))
+        self.assertEqual(classify(tokens), "select")
+        self.assertEqual(select_count(tokens, 2560, 1440), 21)
+        button, amount = open_button(tokens)
+        self.assertEqual((button.normalized, amount), ("开启21个", 21))
+

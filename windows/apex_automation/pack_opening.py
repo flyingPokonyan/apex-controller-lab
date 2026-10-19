@@ -34,6 +34,8 @@ class _Covered(Exception):
 @dataclass(frozen=True)
 class PackLimits:
     page_s: float = 20
+    # Opening a whole stack plays one animation before the reward page.
+    animation_s: float = 45
     hold_s: float = 8
     session_s: float = 600
     max_batches: int = 5
@@ -102,6 +104,9 @@ def grid_settled(previous: np.ndarray, current: np.ndarray) -> bool:
     return float(changed.mean()) < 0.02
 
 
+OPEN_BUTTON = re.compile(r"开启([0-9]{1,3})个")
+
+
 def classify(tokens) -> str:
     names = [token.normalized for token in tokens]
     if any("组合包奖励" in name for name in names):
@@ -110,11 +115,22 @@ def classify(tokens) -> str:
         return "reward"
     if any("按住打开" in name for name in names):
         return "hold"
-    if any("火花奖励计数器" in name for name in names):
-        return "intro"
+    # Before intro: after 最高 the open page adds a footnote ending in
+    # 火花奖励计数器 ("11个超额组合包打开时不适用于火花奖励计数器").
     if any("开启组合包" in name for name in names) and any(name == "最高" for name in names):
         return "select"
+    if any(name == "火花奖励计数器" for name in names):
+        return "intro"
     return "unknown"
+
+
+def open_button(tokens):
+    """The centre 开启N个 button; its N starts at 1 and 最高 raises it."""
+    for token in tokens:
+        match = OPEN_BUTTON.fullmatch(token.normalized)
+        if token.roi and match:
+            return token, int(match.group(1))
+    return None
 
 
 def _center(token) -> tuple[int, int]:
@@ -187,6 +203,7 @@ class PackOpener:
         self.save_frame, self.log = save_frame, log
         self.window_owner = window_owner
         self.covered_by: str | None = None
+        self.maxed = False
         self.is_current, self.clock, self.sleep = is_current, clock, sleep
         self.limits = limits or PackLimits()
         self.frame = None
@@ -359,7 +376,7 @@ class PackOpener:
         return "CARD_NO_EFFECT"
 
     def _hold(self) -> str:
-        page = self._wait({"hold", "result"}, self.limits.page_s)
+        page = self._wait({"hold", "result"}, self.limits.animation_s)
         if page == "result":
             return "opened"
         if page != "hold":
@@ -439,7 +456,7 @@ class PackOpener:
                     return self._failed(outcome)
                 page = "result"
             if page == "result":
-                red = self._stable_result(min(deadline, self.clock() + self.limits.page_s))
+                red = self._stable_result(min(deadline, self.clock() + self.limits.animation_s))
                 if red is None:
                     return self._failed(self._reason("RESULT_TIMEOUT"))
                 self.heirloom = self.heirloom or red
@@ -458,8 +475,20 @@ class PackOpener:
                 return self._failed("COUNT_UNREADABLE")
             if self.batches >= self.limits.max_batches:
                 return self._failed("BATCH_LIMIT")
-            if not self._click_token(lambda token: token.normalized == "最高", "select-max", count=count):
-                return self._failed("MAX_BUTTON_NOT_FOUND")
+            found = open_button(self.tokens)
+            if found is None:
+                return self._failed("OPEN_BUTTON_NOT_FOUND")
+            button, amount = found
+            if not self.maxed:
+                # Never the 升级N个 button above it, which spends Legend Tokens.
+                if not self._click_token(lambda token: token.normalized == "最高", "select-max", count=count):
+                    return self._failed("MAX_BUTTON_NOT_FOUND")
+                self.maxed = True
+                page = None
+                continue
+            self.maxed = False
+            if not self._click(_center(button), "open-selected", amount=amount, count=count):
+                return self._failed("CLICK_COVERED")
             page = "hold"
         return self._failed("SESSION_TIMEOUT")
 
