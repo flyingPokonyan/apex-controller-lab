@@ -420,3 +420,72 @@ class RealPageTokensTest(unittest.TestCase):
         # Runner 1 read nothing of the bold 开启21个; the row still places it.
         without = tuple(item for item in tokens if item.normalized != "开启21个")
         self.assertEqual(open_point(without + (token("重置", (877, 1234, 968, 1289)),)), (1506, 1262))
+
+
+class LateSparkRewardTest(unittest.TestCase):
+    """10-19 21:13: the spark reward popped up after the count reached 0, and the run had already ended."""
+
+    def test_the_late_reward_is_claimed_and_its_pack_opened(self):
+        clock = Clock()
+        state = {"page": "select", "count": 22, "maxed": False, "hover": False, "down": None,
+                 "reward_at": None, "rewards": 1}
+
+        def read(_frame):
+            if state["page"] == "select" and state["maxed"] and state["hover"] and state["down"] is not None \
+                    and clock() - state["down"] >= 0.4:
+                state.update(page="result", count=0)
+            if state["page"] == "select" and state["reward_at"] is not None and clock() >= state["reward_at"]:
+                state.update(page="reward", reward_at=None)
+            if state["page"] == "result":
+                return (token("组合包奖励", (8, 8, 80, 24)),)
+            if state["page"] == "reward":
+                return (token("已获得奖励", (40, 10, 140, 30)), token("SPACE 继续", (80, 90, 120, 98)))
+            return (token("开启组合包", (8, 4, 70, 18)), token(str(state["count"]), (10, 20, 40, 55)),
+                    token("重置", (40, 72, 70, 88)),
+                    token("按住打开" if state["hover"] else "开启 1 个", (90, 72, 140, 88)),
+                    token("最高", (150, 70, 190, 90)))
+
+        class Game:
+            def grab(self):
+                return np.zeros((100, 200, 3), np.uint8)
+
+            def read_with_boxes(self, frame):
+                return read(frame)
+
+        keys = []
+
+        class Input:
+            def click(self, x, y):
+                if (x, y) == (170, 80):
+                    state["maxed"] = True
+                state["hover"] = False
+
+            def move_to(self, x, y):
+                state["hover"] = (x, y) == (115, 80)
+
+            def mouse_down(self, button="left"):
+                state["down"] = clock()
+
+            def mouse_up(self, button="left"):
+                state["down"] = None
+
+            def tap_scan_code(self, code, _duration):
+                keys.append((code, state["page"]))
+                if code == ESC_SCAN and state["page"] == "result":
+                    state.update(page="select", maxed=False, hover=False)
+                    if state["rewards"]:
+                        state.update(reward_at=clock() + 2, rewards=0)
+                elif code == SPACE_SCAN and state["page"] == "reward":
+                    state.update(page="select", count=1)
+
+            def release_all(self):
+                state["down"] = None
+
+        game = Game()
+        saved = []
+        result = PackOpener(game, game, Input(), Guard(), save_frame=lambda _f, batch, red: saved.append(batch) or True,
+                            log=lambda *args, **kwargs: None, clock=clock, sleep=clock.sleep,
+                            limits=PackLimits(page_s=5, hold_s=2, session_s=120)).run()
+        self.assertEqual((result.status, result.batches, result.packs_before), ("DONE", 2, 22))
+        self.assertEqual(saved, [1, 2])
+        self.assertEqual(keys, [(ESC_SCAN, "result"), (SPACE_SCAN, "reward"), (ESC_SCAN, "result")])

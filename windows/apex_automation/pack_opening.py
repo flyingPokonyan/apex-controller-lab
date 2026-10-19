@@ -27,6 +27,12 @@ CARD_ATTEMPTS = 3
 CARD_WAIT_S = 6.0
 # A hold that never leaves the open page is retried this often per batch.
 PRESS_ATTEMPTS = 3
+# The spark reward (已获得奖励) can pop up a moment after the last batch, and
+# what it grants is one more pack, so a count of 0 is watched this long first.
+REWARD_GRACE_S = 8.0
+# Its pack drops in before SPACE 继续 takes a key.
+REWARD_SETTLE_S = 1.0
+REWARD_PRESSES = 6
 
 
 class _Covered(Exception):
@@ -216,6 +222,7 @@ class PackOpener:
         self.covered_by: str | None = None
         self.maxed = False
         self.presses = 0
+        self.reward_presses = 0
         self.is_current, self.clock, self.sleep = is_current, clock, sleep
         self.limits = limits or PackLimits()
         self.frame = None
@@ -467,6 +474,10 @@ class PackOpener:
                 page = None
                 continue
             if page == "reward":
+                if self.reward_presses >= REWARD_PRESSES:
+                    return self._failed("REWARD_STUCK")
+                self.reward_presses += 1
+                self.sleep(REWARD_SETTLE_S)
                 self._key(SPACE_SCAN, "reward-continue")
                 page = None
                 continue
@@ -486,7 +497,10 @@ class PackOpener:
             if self.packs_before is None:
                 self.packs_before = count
             if count == 0:
-                return self._done()
+                page = self._wait({"reward"}, REWARD_GRACE_S)
+                if page is None:
+                    return self._done()
+                continue
             if count is None:
                 return self._failed("COUNT_UNREADABLE")
             if self.batches >= self.limits.max_batches:

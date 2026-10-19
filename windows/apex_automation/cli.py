@@ -1593,8 +1593,12 @@ def run_pack_open_test(config_path: Path, *, countdown: int, look_s: float | Non
     stamp = f"{time.strftime('%H%M')}-{commit}"
     counter = {"frames": 0, "uploads": 0}
 
-    def keep(frame, name: str) -> bool:
-        """Save locally, then upload the first 30 as pack-<time>-<name>."""
+    def keep(frame, name: str, *, send: bool = True) -> bool:
+        """Save locally, then upload the first 30 sent ones as pack-<time>-<name>.
+
+        Each upload takes 10-20 s (China to Forge to OSS), one at a time, so
+        animation frames stay local and the pages that matter arrive first.
+        """
         import cv2
         counter["frames"] += 1
         if counter["frames"] > 80:
@@ -1602,7 +1606,7 @@ def run_pack_open_test(config_path: Path, *, countdown: int, look_s: float | Non
         path = folder / f"{name}.jpg"
         ok = bool(cv2.imwrite(str(path), frame[:, :, :3]))
         sent = ""
-        if upload is not None and counter["uploads"] < 30:
+        if send and upload is not None and counter["uploads"] < 30:
             step = re.sub(r"[^a-z0-9_-]", "-", f"pack-{stamp}-{name}".lower())[:96]
             if upload(frame, step):
                 counter["uploads"] += 1
@@ -1683,7 +1687,8 @@ def run_pack_open_test(config_path: Path, *, countdown: int, look_s: float | Non
                     self.traced_sample = self.frame[::16, ::16, :3].astype(np.int16)
                     label = f"after-{text}" if forced else text
                     print(f"{time.strftime('%H:%M:%S')} {label}")
-                    keep(self.frame, f"run-{counter['frames'] + 1:02d}-{label}")
+                    keep(self.frame, f"run-{counter['frames'] + 1:02d}-{label}",
+                         send=forced or not text.startswith("unknown"))
             return page
 
     print(f"开包测试（代码 {commit}）：不领号、不上报游戏运行，只操作当前已登录的账号。")
