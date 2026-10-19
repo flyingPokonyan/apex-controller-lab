@@ -12,7 +12,7 @@ from typing import Callable
 
 import numpy as np
 
-from .apex_packs import pack_region
+from .apex_packs import ApexPackReader, pack_region
 from .safety import EmergencyStop
 
 
@@ -187,9 +187,27 @@ class PackOpener:
         if not self.guard.target_is_foreground() or not self.is_current():
             return "unknown"
         frame = self.source.grab()
+        if isinstance(frame, np.ndarray) and frame.ndim == 3 and frame.shape[2] == 4:
+            # RapidOCR treats a fourth channel as transparency. A capture whose
+            # alpha is 0 becomes a blank white image and reads no text at all.
+            frame = np.ascontiguousarray(frame[:, :, :3])
         self.frame = frame
         self.tokens = tuple(self.ocr.read_with_boxes(frame))
         return classify(self.tokens)
+
+    def _lobby_card(self):
+        """The pack card, from the whole frame or else from the card region alone.
+
+        The region read is what the inventory probe already relies on; small
+        card text can be missed when the whole 2560x1440 frame is read at once.
+        """
+        point = card_point(self.frame, self.tokens)
+        if point is None:
+            reading = ApexPackReader(self.ocr).read(self.frame)
+            point = card_point(self.frame, reading.tokens)
+            if self.packs_before is None and reading.status == "OK":
+                self.packs_before = reading.count
+        return point
 
     def _wait(self, kinds: set[str], timeout: float) -> str | None:
         deadline = self.clock() + timeout
@@ -262,7 +280,7 @@ class PackOpener:
         deadline = self.clock() + self.limits.session_s
         page = self._look()
         if page == "unknown":
-            point = None if self.frame is None else card_point(self.frame, self.tokens)
+            point = None if self.frame is None else self._lobby_card()
             if point is None:
                 page = self._wait({"intro", "select", "reward", "result"}, self.limits.page_s)
                 if page is None:

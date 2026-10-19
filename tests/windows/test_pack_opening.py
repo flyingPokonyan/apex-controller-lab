@@ -215,3 +215,40 @@ class PackOpeningTest(unittest.TestCase):
         self.assertTrue(result.heirloom)
         self.assertEqual(result.batches, 1)
         self.assertFalse(sender.held)
+
+
+class CaptureQuirkTest(unittest.TestCase):
+    def test_a_capture_with_zero_alpha_is_read_without_its_alpha(self):
+        seen = []
+
+        class Ocr:
+            def read_with_boxes(self, frame):
+                seen.append(frame.shape)
+                return (token("组合包奖励", (8, 8, 80, 24)),)
+
+        class Source:
+            def grab(self):
+                return np.zeros((100, 200, 4), np.uint8)
+
+        opener = PackOpener(Source(), Ocr(), None, Guard(), save_frame=None, log=None)
+        self.assertEqual(opener._look(), "result")
+        self.assertEqual(seen, [(100, 200, 3)])
+
+    def test_lobby_card_falls_back_to_the_card_region(self):
+        frame = np.zeros((1440, 2560, 3), np.uint8)
+
+        class Ocr:
+            def read_with_boxes(self, image):
+                if image.shape[:2] == frame.shape[:2]:
+                    return ()  # the whole frame read missed the small card text
+                # Coordinates are relative to the card region crop.
+                return (token("21", (60, 30, 180, 120)), token("apex", (170, 34, 270, 76)),
+                        token("组合包", (168, 70, 278, 119)))
+
+        opener = PackOpener(None, Ocr(), None, Guard(), save_frame=None, log=None)
+        opener.frame, opener.tokens = frame, ()
+        point = opener._lobby_card()
+        self.assertIsNotNone(point)
+        left, top = int(2560 * .77), int(1440 * .66)
+        self.assertEqual(point, (left + (168 + 278) // 2, top + (34 + 119) // 2))
+        self.assertEqual(opener.packs_before, 21)

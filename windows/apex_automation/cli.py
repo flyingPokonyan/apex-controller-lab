@@ -1564,7 +1564,8 @@ def run_pack_open_test(config_path: Path, *, countdown: int, look_s: float | Non
             return f"select-n{'none' if count is None else count}"
         if page == "result":
             return f"result-red{int(heirloom_visible(frame))}"
-        return page
+        # t0 means OCR saw no text at all, which is a capture problem, not a page.
+        return f"{page}-t{len(tokens)}"
 
     class TracingOpener(PackOpener):
         traced = None
@@ -1604,6 +1605,16 @@ def run_pack_open_test(config_path: Path, *, countdown: int, look_s: float | Non
                 reference_resolution(config.environment),
             )
             ocr = RapidOcrProvider()
+            try:
+                import logging
+                import rapidocr  # noqa: F401  (creates its logger at import)
+                logging.getLogger("RapidOCR").setLevel(logging.WARNING)
+            except Exception:
+                pass
+            raw = source.grab()
+            alpha = (f"，透明通道均值 {float(raw[:, :, 3].mean()):.0f}"
+                     if raw.ndim == 3 and raw.shape[2] == 4 else "")
+            print(f"画面 {raw.shape[1]}x{raw.shape[0]}，{raw.shape[2] if raw.ndim == 3 else 1} 通道{alpha}")
             if look_s is not None:
                 deadline = time.monotonic() + look_s
                 last = last_sample = None
@@ -1611,6 +1622,8 @@ def run_pack_open_test(config_path: Path, *, countdown: int, look_s: float | Non
                 while time.monotonic() < deadline:
                     guard.ensure_not_aborted()
                     frame = source.grab()
+                    if frame.ndim == 3 and frame.shape[2] == 4:
+                        frame = np.ascontiguousarray(frame[:, :, :3])
                     text = describe(frame, tuple(ocr.read_with_boxes(frame)))
                     # Also one frame every 20 s, so a look never comes back empty.
                     if text != last or moved(last_sample, frame) or time.monotonic() - kept_at >= 20:
