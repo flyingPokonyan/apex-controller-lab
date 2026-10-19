@@ -1473,7 +1473,16 @@ def run_pack_open_test(config_path: Path, *, countdown: int, look_s: float | Non
     folder = recorder.run_dir / "pack-results"
     folder.mkdir(parents=True, exist_ok=True)
     upload = _pack_test_uploader()
-    stamp = time.strftime("%H%M")
+    try:
+        import subprocess
+        commit = subprocess.run(
+            ["git", "rev-parse", "--short=7", "HEAD"], cwd=REPOSITORY_ROOT,
+            capture_output=True, text=True, timeout=10,
+        ).stdout.strip() or "nogit"
+    except Exception:
+        commit = "nogit"
+    # The commit is in every uploaded name, so a stale checkout is obvious remotely.
+    stamp = f"{time.strftime('%H%M')}-{commit}"
     counter = {"frames": 0, "uploads": 0}
 
     def keep(frame, name: str) -> bool:
@@ -1529,7 +1538,7 @@ def run_pack_open_test(config_path: Path, *, countdown: int, look_s: float | Non
                     keep(self.frame, f"run-{counter['frames'] + 1:02d}-{text}")
             return page
 
-    print("开包测试：不领号、不上报游戏运行，只操作当前已登录的账号。")
+    print(f"开包测试（代码 {commit}）：不领号、不上报游戏运行，只操作当前已登录的账号。")
     print("请先手动登录 EA、进入 Apex 大厅（或组合包页面），然后切回 Apex。按 F8 可随时中止。")
     if look_s is not None:
         print(f"只看模式：{int(look_s)} 秒内你手动点各个页面，这里打印识别结果，不发送任何输入。")
@@ -1551,14 +1560,17 @@ def run_pack_open_test(config_path: Path, *, countdown: int, look_s: float | Non
             if look_s is not None:
                 deadline = time.monotonic() + look_s
                 last = last_sample = None
+                kept_at = 0.0
                 while time.monotonic() < deadline:
                     guard.ensure_not_aborted()
                     frame = source.grab()
                     text = describe(frame, tuple(ocr.read_with_boxes(frame)))
-                    if text != last or moved(last_sample, frame):
+                    # Also one frame every 20 s, so a look never comes back empty.
+                    if text != last or moved(last_sample, frame) or time.monotonic() - kept_at >= 20:
                         print(f"{time.strftime('%H:%M:%S')} {text}")
                         keep(frame, f"look-{counter['frames'] + 1:02d}-{text}")
                         last, last_sample = text, frame[::16, ::16, :3].astype(np.int16)
+                        kept_at = time.monotonic()
                     time.sleep(1)
                 recorder.finish("PLAYED", mode="look")
                 return 0
