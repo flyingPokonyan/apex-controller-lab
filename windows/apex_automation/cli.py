@@ -1449,6 +1449,7 @@ def run_pack_open_test(config_path: Path, *, countdown: int, look_s: float | Non
         print("pack-open-test 只能在 Windows 上运行。", file=sys.stderr)
         return 2
 
+    import numpy as np
     from .pack_opening import PackOpener, classify, heirloom_visible, select_count
 
     if config_path.expanduser().resolve() == DEFAULT_CONFIG_PATH.resolve():
@@ -1492,6 +1493,15 @@ def run_pack_open_test(config_path: Path, *, countdown: int, look_s: float | Non
         print(f"  截图 {path.name}{sent}" if ok else f"  截图保存失败：{path}")
         return ok
 
+    def moved(previous, frame) -> bool:
+        """A new screen even when its label did not change (e.g. two unknown pages)."""
+        if previous is None:
+            return True
+        sample = frame[::16, ::16, :3].astype(np.int16)
+        if previous.shape != sample.shape:
+            return True
+        return float((np.abs(previous - sample).max(axis=2) > 40).mean()) > 0.25
+
     def describe(frame, tokens) -> str:
         page = classify(tokens)
         if page == "select":
@@ -1503,13 +1513,18 @@ def run_pack_open_test(config_path: Path, *, countdown: int, look_s: float | Non
 
     class TracingOpener(PackOpener):
         traced = None
+        traced_sample = None
+        traced_at = 0.0
 
         def _look(self):
             page = super()._look()
             if self.frame is not None:
                 text = describe(self.frame, self.tokens)
-                if text != self.traced:
-                    self.traced = text
+                if text != self.traced or (
+                    time.monotonic() - self.traced_at >= 1.5 and moved(self.traced_sample, self.frame)
+                ):
+                    self.traced, self.traced_at = text, time.monotonic()
+                    self.traced_sample = self.frame[::16, ::16, :3].astype(np.int16)
                     print(f"{time.strftime('%H:%M:%S')} {text}")
                     keep(self.frame, f"run-{counter['frames'] + 1:02d}-{text}")
             return page
@@ -1535,15 +1550,15 @@ def run_pack_open_test(config_path: Path, *, countdown: int, look_s: float | Non
             ocr = RapidOcrProvider()
             if look_s is not None:
                 deadline = time.monotonic() + look_s
-                last = None
+                last = last_sample = None
                 while time.monotonic() < deadline:
                     guard.ensure_not_aborted()
                     frame = source.grab()
                     text = describe(frame, tuple(ocr.read_with_boxes(frame)))
-                    if text != last:
+                    if text != last or moved(last_sample, frame):
                         print(f"{time.strftime('%H:%M:%S')} {text}")
                         keep(frame, f"look-{counter['frames'] + 1:02d}-{text}")
-                        last = text
+                        last, last_sample = text, frame[::16, ::16, :3].astype(np.int16)
                     time.sleep(1)
                 recorder.finish("PLAYED", mode="look")
                 return 0
