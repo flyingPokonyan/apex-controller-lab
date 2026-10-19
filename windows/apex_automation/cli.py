@@ -1384,8 +1384,13 @@ def _pack_test_uploader():
 
     No lease is involved; Forge keeps them for a day under the Runner's
     screenshots, so a hands-on test needs no file copying between machines.
+    Forge can take ~30 s to store one image, so uploads run on a background
+    thread and never hold up the clicks.
     """
+    import queue
+    import threading
     from urllib.parse import urlsplit, urlunsplit
+    import cv2
     import numpy as np
     from .pack_screenshots import encode_jpeg
     from .reporter import UrllibReportTransport
@@ -1406,8 +1411,12 @@ def _pack_test_uploader():
         path=parsed.path.rsplit("/", 1)[0] + "/ea-evidence", query="", fragment=""))
     transport = UrllibReportTransport()
 
-    def upload(frame, step: str) -> bool:
-        image = encode_jpeg(np.ascontiguousarray(frame[:, :, :3]))
+    def send(frame, step: str) -> bool:
+        frame = np.ascontiguousarray(frame[:, :, :3])
+        height, width = frame.shape[:2]
+        if width > 1600:
+            frame = cv2.resize(frame, (1600, round(height * 1600 / width)), interpolation=cv2.INTER_AREA)
+        image = encode_jpeg(frame)
         if image is None:
             return False
         payload = {
@@ -1425,16 +1434,39 @@ def _pack_test_uploader():
             "imageBase64": base64.b64encode(image).decode("ascii"),
         }
         try:
-            status, response, _headers = transport.send(url, settings.report_token, payload, 30)
+            status, response, _headers = transport.send(url, settings.report_token, payload, 90)
         except Exception as error:
-            print(f"  上报失败：{type(error).__name__}")
+            print(f"  上报失败 {step}：{type(error).__name__}")
             return False
         if status != 200:
-            print(f"  上报失败：HTTP {status} {(response.get('error') or {}).get('code')}")
+            print(f"  上报失败 {step}：HTTP {status} {(response.get('error') or {}).get('code')}")
             return False
         return True
 
-    return upload
+    class Uploader:
+        def __init__(self):
+            self.pending = queue.Queue()
+            threading.Thread(target=self._work, daemon=True).start()
+
+        def _work(self):
+            while True:
+                frame, step = self.pending.get()
+                try:
+                    send(frame, step)
+                finally:
+                    self.pending.task_done()
+
+        def __call__(self, frame, step: str) -> bool:
+            self.pending.put((frame.copy(), step))
+            return True
+
+        def drain(self, timeout_s: float) -> int:
+            deadline = time.monotonic() + timeout_s
+            while self.pending.unfinished_tasks and time.monotonic() < deadline:
+                time.sleep(0.5)
+            return self.pending.unfinished_tasks
+
+    return Uploader()
 
 
 def run_pack_open_test(config_path: Path, *, countdown: int, look_s: float | None) -> int:
@@ -1498,9 +1530,23 @@ def run_pack_open_test(config_path: Path, *, countdown: int, look_s: float | Non
             step = re.sub(r"[^a-z0-9_-]", "-", f"pack-{stamp}-{name}".lower())[:96]
             if upload(frame, step):
                 counter["uploads"] += 1
-                sent = "，已上报"
+                sent = "，后台上报中"
         print(f"  截图 {path.name}{sent}" if ok else f"  截图保存失败：{path}")
         return ok
+
+    def finish_uploads() -> None:
+        if upload is not None and upload.pending.unfinished_tasks:
+            print(f"等待 {upload.pending.unfinished_tasks} 张截图上报完成（最多 3 分钟）……")
+            left = upload.drain(180)
+            print("截图已全部上报。" if not left else f"还有 {left} 张没传完，本机仍有原图。")
+
+    errors = []
+
+    def log(event: str, **payload) -> None:
+        recorder.log(event, **payload)
+        if event == "PACK_OPEN_ERROR":
+            errors.append(str(payload.get("errorType")))
+            print(f"  开包流程出错：{payload.get('errorType')}")
 
     def moved(previous, frame) -> bool:
         """A new screen even when its label did not change (e.g. two unknown pages)."""
@@ -1540,6 +1586,7 @@ def run_pack_open_test(config_path: Path, *, countdown: int, look_s: float | Non
 
     print(f"开包测试（代码 {commit}）：不领号、不上报游戏运行，只操作当前已登录的账号。")
     print("请先手动登录 EA、进入 Apex 大厅（或组合包页面），然后切回 Apex。按 F8 可随时中止。")
+    print("倒数结束后别点这个窗口：Apex 不在前台时不会点击，会直接按失败结束。")
     if look_s is not None:
         print(f"只看模式：{int(look_s)} 秒内你手动点各个页面，这里打印识别结果，不发送任何输入。")
     for remaining in range(max(0, countdown), 0, -1):
@@ -1573,28 +1620,31 @@ def run_pack_open_test(config_path: Path, *, countdown: int, look_s: float | Non
                         kept_at = time.monotonic()
                     time.sleep(1)
                 recorder.finish("PLAYED", mode="look")
+                finish_uploads()
                 return 0
 
             opener = TracingOpener(
                 source, ocr, sender, guard,
                 save_frame=lambda frame, batch, heirloom: keep(
                     frame, f"batch-{batch:02d}-red{int(heirloom)}"),
-                log=recorder.log,
+                log=log,
             )
             result = opener.run()
             summary = (f"end-{result.status}-red{int(result.heirloom)}-b{result.batches}"
                        f"-n{'none' if result.packs_before is None else result.packs_before}"
-                       + (f"-{result.reason}" if result.reason else ""))
+                       + (f"-{result.reason}" if result.reason else "")
+                       + (f"-{errors[-1]}" if errors else ""))
             if opener.frame is not None:
                 keep(opener.frame, summary)
             recorder.log("PACK_OPENING", **result.as_payload())
-            recorder.finish("PLAYED", **result.as_payload())
+            recorder.finish("PLAYED", packOpening=result.as_payload())
             print(
                 f"结果：{result.status}，开出红={'是' if result.heirloom else '否'}，"
                 f"{result.batches} 批，开包前 {result.packs_before if result.packs_before is not None else '未读到'} 个"
                 + (f"，原因 {result.reason}" if result.reason else "")
             )
             print(f"证据目录：{recorder.run_dir}（events.jsonl 里有逐步记录）")
+            finish_uploads()
             return 0 if result.status != "FAILED" else 1
     except EmergencyStop as error:
         sender.release_all()
@@ -1610,6 +1660,7 @@ def run_pack_open_test(config_path: Path, *, countdown: int, look_s: float | Non
         recorder.finish("FAILED", error=str(error))
         print(f"开包测试失败：{error}", file=sys.stderr)
         print(f"证据目录：{recorder.run_dir}", file=sys.stderr)
+        finish_uploads()
         return 1
     finally:
         try:
