@@ -150,6 +150,7 @@ class AccountLease:
     exit_switch: bool = False
     exit_avoid_nodes: tuple[str, ...] = ()
     exit_prefer_nodes: tuple[str, ...] = ()
+    open_packs: bool = False
 
     def __post_init__(self) -> None:
         if self.lease_fence < 1:
@@ -599,6 +600,18 @@ class HttpAccountProvider:
         return tuple(item for item in value[:100] if isinstance(item, str) and 0 < len(item) <= 200)
 
     @staticmethod
+    def _open_packs(payload: Mapping[str, object]) -> bool:
+        if "openPacks" not in payload:
+            return False
+        value = payload.get("openPacks")
+        if type(value) is not bool:
+            raise LeaseProviderError(
+                "Provider 响应中的 openPacks 无效",
+                code="INVALID_PROVIDER_RESPONSE",
+            )
+        return value
+
+    @staticmethod
     def _exit_country(payload: Mapping[str, object]) -> str:
         if "exitCountry" not in payload:
             return "HK"
@@ -660,6 +673,7 @@ class HttpAccountProvider:
             exit_switch=payload.get("exitSwitch") is True,
             exit_avoid_nodes=self._node_names(payload.get("exitAvoidNodes")),
             exit_prefer_nodes=self._node_names(payload.get("exitPreferNodes")),
+            open_packs=self._open_packs(payload),
         )
         known_account = self._lease_accounts.get(lease.lease_id)
         if known_account is not None and known_account != lease.account_id:
@@ -733,6 +747,7 @@ class HttpAccountProvider:
                 "schemaVersion": 1,
                 "taskType": task_type,
                 "clientVersion": self.client_version,
+                "capabilities": ["PACK_OPENING"],
             },
             operation_id=claim_request_id,
             allow_no_content=True,

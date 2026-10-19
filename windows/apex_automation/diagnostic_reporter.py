@@ -212,6 +212,15 @@ class DiagnosticReporter:
                 self._screenshots.process_once(should_stop=self._stop.is_set)
             except Exception:
                 self._notice("EA_SCREENSHOT_IO")
+            from .pack_screenshots import PackScreenshotUploader
+            if not hasattr(self, "_pack_screenshots"):
+                self._pack_screenshots = PackScreenshotUploader(
+                    self.settings, self.root, self.transport,
+                    timeout_s=self.screenshot_timeout_s, notify=self.notify)
+            try:
+                self._pack_screenshots.process_once(should_stop=self._stop.is_set)
+            except Exception:
+                self._notice("PACK_SCREENSHOT_IO")
         pending = self.state["pending"]
         if not send or self._stop.is_set() or not pending or time.monotonic() < self._next_send_at:
             return len(pending)

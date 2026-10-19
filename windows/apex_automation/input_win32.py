@@ -226,6 +226,27 @@ class Win32InputSender:
         except KeyError as error:
             raise ValueError(f"未知鼠标按键：{button}") from error
 
+    def move_to(self, x: int, y: int) -> None:
+        self.guard.ensure_target_foreground()
+        absolute_x = round(x * 65535 / max(self.screen_width - 1, 1))
+        absolute_y = round(y * 65535 / max(self.screen_height - 1, 1))
+        self._send(
+            [INPUT(type=INPUT_MOUSE, mi=MOUSEINPUT(absolute_x, absolute_y, 0, MOUSEEVENTF_MOVE | MOUSEEVENTF_ABSOLUTE, 0, 0))]
+        )
+
+    def mouse_down(self, button: str = "left") -> None:
+        self.guard.ensure_target_foreground()
+        down_flag, _up_flag = self._mouse_flags(button)
+        self._send([INPUT(type=INPUT_MOUSE, mi=MOUSEINPUT(0, 0, 0, down_flag, 0, 0))])
+        self._pressed_mouse_buttons.add(button)
+
+    def mouse_up(self, button: str = "left") -> None:
+        if button not in self._pressed_mouse_buttons:
+            return
+        _down_flag, up_flag = self._mouse_flags(button)
+        self._send([INPUT(type=INPUT_MOUSE, mi=MOUSEINPUT(0, 0, 0, up_flag, 0, 0))])
+        self._pressed_mouse_buttons.discard(button)
+
     def hold_mouse_button(self, button: str, duration_ms: int) -> None:
         self.guard.ensure_target_foreground()
         down_flag, up_flag = self._mouse_flags(button)

@@ -146,6 +146,7 @@ class HttpAccountProviderTest(unittest.TestCase):
 
         self.assertEqual(lease.expected_ea_account_id, "ea_1")
         self.assertEqual(lease.target_level, 20)
+        self.assertFalse(lease.open_packs)
         call = transport.calls[0]
         self.assertEqual(call["method"], "POST")
         self.assertEqual(
@@ -154,6 +155,7 @@ class HttpAccountProviderTest(unittest.TestCase):
                 "schemaVersion": 1,
                 "taskType": "LEVEL_TO_TARGET",
                 "clientVersion": "0.5.0",
+                "capabilities": ["PACK_OPENING"],
             },
         )
         self.assertEqual(call["headers"]["Idempotency-Key"], "claim_1")
@@ -171,6 +173,14 @@ class HttpAccountProviderTest(unittest.TestCase):
         lease = provider.claim("claim_ring", "LEVEL_TO_TARGET")
 
         self.assertEqual((lease.ring_progress, lease.ring_target), (14, 30))
+
+    def test_claim_keeps_the_frozen_pack_opening_flag(self) -> None:
+        transport = FakeTransport(response(lease_payload(openPacks=True)))
+        provider = self.provider(transport)
+        self.assertTrue(provider.claim("claim_packs", "LEVEL_TO_TARGET").open_packs)
+        rejected = FakeTransport(response(lease_payload(openPacks="yes")))
+        with self.assertRaises(LeaseProviderError):
+            self.provider(rejected).claim("claim_bad", "LEVEL_TO_TARGET")
 
     def test_claim_accepts_an_account_without_a_ring_objective(self) -> None:
         transport = FakeTransport(response(lease_payload()))

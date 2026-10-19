@@ -36,6 +36,7 @@ class SessionIdentity:
     lease_id: str | None = None
     lease_fence: int | None = None
     target_level: int | None = None
+    open_packs: bool = False
 
     def __post_init__(self) -> None:
         if bool(self.account_id) != bool(self.device_id):
@@ -386,6 +387,20 @@ class PlaySessionRunner:
                     # result or prevent lease cleanup/report draining.
                     pack_probe.finish(is_current=lease_is_current)
                     metrics.flush(force=True, observedState=pilot.observed_state)
+                if identity.open_packs:
+                    from .pack_opening import open_account_packs
+                    from .pack_screenshots import store_result
+                    if callable(getattr(self.ocr_provider, "read_with_boxes", None)):
+                        opening = open_account_packs(
+                            apex_source, self.ocr_provider, self.sender, self.guard,
+                            save_frame=lambda frame, batch, heirloom: store_result(
+                                recorder.run_dir, self.runs_root, frame, batch, heirloom, identity.lease_id),
+                            log=recorder.log, is_current=lease_is_current, sleep=self.sleep,
+                        )
+                    else:
+                        from .pack_opening import PackOpeningResult
+                        opening = PackOpeningResult("FAILED", False, 0, None, "PAGE_UNKNOWN")
+                    recorder.log("PACK_OPENING", **opening.as_payload())
             elif outcome == "GAME_RESTRICTED":
                 finish_status = "FAILED"
                 error_code = "APEX_GAME_ACCOUNT_RESTRICTED"

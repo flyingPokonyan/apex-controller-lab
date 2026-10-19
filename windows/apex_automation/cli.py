@@ -1376,6 +1376,128 @@ def run_start(
     return 0
 
 
+def run_pack_open_test(config_path: Path, *, countdown: int, look_s: float | None) -> int:
+    """Run pack opening on whatever account is signed in by hand, without Forge.
+
+    Nothing is claimed, reported or uploaded; result frames stay in the run
+    folder. With --look it only reads the screen while a person clicks through
+    the pages, and sends no input at all.
+    """
+    if sys.platform != "win32":
+        print("pack-open-test 只能在 Windows 上运行。", file=sys.stderr)
+        return 2
+
+    from .pack_opening import classify, heirloom_visible, open_account_packs, select_count
+
+    if config_path.expanduser().resolve() == DEFAULT_CONFIG_PATH.resolve():
+        config_path = PLAY_CONFIG_PATH
+    config = load_config(config_path)
+    runs_root = REPOSITORY_ROOT / "windows" / "runs"
+    lock = SingleInstanceLock(runs_root / "play.lock")
+    try:
+        lock.acquire()
+    except AlreadyRunningError as error:
+        print(f"{error}。先在 Forge 暂停这台 Runner，等当前任务结束、托管程序退出后再测。", file=sys.stderr)
+        return 2
+
+    guard = Win32SafetyGuard(config.environment["foregroundExecutables"])
+    sender = Win32InputSender(
+        guard,
+        int(config.environment["width"]),
+        int(config.environment["height"]),
+    )
+    recorder = RunRecorder(runs_root, "pack-open-test")
+    folder = recorder.run_dir / "pack-results"
+    folder.mkdir(parents=True, exist_ok=True)
+
+    def save(frame, name: str) -> bool:
+        import cv2
+        path = folder / f"{name}.jpg"
+        ok = bool(cv2.imwrite(str(path), frame[:, :, :3]))
+        print(f"  截图：{path}" if ok else f"  截图保存失败：{path}")
+        return ok
+
+    def describe(frame, tokens) -> str:
+        page = classify(tokens)
+        if page == "select":
+            return f"{page} 数量={select_count(tokens, frame.shape[1], frame.shape[0])}"
+        if page == "result":
+            return f"{page} 红={'是' if heirloom_visible(frame) else '否'}"
+        return page
+
+    print("开包测试：不领号、不上报，只操作当前已登录的账号。")
+    print("请先手动登录 EA、进入 Apex 大厅（或组合包页面），然后切回 Apex。按 F8 可随时中止。")
+    if look_s is not None:
+        print(f"只看模式：{int(look_s)} 秒内你手动点各个页面，这里打印识别结果，不发送任何输入。")
+    for remaining in range(max(0, countdown), 0, -1):
+        print(f"{remaining}...")
+        time.sleep(1)
+
+    try:
+        with DxcamFrameSource(
+            backend=str(config.environment["captureBackend"]),
+            output_index=int(config.environment["outputIndex"]),
+        ) as capture:
+            source = ReferenceCanvasFrameSource(
+                capture,
+                capture_resolution(config.environment),
+                reference_resolution(config.environment),
+            )
+            ocr = RapidOcrProvider()
+            if look_s is not None:
+                deadline = time.monotonic() + look_s
+                last = None
+                shots = 0
+                while time.monotonic() < deadline:
+                    guard.ensure_not_aborted()
+                    frame = source.grab()
+                    text = describe(frame, tuple(ocr.read_with_boxes(frame)))
+                    if text != last:
+                        shots += 1
+                        print(f"{time.strftime('%H:%M:%S')} {text}")
+                        save(frame, f"look-{shots:02d}-{text.split()[0]}")
+                        last = text
+                    time.sleep(1)
+                recorder.finish("PLAYED", mode="look")
+                return 0
+
+            result = open_account_packs(
+                source, ocr, sender, guard,
+                save_frame=lambda frame, batch, heirloom: save(
+                    frame, f"batch-{batch:02d}{'-red' if heirloom else ''}"),
+                log=recorder.log,
+            )
+            recorder.log("PACK_OPENING", **result.as_payload())
+            recorder.finish("PLAYED", **result.as_payload())
+            print(
+                f"结果：{result.status}，开出红={'是' if result.heirloom else '否'}，"
+                f"{result.batches} 批，开包前 {result.packs_before if result.packs_before is not None else '未读到'} 个"
+                + (f"，原因 {result.reason}" if result.reason else "")
+            )
+            print(f"证据目录：{recorder.run_dir}（events.jsonl 里有逐步记录）")
+            return 0 if result.status != "FAILED" else 1
+    except EmergencyStop as error:
+        sender.release_all()
+        recorder.finish("ABORTED", error=str(error))
+        print(str(error), file=sys.stderr)
+        return 130
+    except KeyboardInterrupt:
+        sender.release_all()
+        recorder.finish("STOPPED", reason="Ctrl+C")
+        return 0
+    except Exception as error:
+        sender.release_all()
+        recorder.finish("FAILED", error=str(error))
+        print(f"开包测试失败：{error}", file=sys.stderr)
+        print(f"证据目录：{recorder.run_dir}", file=sys.stderr)
+        return 1
+    finally:
+        try:
+            lock.release()
+        except Exception as error:
+            print(f"运行锁释放失败：{error}", file=sys.stderr)
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Apex 首场匹配截图门控运行器")
     parser.add_argument("--config", type=Path, default=DEFAULT_CONFIG_PATH)
@@ -1463,6 +1585,20 @@ def build_parser() -> argparse.ArgumentParser:
         help="向游戏发几个明显动作，用来确认 SendInput 到底进不进得去",
     )
     probe.add_argument("--countdown", type=int, default=5)
+    pack_test = subparsers.add_parser(
+        "pack-open-test",
+        help="对手动登录的账号跑一次开包流程，不领号、不上报；--look 只识别不输入",
+    )
+    pack_test.add_argument("--countdown", type=int, default=5)
+    pack_test.add_argument(
+        "--look",
+        nargs="?",
+        type=float,
+        const=180.0,
+        default=None,
+        metavar="SECONDS",
+        help="只看模式：在这段时间里打印每个页面的识别结果并截图，默认 180 秒",
+    )
     start = subparsers.add_parser("start", help="启动可恢复的常驻任务监督器")
     start.add_argument("--mode", choices=("match", "tutorial"), default="match")
     start.add_argument(
@@ -1495,6 +1631,12 @@ def main(argv: list[str] | None = None) -> int:
         return run_display_watch(args.config, duration_s=max(10.0, args.duration_s))
     if command == "probe-input":
         return run_probe_input(args.config, countdown=max(0, args.countdown))
+    if command == "pack-open-test":
+        return run_pack_open_test(
+            args.config,
+            countdown=max(0, args.countdown),
+            look_s=None if args.look is None else max(10.0, args.look),
+        )
     if command == "play":
         return run_play(
             args.config,
