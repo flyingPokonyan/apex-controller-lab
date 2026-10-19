@@ -27,6 +27,10 @@ CARD_ATTEMPTS = 3
 CARD_WAIT_S = 6.0
 
 
+class _Covered(Exception):
+    """Another program's window is on top where a pack button was to be clicked."""
+
+
 @dataclass(frozen=True)
 class PackLimits:
     page_s: float = 20
@@ -152,11 +156,37 @@ def card_point(frame, tokens) -> tuple[int, int] | None:
     )
 
 
+def desktop_window_owner(reference_width: int, reference_height: int):
+    """Who owns the top-level window under a reference-canvas point, on Windows.
+
+    A remote-desktop notice in the bottom-right corner can sit over the pack
+    card unseen; clicking it hands the focus away and Apex drops to the desktop.
+    """
+    try:
+        from .notifications import Win32NotificationBackend
+        backend = Win32NotificationBackend()
+    except Exception:
+        return None
+
+    def owner(point):
+        width, height = backend.size()
+        physical = (int(point[0] * width / reference_width), int(point[1] * height / reference_height))
+        window = backend.window_at(physical)
+        if window is None:
+            return None
+        return window.executable.lower(), list(window.rect)
+
+    return owner
+
+
 class PackOpener:
     def __init__(self, source, ocr, sender, guard, *, save_frame, log, is_current=lambda: True,
-                 clock=time.monotonic, sleep=time.sleep, limits: PackLimits | None = None):
+                 clock=time.monotonic, sleep=time.sleep, limits: PackLimits | None = None,
+                 window_owner=None):
         self.source, self.ocr, self.sender, self.guard = source, ocr, sender, guard
         self.save_frame, self.log = save_frame, log
+        self.window_owner = window_owner
+        self.covered_by: str | None = None
         self.is_current, self.clock, self.sleep = is_current, clock, sleep
         self.limits = limits or PackLimits()
         self.frame = None
@@ -176,6 +206,8 @@ class PackOpener:
         except ForegroundLost:
             # The input guard refused a click because another window took over.
             return self._failed("FOREGROUND_LOST")
+        except _Covered:
+            return self._failed("CLICK_COVERED")
         except Exception as error:
             self.log("PACK_OPEN_ERROR", errorType=type(error).__name__)
             return self._failed("OPEN_ERROR")
@@ -264,10 +296,27 @@ class PackOpener:
                 return None
             self.sleep(0.2)
 
-    def _click(self, point, target: str, **details) -> None:
+    def _covered(self, x: int, y: int, target: str) -> bool:
+        """True when another program's window is on top at this point."""
+        expected = getattr(self.guard, "expected", None)
+        found = self.window_owner((x, y)) if self.window_owner and expected else None
+        if found is None:
+            return False
+        owner, rect = found
+        if owner in expected:
+            return False
+        self.covered_by = owner
+        self.log("PACK_CLICK_COVERED", target=target, x=x, y=y, owner=owner, rect=rect)
+        return True
+
+    def _click(self, point, target: str, **details) -> bool:
+        """Click only where Apex's own window is on top; False when another window is."""
         x, y = int(point[0]), int(point[1])
+        if self._covered(x, y, target):
+            return False
         self.log("PACK_INPUT", action="click", target=target, x=x, y=y, **details)
         self.sender.click(x, y)
+        return True
 
     def _key(self, scan_code: int, target: str) -> None:
         self.log("PACK_INPUT", action="key", target=target, scanCode=scan_code)
@@ -282,7 +331,8 @@ class PackOpener:
             token = found[-1]
         else:
             token = found[0]
-        self._click(_center(token), target, text=token.text, **details)
+        if not self._click(_center(token), target, text=token.text, **details):
+            raise _Covered()
         return True
 
     def _enter_from_lobby(self) -> str:
@@ -299,7 +349,8 @@ class PackOpener:
                 # Already on a pack page, or one still loading after a click.
                 page = self._wait(PACK_PAGES, self.limits.page_s)
                 return page or self._reason("CARD_NOT_FOUND" if attempt == 1 else "PAGE_UNKNOWN")
-            self._click(point, "lobby-card", attempt=attempt)
+            if not self._click(point, "lobby-card", attempt=attempt):
+                return "CARD_COVERED"
             page = self._wait(PACK_PAGES, CARD_WAIT_S)
             if page:
                 return page
@@ -317,6 +368,8 @@ class PackOpener:
         if button is None:
             return "HOLD_BUTTON_NOT_FOUND"
         x, y = _center(button)
+        if self._covered(x, y, "hold-open"):
+            return "CLICK_COVERED"
         self.log("PACK_INPUT", action="hold", target="hold-open", x=x, y=y)
         self.sender.move_to(x, y)
         self.sender.mouse_down()

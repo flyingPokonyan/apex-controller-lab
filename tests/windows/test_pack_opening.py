@@ -370,3 +370,26 @@ class LobbyEntryTest(unittest.TestCase):
         opener, _events = self.opener(Sender(), ocr=Ocr(), source=Source())
         opener._look()
         self.assertEqual(seen, [1])
+
+    def test_a_card_under_another_window_is_not_clicked(self):
+        class Sender:
+            clicks, opened = [], False
+
+            def click(self, x, y):
+                self.clicks.append((x, y))
+
+            def release_all(self):
+                pass
+
+        sender = Sender()
+        opener, events = self.opener(sender)
+        opener.guard.expected = {"r5apex.exe"}
+        opener.window_owner = lambda point: ("uuremote.exe", [1548, 866, 1906, 1022])
+        result = opener.run()
+        self.assertEqual((result.status, result.reason), ("FAILED", "CARD_COVERED"))
+        self.assertEqual(sender.clicks, [])
+        self.assertIn("PACK_CLICK_COVERED", [event for event, _payload in events])
+        opener.window_owner = lambda point: ("r5apex.exe", [0, 0, 1920, 1080])
+        opener.guard.expected = {"r5apex.exe"}
+        self.assertTrue(opener._click((2253, 1100), "lobby-card"))
+        self.assertEqual(sender.clicks, [(2253, 1100)])

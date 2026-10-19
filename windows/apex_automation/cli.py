@@ -1558,7 +1558,7 @@ def run_pack_open_test(config_path: Path, *, countdown: int, look_s: float | Non
         return 2
 
     import numpy as np
-    from .pack_opening import PackOpener, classify, heirloom_visible, select_count
+    from .pack_opening import PackOpener, classify, desktop_window_owner, heirloom_visible, select_count
 
     if config_path.expanduser().resolve() == DEFAULT_CONFIG_PATH.resolve():
         config_path = PLAY_CONFIG_PATH
@@ -1630,6 +1630,10 @@ def run_pack_open_test(config_path: Path, *, countdown: int, look_s: float | Non
             print(f"{time.strftime('%H:%M:%S')} >> {payload['action']} {payload['target']}{where}"
                   + (f" {extra}" if extra else ""))
             after_input["pending"] = True
+        elif event == "PACK_CLICK_COVERED":
+            print(f"{time.strftime('%H:%M:%S')} 没点：{payload['target']} ({payload['x']},{payload['y']}) "
+                  f"上面盖着 {payload['owner']} 的窗口 {payload['rect']}（物理坐标）。"
+                  "多半是远程软件的提示框，关掉它或断开远程后再测。")
         elif event in {"PACK_FOREGROUND_RESUMED", "PACK_HOLD_RELEASED"}:
             print(f"{time.strftime('%H:%M:%S')} {event} {payload or ''}")
 
@@ -1664,6 +1668,9 @@ def run_pack_open_test(config_path: Path, *, countdown: int, look_s: float | Non
                     self.traced = self.blocked
                     print(f"{time.strftime('%H:%M:%S')} 暂停识别：{self.blocked}"
                           f"（前台 {guard.foreground_executable() or '未知'}）")
+                    if self.blocked == "FOREGROUND_LOST":
+                        # Put the game back rather than leave the operator on the desktop.
+                        _bring_window_forward(config.environment["foregroundExecutables"])
                 return page
             if self.frame is not None:
                 text = describe(self.frame, self.tokens)
@@ -1741,6 +1748,8 @@ def run_pack_open_test(config_path: Path, *, countdown: int, look_s: float | Non
 
             opener = TracingOpener(
                 source, ocr, sender, guard,
+                window_owner=desktop_window_owner(int(config.environment["width"]),
+                                                  int(config.environment["height"])),
                 save_frame=lambda frame, batch, heirloom: keep(
                     frame, f"batch-{batch:02d}-red{int(heirloom)}"),
                 log=log,

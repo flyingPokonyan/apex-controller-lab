@@ -388,14 +388,17 @@ class PlaySessionRunner:
                     pack_probe.finish(is_current=lease_is_current)
                     metrics.flush(force=True, observedState=pilot.observed_state)
                 if identity.open_packs:
-                    from .pack_opening import open_account_packs
+                    from .pack_opening import desktop_window_owner, open_account_packs
                     from .pack_screenshots import store_result
                     if callable(getattr(self.ocr_provider, "read_with_boxes", None)):
+                        width = getattr(self.sender, "screen_width", None)
+                        height = getattr(self.sender, "screen_height", None)
                         opening = open_account_packs(
                             apex_source, self.ocr_provider, self.sender, self.guard,
                             save_frame=lambda frame, batch, heirloom: store_result(
                                 recorder.run_dir, self.runs_root, frame, batch, heirloom, identity.lease_id),
                             log=recorder.log, is_current=lease_is_current, sleep=self.sleep,
+                            window_owner=desktop_window_owner(width, height) if width and height else None,
                         )
                     else:
                         from .pack_opening import PackOpeningResult
