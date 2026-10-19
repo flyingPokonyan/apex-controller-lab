@@ -414,4 +414,3 @@ class RealPageTokensTest(unittest.TestCase):
         self.assertEqual(select_count(tokens, 2560, 1440), 21)
         button, amount = open_button(tokens)
         self.assertEqual((button.normalized, amount), ("开启21个", 21))
-
