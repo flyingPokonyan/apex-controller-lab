@@ -41,17 +41,25 @@ HK = ["🇭🇰 日用 专线 香港[0.2]", "🇭🇰 高级 专线 香港 01", 
 US = ["🇺🇸 高级 专线 美国 01", "🇺🇸 高级 专线 美国 02"]
 JP = ["🇯🇵 高级 专线 日本 01"]
 INFO = ["到期: 2026-11-13", "流量: 15.63 GB / 400 GB"]
+# A second airport merged into Proxies with a proxy-provider ("flower").
+FLOWER_HK = ["🇭🇰 香港高级 IEPL 专线 1", "🇭🇰 香港标准 IEPL 专线 2"]
 
 
 class FakeClash:
     """The subset of the mihomo controller API the Runner uses, as a ClashApi."""
 
-    def __init__(self, *, dead=(), connections=None, down=False):
+    def __init__(self, *, dead=(), connections=None, down=False, flower=(), flower_udp=True):
         leaves = HK + US + JP + INFO + ["🇸🇬 高级 专线 狮城 01"]
         self.proxies = {name: {"type": "AnyTLS", "udp": True} for name in leaves}
+        # Like mihomo: provider nodes are group members but not in /proxies.
+        self.providers = {
+            "default": {"vehicleType": "Compatible", "proxies": [{"name": "Proxies", "type": "Selector"}]},
+            "flower": {"vehicleType": "HTTP", "proxies": [{"name": name, "type": "Trojan", "udp": flower_udp}
+                                                          for name in flower]},
+        }
         self.proxies.update({
             "DIRECT": {"type": "Direct"},
-            "Proxies": {"type": "Selector", "now": INFO[0], "all": leaves},
+            "Proxies": {"type": "Selector", "now": INFO[0], "all": leaves + list(flower)},
             "HK": {"type": "Selector", "now": HK[0], "all": HK},
             "US": {"type": "Selector", "now": US[0], "all": US},
             "JP": {"type": "Selector", "now": JP[0], "all": JP},
@@ -73,9 +81,17 @@ class FakeClash:
             return 200, json.dumps({"proxies": self.proxies}).encode()
         if method == "GET" and path == "/rules":
             return 200, json.dumps({"rules": self.rules}).encode()
+        if method == "GET" and path == "/providers/proxies":
+            return 200, json.dumps({"providers": self.providers}).encode()
         if method == "GET" and path.endswith("/delay?timeout=4000&url=http://www.gstatic.com/generate_204"):
             node = path[len("/proxies/"):].split("/delay")[0]
+            if node not in self.proxies:
+                return 404, b'{"message":"resource not found"}'
             return (504, b'{"message":"timeout"}') if node in self.dead else (200, b'{"delay":87}')
+        if method == "GET" and path.startswith("/providers/proxies/flower/") and \
+                path.endswith("/healthcheck?timeout=4000&url=http://www.gstatic.com/generate_204"):
+            node = path[len("/providers/proxies/flower/"):].split("/healthcheck")[0]
+            return (504, b'{"message":"timeout"}') if node in self.dead else (200, b'{"delay":63}')
         if method == "PUT" and path.startswith("/proxies/"):
             self.proxies[path[len("/proxies/"):]]["now"] = payload["name"]
             return 204, b""
@@ -151,6 +167,22 @@ class NodeChoiceTests(unittest.TestCase):
         runner = switch(FakeClash())
         self.assertEqual(runner.prepare("HK", avoid=HK[1:])["node"], HK[0])
         self.assertEqual(switch(FakeClash()).prepare("HK", prefer=[HK[2]], avoid=[HK[0]])["node"], HK[2])
+
+    def test_a_merged_airport_s_nodes_are_tested_through_their_provider_and_used(self):
+        clash = FakeClash(flower=FLOWER_HK, dead=[FLOWER_HK[0]])
+        routes = candidate_routes(switch(clash)._proxies(), "Final", "HK")
+        self.assertEqual(sorted(route[-1][1] for route in routes), sorted(HK + FLOWER_HK))
+        facts = switch(clash).prepare("HK", avoid=HK)
+        self.assertEqual((facts["node"], facts["delayMs"], facts["error"]), (FLOWER_HK[1], 63, None))
+        self.assertEqual(clash.selected(), FLOWER_HK[1])
+        self.assertEqual(switch(clash).current()["node"], FLOWER_HK[1])
+
+    def test_nodes_that_cannot_carry_udp_are_never_game_exits(self):
+        clash = FakeClash(flower=FLOWER_HK, flower_udp=False)
+        clash.proxies[HK[1]]["udp"] = False
+        nodes = {route[-1][1] for route in candidate_routes(switch(clash)._proxies(), "Final", "HK")}
+        self.assertEqual(nodes, {HK[0], HK[2], HK[3]})
+        self.assertIn(switch(clash).prepare("HK", avoid=[HK[0], HK[2], HK[3]])["node"], {HK[0], HK[2], HK[3]})
 
     def test_an_avoided_node_is_still_used_when_nothing_else_answers(self):
         # Least recently used first: HK 02 was used longest ago by another account.

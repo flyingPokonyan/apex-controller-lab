@@ -356,7 +356,7 @@ class ClashExitSwitch:
             routes.sort(key=rank)
             for route in routes[:MAX_TESTS]:
                 node = route[-1][1]
-                delay = self._delay(node)
+                delay = self._delay(node, proxies[node].get("provider"))
                 if delay is None:
                     continue
                 for selector, member in route:
@@ -402,7 +402,27 @@ class ClashExitSwitch:
         payload = _json(self._call("GET", "/proxies")).get("proxies")
         if not isinstance(payload, dict):
             raise ClashUnavailable("proxies")
+        # A second airport merged into the profile as a proxy-provider: its
+        # nodes are members of the groups but listed only under /providers.
+        for provider, nodes in self._provider_nodes().items():
+            for node in nodes:
+                name = node.get("name")
+                if isinstance(name, str) and name not in payload:
+                    payload[name] = {**node, "provider": provider}
         return payload
+
+    def _provider_nodes(self) -> dict[str, list[dict]]:
+        try:
+            status, body = self.api.request("GET", "/providers/proxies")
+            providers = _json(body).get("providers") if status == 200 else None
+        except ClashUnavailable:
+            return {}
+        if not isinstance(providers, dict):
+            return {}
+        # "Compatible" entries only mirror the profile's own groups.
+        return {name: [node for node in info.get("proxies") or [] if isinstance(node, dict)]
+                for name, info in providers.items()
+                if isinstance(info, dict) and str(info.get("vehicleType", "")).casefold() != "compatible"}
 
     def _resolve_group(self) -> str:
         if self.configured_group:
@@ -416,13 +436,16 @@ class ClashExitSwitch:
             self._group = target if isinstance(target, str) and target else "GLOBAL"
         return self._group
 
-    def _delay(self, node: str) -> int | None:
+    def _delay(self, node: str, provider: str | None = None) -> int | None:
+        query = f"timeout=4000&url={quote(DELAY_URL, safe='')}"
+        # mihomo tests a provider's node only through its provider.
+        path = (f"/providers/proxies/{quote(provider, safe='')}/{quote(node, safe='')}/healthcheck?{query}"
+                if provider else f"/proxies/{quote(node, safe='')}/delay?{query}")
         try:
-            status, body = self.api.request(
-                "GET", f"/proxies/{quote(node, safe='')}/delay?timeout=4000&url={quote(DELAY_URL, safe='')}", timeout=8)
+            status, body = self.api.request("GET", path, timeout=8)
+            delay = _json(body).get("delay") if status == 200 else None
         except ClashUnavailable:
             return None
-        delay = _json(body).get("delay") if status == 200 else None
         return delay if type(delay) is int and 0 < delay <= 60000 else None
 
     def _connections(self, processes):
@@ -451,7 +474,7 @@ def selected_leaf(proxies: dict, group: str) -> str | None:
 
 
 def candidate_routes(proxies: dict, group: str, country: str) -> list[list[tuple[str, str]]]:
-    """Ways to select a node of ``country``: directly, or through one member selector."""
+    """Ways to select a game node of ``country``: directly, or through one member selector."""
     routes, seen = [], set()
     members = proxies.get(group, {}).get("all") or []
     for member in members:
@@ -459,16 +482,21 @@ def candidate_routes(proxies: dict, group: str, country: str) -> list[list[tuple
         if not isinstance(info, dict):
             continue
         if not _is_group(info):
-            if node_country(member) == country and member not in seen:
+            if _game_node(member, info, country) and member not in seen:
                 seen.add(member)
                 routes.append([(group, member)])
         elif str(info.get("type", "")).casefold() == "selector":
             for leaf in info.get("all") or []:
-                leaf_info = proxies.get(leaf)
-                if isinstance(leaf_info, dict) and not _is_group(leaf_info) and node_country(leaf) == country and leaf not in seen:
+                if _game_node(leaf, proxies.get(leaf), country) and leaf not in seen:
                     seen.add(leaf)
                     routes.append([(group, member), (member, leaf)])
     return routes
+
+
+def _game_node(name: str, info, country: str) -> bool:
+    # Apex plays over UDP: a node that cannot carry it would lose the match.
+    return (isinstance(info, dict) and not _is_group(info) and info.get("udp") is not False
+            and node_country(name) == country)
 
 
 def _is_group(info: dict) -> bool:
