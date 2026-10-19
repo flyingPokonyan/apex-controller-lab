@@ -1411,7 +1411,7 @@ def _pack_test_uploader():
         path=parsed.path.rsplit("/", 1)[0] + "/ea-evidence", query="", fragment=""))
     transport = UrllibReportTransport()
 
-    def send(frame, step: str) -> bool:
+    def send(frame, step: str, captured_at: str) -> bool:
         frame = np.ascontiguousarray(frame[:, :, :3])
         height, width = frame.shape[:2]
         if width > 1600:
@@ -1427,7 +1427,7 @@ def _pack_test_uploader():
             "step": step,
             "page": "UNKNOWN",
             "details": {},
-            "capturedAt": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+            "capturedAt": captured_at,
             "sha256": hashlib.sha256(image).hexdigest(),
             "width": int(frame.shape[1]),
             "height": int(frame.shape[0]),
@@ -1450,14 +1450,16 @@ def _pack_test_uploader():
 
         def _work(self):
             while True:
-                frame, step = self.pending.get()
+                frame, step, captured_at = self.pending.get()
                 try:
-                    send(frame, step)
+                    send(frame, step, captured_at)
                 finally:
                     self.pending.task_done()
 
         def __call__(self, frame, step: str) -> bool:
-            self.pending.put((frame.copy(), step))
+            # The capture time, not the later moment the background thread sends it.
+            captured_at = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+            self.pending.put((frame.copy(), step, captured_at))
             return True
 
         def drain(self, timeout_s: float) -> int:
@@ -1467,6 +1469,80 @@ def _pack_test_uploader():
             return self.pending.unfinished_tasks
 
     return Uploader()
+
+
+def _bring_window_forward(executables) -> bool:
+    """Put the Apex window in front; the console that just started may do so."""
+    import ctypes
+    from ctypes import wintypes
+
+    user32, kernel32 = ctypes.windll.user32, ctypes.windll.kernel32
+    expected = {name.lower() for name in executables}
+
+    def executable(hwnd) -> str:
+        process_id = wintypes.DWORD()
+        user32.GetWindowThreadProcessId(hwnd, ctypes.byref(process_id))
+        process = kernel32.OpenProcess(0x1000, False, process_id.value)
+        if not process:
+            return ""
+        try:
+            buffer, size = ctypes.create_unicode_buffer(32768), wintypes.DWORD(32768)
+            if not kernel32.QueryFullProcessImageNameW(process, 0, buffer, ctypes.byref(size)):
+                return ""
+            return Path(buffer.value).name.lower()
+        finally:
+            kernel32.CloseHandle(process)
+
+    found = []
+    callback_type = ctypes.WINFUNCTYPE(wintypes.BOOL, wintypes.HWND, wintypes.LPARAM)
+
+    def visit(hwnd, _parameter):
+        if user32.IsWindowVisible(hwnd) and executable(hwnd) in expected:
+            found.append(hwnd)
+        return True
+
+    user32.EnumWindows(callback_type(visit), 0)
+    if not found:
+        return False
+    target = found[0]
+    if user32.IsIconic(target):
+        user32.ShowWindow(target, 9)  # SW_RESTORE
+    foreground = user32.GetForegroundWindow()
+    current_thread = kernel32.GetCurrentThreadId()
+    foreground_thread = user32.GetWindowThreadProcessId(foreground, None) if foreground else 0
+    attached = bool(foreground_thread and foreground_thread != current_thread
+                    and user32.AttachThreadInput(current_thread, foreground_thread, True))
+    try:
+        user32.BringWindowToTop(target)
+        user32.SetForegroundWindow(target)
+    finally:
+        if attached:
+            user32.AttachThreadInput(current_thread, foreground_thread, False)
+    return True
+
+
+def _wait_for_apex_in_front(guard, executables, *, timeout_s: float = 60, settle_s: float = 2.0) -> bool:
+    """Apex in front for settle_s in a row; a fullscreen switch eats early clicks."""
+    if not guard.target_is_foreground():
+        if _bring_window_forward(executables):
+            print("已把 Apex 切到前台，之后请别点其他窗口。")
+        else:
+            print("没找到 Apex 窗口，请手动切到 Apex。")
+    deadline = time.monotonic() + timeout_s
+    steady_since = None
+    told = False
+    while time.monotonic() < deadline:
+        if guard.target_is_foreground():
+            steady_since = steady_since or time.monotonic()
+            if time.monotonic() - steady_since >= settle_s:
+                return True
+        else:
+            steady_since = None
+            if not told:
+                print(f"等待 Apex 回到前台（现在前台是 {guard.foreground_executable() or '未知'}）……")
+                told = True
+        time.sleep(0.2)
+    return False
 
 
 def run_pack_open_test(config_path: Path, *, countdown: int, look_s: float | None) -> int:
@@ -1541,12 +1617,21 @@ def run_pack_open_test(config_path: Path, *, countdown: int, look_s: float | Non
             print("截图已全部上报。" if not left else f"还有 {left} 张没传完，本机仍有原图。")
 
     errors = []
+    after_input = {"pending": False}
 
     def log(event: str, **payload) -> None:
         recorder.log(event, **payload)
         if event == "PACK_OPEN_ERROR":
             errors.append(str(payload.get("errorType")))
             print(f"  开包流程出错：{payload.get('errorType')}")
+        elif event == "PACK_INPUT":
+            where = f" ({payload['x']},{payload['y']})" if "x" in payload else ""
+            extra = {key: value for key, value in payload.items() if key not in {"action", "target", "x", "y"}}
+            print(f"{time.strftime('%H:%M:%S')} >> {payload['action']} {payload['target']}{where}"
+                  + (f" {extra}" if extra else ""))
+            after_input["pending"] = True
+        elif event in {"PACK_FOREGROUND_RESUMED", "PACK_HOLD_RELEASED"}:
+            print(f"{time.strftime('%H:%M:%S')} {event} {payload or ''}")
 
     def moved(previous, frame) -> bool:
         """A new screen even when its label did not change (e.g. two unknown pages)."""
@@ -1574,25 +1659,43 @@ def run_pack_open_test(config_path: Path, *, countdown: int, look_s: float | Non
 
         def _look(self):
             page = super()._look()
+            if page == "blocked":
+                if self.traced != self.blocked:
+                    self.traced = self.blocked
+                    print(f"{time.strftime('%H:%M:%S')} 暂停识别：{self.blocked}"
+                          f"（前台 {guard.foreground_executable() or '未知'}）")
+                return page
             if self.frame is not None:
                 text = describe(self.frame, self.tokens)
-                if text != self.traced or (
+                # The first frame after any input is kept, even an unchanged one.
+                forced, after_input["pending"] = after_input["pending"], False
+                if forced or text != self.traced or (
                     time.monotonic() - self.traced_at >= 1.5 and moved(self.traced_sample, self.frame)
                 ):
                     self.traced, self.traced_at = text, time.monotonic()
                     self.traced_sample = self.frame[::16, ::16, :3].astype(np.int16)
-                    print(f"{time.strftime('%H:%M:%S')} {text}")
-                    keep(self.frame, f"run-{counter['frames'] + 1:02d}-{text}")
+                    label = f"after-{text}" if forced else text
+                    print(f"{time.strftime('%H:%M:%S')} {label}")
+                    keep(self.frame, f"run-{counter['frames'] + 1:02d}-{label}")
             return page
 
     print(f"开包测试（代码 {commit}）：不领号、不上报游戏运行，只操作当前已登录的账号。")
-    print("请先手动登录 EA、进入 Apex 大厅（或组合包页面），然后切回 Apex。按 F8 可随时中止。")
-    print("倒数结束后别点这个窗口：Apex 不在前台时不会点击，会直接按失败结束。")
+    print("请先手动登录 EA、进入 Apex 大厅（或组合包页面）。按 F8 可随时中止。")
+    print("倒数结束后会自动把 Apex 切到前台；之后别点任何窗口，Apex 不在前台时不会点击。")
     if look_s is not None:
         print(f"只看模式：{int(look_s)} 秒内你手动点各个页面，这里打印识别结果，不发送任何输入。")
     for remaining in range(max(0, countdown), 0, -1):
         print(f"{remaining}...")
         time.sleep(1)
+    try:
+        ready = _wait_for_apex_in_front(guard, config.environment["foregroundExecutables"])
+    except EmergencyStop:
+        ready = False
+    if not ready:
+        print("Apex 没有稳定在前台，测试未开始。", file=sys.stderr)
+        recorder.finish("STOPPED", reason="FOREGROUND_NOT_READY")
+        lock.release()
+        return 2
 
     try:
         with DxcamFrameSource(

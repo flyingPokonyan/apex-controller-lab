@@ -198,7 +198,7 @@ class PackOpeningTest(unittest.TestCase):
             log=lambda *args, **kwargs: None, clock=clock, sleep=clock.sleep,
             limits=PackLimits(page_s=1, hold_s=1, session_s=2),
         ).run()
-        self.assertEqual((result.status, result.reason, result.batches), ("FAILED", "PAGE_UNKNOWN", 0))
+        self.assertEqual((result.status, result.reason, result.batches), ("FAILED", "COUNT_UNREADABLE", 0))
         self.assertFalse(any(event[1] == "select" for event in sender.events if event[0] == "click"))
 
     def test_screenshot_failure_keeps_a_red_already_seen(self):
@@ -252,3 +252,121 @@ class CaptureQuirkTest(unittest.TestCase):
         left, top = int(2560 * .77), int(1440 * .66)
         self.assertEqual(point, (left + (168 + 278) // 2, top + (34 + 119) // 2))
         self.assertEqual(opener.packs_before, 21)
+
+
+class LobbyEntryTest(unittest.TestCase):
+    """The 10-19 hands-on test clicked the card once, the game ignored it, and the run ended."""
+
+    LOBBY = (token("21", (2092, 1054, 2210, 1143)), token("APEX", (2201, 1058, 2301, 1100)),
+             token("组合包", (2198, 1094, 2308, 1143)), token("开启0/10", (2018, 1153, 2108, 1181)))
+
+    def opener(self, sender, *, foreground=lambda: True, ocr=None, source=None):
+        clock = Clock()
+
+        class LiveGuard:
+            def ensure_not_aborted(self):
+                return None
+
+            def target_is_foreground(self):
+                return foreground()
+
+        class Source:
+            def grab(self):
+                return np.zeros((1440, 2560, 3), np.uint8)
+
+        lobby = self.LOBBY
+
+        class Ocr:
+            def read_with_boxes(self, frame):
+                if sender.opened:
+                    return (token("火花奖励计数器", (40, 8, 140, 24)),)
+                if frame.shape[:2] == (1440, 2560):
+                    return lobby
+                # The card region crop, in crop coordinates.
+                left, top = int(2560 * .77), int(1440 * .66)
+                return tuple(OcrToken(t.text, t.confidence, (t.roi[0] - left, t.roi[1] - top,
+                                                             t.roi[2] - left, t.roi[3] - top)) for t in lobby)
+
+        events = []
+        opener = PackOpener(source or Source(), ocr or Ocr(), sender, LiveGuard(), save_frame=lambda *_args: True,
+                            log=lambda event, **payload: events.append((event, payload)),
+                            clock=clock, sleep=clock.sleep, limits=PackLimits(page_s=3, hold_s=2, session_s=60))
+        return opener, events
+
+    def test_a_lost_card_click_is_retried_while_the_lobby_card_is_still_there(self):
+        class Sender:
+            clicks, opened = [], False
+
+            def click(self, x, y):
+                self.clicks.append((x, y))
+                self.opened = len(self.clicks) >= 2  # the first click is swallowed
+
+            def release_all(self):
+                pass
+
+        sender = Sender()
+        opener, events = self.opener(sender)
+        self.assertEqual(opener._look(), "unknown")
+        self.assertEqual(opener._enter_from_lobby(), "intro")
+        self.assertEqual(sender.clicks, [(2253, 1100), (2253, 1100)])
+        self.assertEqual([payload["attempt"] for event, payload in events if event == "PACK_INPUT"], [1, 2])
+        self.assertEqual(opener.packs_before, 21)
+
+    def test_a_card_that_never_responds_stops_after_three_clicks(self):
+        class Sender:
+            clicks, opened = [], False
+
+            def click(self, x, y):
+                self.clicks.append((x, y))
+
+            def release_all(self):
+                pass
+
+        sender = Sender()
+        opener, _events = self.opener(sender)
+        result = opener.run()
+        self.assertEqual((result.status, result.reason), ("FAILED", "CARD_NO_EFFECT"))
+        self.assertEqual(len(sender.clicks), 3)
+
+    def test_losing_the_foreground_is_named_and_nothing_is_clicked(self):
+        class Sender:
+            clicks, opened = [], False
+
+            def click(self, x, y):
+                self.clicks.append((x, y))
+
+            def release_all(self):
+                pass
+
+        sender = Sender()
+        opener, _events = self.opener(sender, foreground=lambda: False)
+        result = opener.run()
+        self.assertEqual((result.status, result.reason), ("FAILED", "FOREGROUND_LOST"))
+        self.assertEqual(sender.clicks, [])
+
+    def test_a_fresh_frame_is_preferred_over_the_cached_one(self):
+        stale, fresh = np.zeros((1440, 2560, 3), np.uint8), np.ones((1440, 2560, 3), np.uint8)
+
+        class Source:
+            calls = 0
+
+            def grab(self):
+                return stale
+
+            def grab_fresh(self):
+                self.calls += 1
+                return fresh if self.calls >= 3 else None
+
+        seen = []
+
+        class Ocr:
+            def read_with_boxes(self, frame):
+                seen.append(int(frame[0, 0, 0]))
+                return ()
+
+        class Sender:
+            opened = False
+
+        opener, _events = self.opener(Sender(), ocr=Ocr(), source=Source())
+        opener._look()
+        self.assertEqual(seen, [1])

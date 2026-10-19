@@ -13,11 +13,18 @@ from typing import Callable
 import numpy as np
 
 from .apex_packs import ApexPackReader, pack_region
-from .safety import EmergencyStop
+from .safety import EmergencyStop, ForegroundLost
 
 
 ESC_SCAN = 1
 SPACE_SCAN = 57
+PACK_PAGES = frozenset({"intro", "select", "reward", "result", "hold"})
+# Coming back from another window, a fullscreen game is still switching
+# display modes: the first frames can be the old desktop and a click can be lost.
+FOCUS_SETTLE_S = 1.5
+FRESH_FRAME_S = 1.0
+CARD_ATTEMPTS = 3
+CARD_WAIT_S = 6.0
 
 
 @dataclass(frozen=True)
@@ -157,6 +164,8 @@ class PackOpener:
         self.heirloom = False
         self.batches = 0
         self.packs_before = None
+        # Why the last look saw nothing; it names a timeout better than the page did.
+        self.blocked: str | None = None
 
     def run(self) -> PackOpeningResult:
         try:
@@ -164,9 +173,12 @@ class PackOpener:
         except EmergencyStop:
             self._release()
             raise
+        except ForegroundLost:
+            # The input guard refused a click because another window took over.
+            return self._failed("FOREGROUND_LOST")
         except Exception as error:
             self.log("PACK_OPEN_ERROR", errorType=type(error).__name__)
-            return self._failed("PAGE_UNKNOWN")
+            return self._failed("OPEN_ERROR")
         finally:
             self._release()
 
@@ -178,15 +190,44 @@ class PackOpener:
     def _failed(self, reason: str) -> PackOpeningResult:
         return PackOpeningResult("FAILED", self.heirloom, self.batches, self.packs_before, reason)
 
+    def _reason(self, default: str) -> str:
+        return self.blocked or default
+
     def _done(self) -> PackOpeningResult:
         status = "NO_PACKS" if self.batches == 0 else "DONE"
         return PackOpeningResult(status, self.heirloom, self.batches, self.packs_before)
 
+    def _grab(self):
+        """A frame drawn after this call, else the latest one.
+
+        A plain grab can return a cached frame from before the last click or
+        from while another window was in front.
+        """
+        fresh = getattr(self.source, "grab_fresh", None)
+        if callable(fresh):
+            deadline = self.clock() + FRESH_FRAME_S
+            while True:
+                frame = fresh()
+                if frame is not None:
+                    return frame
+                if self.clock() >= deadline:
+                    break
+                self.sleep(0.05)
+        return self.source.grab()
+
     def _look(self):
         self.guard.ensure_not_aborted()
-        if not self.guard.target_is_foreground() or not self.is_current():
-            return "unknown"
-        frame = self.source.grab()
+        if not self.is_current():
+            self.blocked = "LEASE_LOST"
+            return "blocked"
+        if not self.guard.target_is_foreground():
+            self.blocked = "FOREGROUND_LOST"
+            return "blocked"
+        if self.blocked == "FOREGROUND_LOST":
+            self.log("PACK_FOREGROUND_RESUMED")
+            self.sleep(FOCUS_SETTLE_S)
+        self.blocked = None
+        frame = self._grab()
         if isinstance(frame, np.ndarray) and frame.ndim == 3 and frame.shape[2] == 4:
             # RapidOCR treats a fourth channel as transparency. A capture whose
             # alpha is 0 becomes a blank white image and reads no text at all.
@@ -195,15 +236,19 @@ class PackOpener:
         self.tokens = tuple(self.ocr.read_with_boxes(frame))
         return classify(self.tokens)
 
-    def _lobby_card(self):
+    def _lobby_card(self, *, strict=False):
         """The pack card, from the whole frame or else from the card region alone.
 
         The region read is what the inventory probe already relies on; small
         card text can be missed when the whole 2560x1440 frame is read at once.
+        Strict asks for the lobby layout itself (count beside APEX/组合包), so
+        a pack page that also says 组合包 there is never clicked as the card.
         """
-        point = card_point(self.frame, self.tokens)
+        point = None if strict else card_point(self.frame, self.tokens)
         if point is None:
             reading = ApexPackReader(self.ocr).read(self.frame)
+            if strict and reading.status != "OK":
+                return None
             point = card_point(self.frame, reading.tokens)
             if self.packs_before is None and reading.status == "OK":
                 self.packs_before = reading.count
@@ -219,7 +264,16 @@ class PackOpener:
                 return None
             self.sleep(0.2)
 
-    def _click_token(self, predicate, *, lowest=False) -> bool:
+    def _click(self, point, target: str, **details) -> None:
+        x, y = int(point[0]), int(point[1])
+        self.log("PACK_INPUT", action="click", target=target, x=x, y=y, **details)
+        self.sender.click(x, y)
+
+    def _key(self, scan_code: int, target: str) -> None:
+        self.log("PACK_INPUT", action="key", target=target, scanCode=scan_code)
+        self.sender.tap_scan_code(scan_code, 80)
+
+    def _click_token(self, predicate, target: str, *, lowest=False, **details) -> bool:
         found = [token for token in self.tokens if token.roi and predicate(token)]
         if not found:
             return False
@@ -228,26 +282,54 @@ class PackOpener:
             token = found[-1]
         else:
             token = found[0]
-        self.sender.click(*_center(token))
+        self._click(_center(token), target, text=token.text, **details)
         return True
+
+    def _enter_from_lobby(self) -> str:
+        """Click the lobby card until a pack page shows; a page name or a reason.
+
+        One lost click must not end the run, so the card is clicked up to three
+        times, but only while the lobby card itself is still on screen.
+        """
+        for attempt in range(1, CARD_ATTEMPTS + 1):
+            point = None
+            if self.frame is not None and self.blocked is None:
+                point = self._lobby_card(strict=attempt > 1)
+            if point is None:
+                # Already on a pack page, or one still loading after a click.
+                page = self._wait(PACK_PAGES, self.limits.page_s)
+                return page or self._reason("CARD_NOT_FOUND" if attempt == 1 else "PAGE_UNKNOWN")
+            self._click(point, "lobby-card", attempt=attempt)
+            page = self._wait(PACK_PAGES, CARD_WAIT_S)
+            if page:
+                return page
+            if self.blocked:
+                return self.blocked
+        return "CARD_NO_EFFECT"
 
     def _hold(self) -> str:
         page = self._wait({"hold", "result"}, self.limits.page_s)
         if page == "result":
             return "opened"
         if page != "hold":
-            return "HOLD_TIMEOUT"
+            return self._reason("HOLD_PAGE_TIMEOUT")
         button = next((token for token in self.tokens if token.roi and "按住打开" in token.normalized), None)
         if button is None:
-            return "PAGE_UNKNOWN"
-        self.sender.move_to(*_center(button))
+            return "HOLD_BUTTON_NOT_FOUND"
+        x, y = _center(button)
+        self.log("PACK_INPUT", action="hold", target="hold-open", x=x, y=y)
+        self.sender.move_to(x, y)
         self.sender.mouse_down()
         try:
             started = self.clock()
             deadline = started + self.limits.hold_s
             while self.clock() < deadline:
                 self.sleep(0.2)
-                if self._look() != "hold" and self.clock() - started >= self.limits.minimum_hold_s:
+                page = self._look()
+                if page == "blocked":
+                    return self.blocked or "FOREGROUND_LOST"
+                if page != "hold" and self.clock() - started >= self.limits.minimum_hold_s:
+                    self.log("PACK_HOLD_RELEASED", heldMs=round((self.clock() - started) * 1000), page=page)
                     return "opened"
             return "HOLD_TIMEOUT"
         finally:
@@ -279,28 +361,23 @@ class PackOpener:
     def _run(self) -> PackOpeningResult:
         deadline = self.clock() + self.limits.session_s
         page = self._look()
-        if page == "unknown":
-            point = None if self.frame is None else self._lobby_card()
-            if point is None:
-                page = self._wait({"intro", "select", "reward", "result"}, self.limits.page_s)
-                if page is None:
-                    return self._failed("PAGE_UNKNOWN")
-            else:
-                self.sender.click(*point)
-                page = None
+        if page not in PACK_PAGES:
+            page = self._enter_from_lobby()
+            if page not in PACK_PAGES:
+                return self._failed(page)
         while self.clock() < deadline:
             if page is None:
                 remaining = deadline - self.clock()
-                page = self._wait({"intro", "select", "reward", "result", "hold"}, min(self.limits.page_s, remaining))
+                page = self._wait(PACK_PAGES, min(self.limits.page_s, remaining))
             if page is None:
-                return self._failed("RESULT_TIMEOUT" if self.batches else "PAGE_UNKNOWN")
+                return self._failed(self._reason("RESULT_TIMEOUT" if self.batches else "PAGE_UNKNOWN"))
             if page == "intro":
-                if not self._click_token(lambda token: "开启组合包" in token.normalized, lowest=True):
-                    return self._failed("PAGE_UNKNOWN")
+                if not self._click_token(lambda token: "开启组合包" in token.normalized, "intro-open", lowest=True):
+                    return self._failed("INTRO_BUTTON_NOT_FOUND")
                 page = None
                 continue
             if page == "reward":
-                self.sender.tap_scan_code(SPACE_SCAN, 80)
+                self._key(SPACE_SCAN, "reward-continue")
                 page = None
                 continue
             if page == "hold":
@@ -311,12 +388,12 @@ class PackOpener:
             if page == "result":
                 red = self._stable_result(min(deadline, self.clock() + self.limits.page_s))
                 if red is None:
-                    return self._failed("RESULT_TIMEOUT")
+                    return self._failed(self._reason("RESULT_TIMEOUT"))
                 self.heirloom = self.heirloom or red
                 self.batches += 1
                 if not self.save_frame(self.frame, self.batches, red):
                     return self._failed("SCREENSHOT_FAILED")
-                self.sender.tap_scan_code(ESC_SCAN, 80)
+                self._key(ESC_SCAN, "result-back")
                 page = None
                 continue
             count = select_count(self.tokens, self.frame.shape[1], self.frame.shape[0])
@@ -325,24 +402,13 @@ class PackOpener:
             if count == 0:
                 return self._done()
             if count is None:
-                return self._failed("PAGE_UNKNOWN")
+                return self._failed("COUNT_UNREADABLE")
             if self.batches >= self.limits.max_batches:
                 return self._failed("BATCH_LIMIT")
-            if not self._click_token(lambda token: token.normalized == "最高"):
-                return self._failed("PAGE_UNKNOWN")
-            outcome = self._hold()
-            if outcome != "opened":
-                return self._failed(outcome)
-            red = self._stable_result(min(deadline, self.clock() + self.limits.page_s))
-            if red is None:
-                return self._failed("RESULT_TIMEOUT")
-            self.heirloom = self.heirloom or red
-            self.batches += 1
-            if not self.save_frame(self.frame, self.batches, red):
-                return self._failed("SCREENSHOT_FAILED")
-            self.sender.tap_scan_code(ESC_SCAN, 80)
-            page = None
-        return self._failed("RESULT_TIMEOUT")
+            if not self._click_token(lambda token: token.normalized == "最高", "select-max", count=count):
+                return self._failed("MAX_BUTTON_NOT_FOUND")
+            page = "hold"
+        return self._failed("SESSION_TIMEOUT")
 
 
 def open_account_packs(source, ocr, sender, guard, **kwargs) -> PackOpeningResult:
