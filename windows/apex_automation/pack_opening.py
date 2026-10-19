@@ -427,6 +427,28 @@ class PackOpener:
         finally:
             self.sender.mouse_up()
 
+    def _leave_result(self) -> str | None:
+        """Esc off the rewards page and return the page after it.
+
+        Frames right after Esc can still show the rewards page (Runner 1,
+        10-19 21:39); read as a new batch, the run then waited for it to
+        settle while the spark reward sat unclaimed. Esc is repeated only
+        while the rewards page itself is still there, never on the spark
+        reward, whose ESC 返回 would leave it unclaimed.
+        """
+        self._key(ESC_SCAN, "result-back")
+        pressed_at, presses = self.clock(), 1
+        deadline = self.clock() + self.limits.page_s
+        while self.clock() < deadline:
+            page = self._look()
+            if page in PACK_PAGES and page != "result":
+                return page
+            if page == "result" and self.clock() - pressed_at >= 3 and presses < 3:
+                self._key(ESC_SCAN, "result-back")
+                pressed_at, presses = self.clock(), presses + 1
+            self.sleep(0.3)
+        return None
+
     def _lobby_empty(self) -> bool:
         """Back in the lobby with the pack card reading 0, after at least one batch."""
         if self.frame is None or not self.batches:
@@ -494,8 +516,11 @@ class PackOpener:
                 self.maxed, self.presses, self.count_at_press = False, 0, None
                 if not self.save_frame(self.frame, self.batches, red):
                     return self._failed("SCREENSHOT_FAILED")
-                self._key(ESC_SCAN, "result-back")
-                page = None
+                page = self._leave_result()
+                if page is None:
+                    if self._lobby_empty():
+                        return self._done()
+                    return self._failed(self._reason("RESULT_STUCK"))
                 continue
             count = select_count(self.tokens, self.frame.shape[1], self.frame.shape[0])
             if self.packs_before is None:

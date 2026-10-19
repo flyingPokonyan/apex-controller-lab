@@ -437,6 +437,8 @@ class LateSparkRewardTest(unittest.TestCase):
             if state["page"] == "select" and state["reward_at"] is not None and clock() >= state["reward_at"]:
                 state.update(page="reward", reward_at=None)
             if state["page"] == "result":
+                if state.get("leave"):
+                    state["page"], state["leave"] = state["leave"], None
                 return (token("组合包奖励", (8, 8, 80, 24)),)
             if state["page"] == "reward":
                 return (token("已获得奖励", (40, 10, 140, 30)), token("SPACE 继续", (80, 90, 120, 98)))
@@ -472,7 +474,8 @@ class LateSparkRewardTest(unittest.TestCase):
             def tap_scan_code(self, code, _duration):
                 keys.append((code, state["page"]))
                 if code == ESC_SCAN and state["page"] == "result":
-                    state.update(page="select", maxed=False, hover=False)
+                    # Runner 1, 21:39: the next frame still showed the rewards page.
+                    state.update(leave="select", maxed=False, hover=False)
                     if state["rewards"]:
                         state.update(reward_at=clock() + 2, rewards=0)
                 elif code == SPACE_SCAN and state["page"] == "reward":
