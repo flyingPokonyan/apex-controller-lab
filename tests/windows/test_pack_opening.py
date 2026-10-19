@@ -489,3 +489,43 @@ class LateSparkRewardTest(unittest.TestCase):
         self.assertEqual((result.status, result.batches, result.packs_before), ("DONE", 2, 22))
         self.assertEqual(saved, [1, 2])
         self.assertEqual(keys, [(ESC_SCAN, "result"), (SPACE_SCAN, "reward"), (ESC_SCAN, "result")])
+
+    def test_packs_gone_without_a_result_page_are_not_reported_clean(self):
+        clock = Clock()
+        state = {"count": 22, "maxed": False, "hover": False, "down": None}
+
+        def read(_frame):
+            if state["maxed"] and state["hover"] and state["down"] is not None and clock() - state["down"] >= 0.4:
+                state.update(count=0, maxed=False, hover=False, down=None)  # straight back, no rewards page
+            return (token("开启组合包", (8, 4, 70, 18)), token(str(state["count"]), (10, 20, 40, 55)),
+                    token("重置", (40, 72, 70, 88)), token("开启 1 个", (90, 72, 140, 88)),
+                    token("最高", (150, 70, 190, 90)))
+
+        class Game:
+            def grab(self):
+                return np.zeros((100, 200, 3), np.uint8)
+
+            def read_with_boxes(self, frame):
+                return read(frame)
+
+        class Input:
+            def click(self, x, y):
+                state["maxed"] = state["maxed"] or (x, y) == (170, 80)
+
+            def move_to(self, x, y):
+                state["hover"] = (x, y) == (115, 80)
+
+            def mouse_down(self, button="left"):
+                state["down"] = clock()
+
+            def mouse_up(self, button="left"):
+                state["down"] = None
+
+            def release_all(self):
+                state["down"] = None
+
+        game = Game()
+        result = PackOpener(game, game, Input(), Guard(), save_frame=lambda *_args: True,
+                            log=lambda *args, **kwargs: None, clock=clock, sleep=clock.sleep,
+                            limits=PackLimits(page_s=5, hold_s=2, session_s=60)).run()
+        self.assertEqual((result.status, result.reason, result.heirloom), ("FAILED", "RESULT_NOT_SEEN", False))

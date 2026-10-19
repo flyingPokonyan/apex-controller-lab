@@ -223,6 +223,8 @@ class PackOpener:
         self.maxed = False
         self.presses = 0
         self.reward_presses = 0
+        # The count when the open button was last held, until its result page shows.
+        self.count_at_press: int | None = None
         self.is_current, self.clock, self.sleep = is_current, clock, sleep
         self.limits = limits or PackLimits()
         self.frame = None
@@ -416,7 +418,9 @@ class PackOpener:
                 page = self._look()
                 if page == "blocked":
                     return self.blocked or "FOREGROUND_LOST"
-                if page != "select" and self.clock() - started >= self.limits.minimum_hold_s:
+                left = select_count(self.tokens, self.frame.shape[1], self.frame.shape[0]) if page == "select" else None
+                fewer = left is not None and self.count_at_press is not None and left < self.count_at_press
+                if (page != "select" or fewer) and self.clock() - started >= self.limits.minimum_hold_s:
                     self.log("PACK_HOLD_RELEASED", heldMs=round((self.clock() - started) * 1000), page=page)
                     return "opened"
             return "HOLD_TIMEOUT"
@@ -487,7 +491,7 @@ class PackOpener:
                     return self._failed(self._reason("RESULT_TIMEOUT"))
                 self.heirloom = self.heirloom or red
                 self.batches += 1
-                self.maxed, self.presses = False, 0
+                self.maxed, self.presses, self.count_at_press = False, 0, None
                 if not self.save_frame(self.frame, self.batches, red):
                     return self._failed("SCREENSHOT_FAILED")
                 self._key(ESC_SCAN, "result-back")
@@ -496,6 +500,9 @@ class PackOpener:
             count = select_count(self.tokens, self.frame.shape[1], self.frame.shape[0])
             if self.packs_before is None:
                 self.packs_before = count
+            if self.count_at_press is not None and count is not None and count < self.count_at_press:
+                # Packs went but their rewards were never seen: a red cannot be ruled out.
+                return self._failed("RESULT_NOT_SEEN")
             if count == 0:
                 page = self._wait({"reward"}, REWARD_GRACE_S)
                 if page is None:
@@ -518,6 +525,7 @@ class PackOpener:
             if self.presses >= PRESS_ATTEMPTS:
                 return self._failed("HOLD_NO_EFFECT")
             self.presses += 1
+            self.count_at_press = count
             outcome = self._press(point, "open-hold", count=count, attempt=self.presses)
             if outcome != "opened":
                 return self._failed(outcome)
