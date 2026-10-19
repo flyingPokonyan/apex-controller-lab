@@ -9,7 +9,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "windows"))
 from apex_automation.ocr_obstacles import OcrToken
 from apex_automation.pack_opening import (
     ESC_SCAN, SPACE_SCAN, PackLimits, PackOpener, classify, grid_settled, heirloom_visible,
-    open_button, select_count,
+    open_point, select_count,
 )
 
 
@@ -60,7 +60,8 @@ class World:
         return self.read(frame)
 
     def read(self, _frame):
-        if self.phase == "hold" and self.sender.held and self.clock() - self.sender.down_at >= 0.4:
+        if (self.phase == "select" and self.maxed and self.sender.held
+                and self.sender.hovering and self.clock() - self.sender.down_at >= 0.4):
             self.phase = "result"
         return {
             "lobby": (token("APEX", (160, 68, 180, 76)), token("组合包", (160, 78, 190, 90))),
@@ -73,10 +74,10 @@ class World:
                 token("开启组合包", (8, 4, 70, 18)),
                 token("22", (10, 20, 40, 55)),
                 token("升级22个" if self.maxed else "升级1个", (80, 50, 130, 68)),
-                token("开启 22 个" if self.maxed else "开启 1 个", (90, 72, 140, 88)),
+                token("按住打开" if self.sender.hovering else ("开启 22 个" if self.maxed else "开启 1 个"),
+                      (90, 72, 140, 88)),
                 token("最高", (150, 70, 190, 90)),
             ) + ((token("11个超额组合包打开时不适用于火花奖励计数器", (60, 92, 160, 99)),) if self.maxed else ()),
-            "hold": (token("按住打开", (80, 60, 140, 80)),),
             "result": (token("组合包奖励", (8, 8, 80, 24)),),
             "reward": (token("已获得奖励", (40, 10, 140, 30)),),
             "empty": (
@@ -92,6 +93,7 @@ class Sender:
         self.world = world
         self.events = []
         self.held = False
+        self.hovering = False
         self.down_at = None
         self.rewarded = False
         world.sender = self
@@ -104,11 +106,12 @@ class Sender:
             self.world.phase = "select"
         elif self.world.phase == "select" and (x, y) == (170, 80):
             self.world.maxed = True
-        elif self.world.phase == "select" and (x, y) == (115, 80):
-            self.world.phase = "hold"
+        # A click parks the pointer in the middle of the screen.
+        self.hovering = False
 
     def move_to(self, x, y):
-        self.events.append(("move", x, y))
+        self.events.append(("move", self.world.phase, x, y))
+        self.hovering = self.world.phase == "select" and (x, y) == (115, 80)
 
     def mouse_down(self, button="left"):
         self.held = True
@@ -184,8 +187,9 @@ class PackOpeningTest(unittest.TestCase):
         self.assertIn(("click", "lobby", 175, 79), sender.events)
         self.assertIn(("click", "intro", 100, 87), sender.events)
         self.assertIn(("click", "select", 170, 80), sender.events)
-        self.assertIn(("click", "select", 115, 80), sender.events)
-        self.assertFalse(any(event[0] == "click" and event[2:] == (105, 59) for event in sender.events))
+        self.assertIn(("move", "select", 115, 80), sender.events)
+        # The open button is held, never clicked, and 升级22个 is never touched.
+        self.assertFalse(any(event[0] == "click" and event[2:] in {(115, 80), (105, 59)} for event in sender.events))
         self.assertIn(("key", ESC_SCAN, "result"), sender.events)
         self.assertIn(("key", SPACE_SCAN, "reward"), sender.events)
         self.assertFalse(sender.held)
@@ -412,5 +416,7 @@ class RealPageTokensTest(unittest.TestCase):
                   token("11个超额组合包打开时不适用于火花奖励计数器", (1229, 1343, 1784, 1381)))
         self.assertEqual(classify(tokens), "select")
         self.assertEqual(select_count(tokens, 2560, 1440), 21)
-        button, amount = open_button(tokens)
-        self.assertEqual((button.normalized, amount), ("开启21个", 21))
+        self.assertEqual(open_point(tokens), (1505, 1262))
+        # Runner 1 read nothing of the bold 开启21个; the row still places it.
+        without = tuple(item for item in tokens if item.normalized != "开启21个")
+        self.assertEqual(open_point(without + (token("重置", (877, 1234, 968, 1289)),)), (1506, 1262))

@@ -18,13 +18,15 @@ from .safety import EmergencyStop, ForegroundLost
 
 ESC_SCAN = 1
 SPACE_SCAN = 57
-PACK_PAGES = frozenset({"intro", "select", "reward", "result", "hold"})
+PACK_PAGES = frozenset({"intro", "select", "reward", "result"})
 # Coming back from another window, a fullscreen game is still switching
 # display modes: the first frames can be the old desktop and a click can be lost.
 FOCUS_SETTLE_S = 1.5
 FRESH_FRAME_S = 1.0
 CARD_ATTEMPTS = 3
 CARD_WAIT_S = 6.0
+# A hold that never leaves the open page is retried this often per batch.
+PRESS_ATTEMPTS = 3
 
 
 class _Covered(Exception):
@@ -113,9 +115,8 @@ def classify(tokens) -> str:
         return "result"
     if any("已获得奖励" in name for name in names):
         return "reward"
-    if any("按住打开" in name for name in names):
-        return "hold"
-    # Before intro: after 最高 the open page adds a footnote ending in
+    # The open page, whether its centre button reads 开启N个 or, under the
+    # pointer, 按住打开. Before intro: after 最高 it adds a footnote ending in
     # 火花奖励计数器 ("11个超额组合包打开时不适用于火花奖励计数器").
     if any("开启组合包" in name for name in names) and any(name == "最高" for name in names):
         return "select"
@@ -124,13 +125,23 @@ def classify(tokens) -> str:
     return "unknown"
 
 
-def open_button(tokens):
-    """The centre 开启N个 button; its N starts at 1 and 最高 raises it."""
+def open_point(tokens) -> tuple[int, int] | None:
+    """Centre of the open button: its own text, else midway between 重置 and 最高.
+
+    Its bold count is the text OCR misses most (Runner 1 read none of
+    开启21个 on 10-19), and the button always sits centred in that row.
+    """
     for token in tokens:
-        match = OPEN_BUTTON.fullmatch(token.normalized)
-        if token.roi and match:
-            return token, int(match.group(1))
-    return None
+        if token.roi and (OPEN_BUTTON.fullmatch(token.normalized) or "按住打开" in token.normalized):
+            return _center(token)
+    reset = next((token for token in tokens if token.roi and token.normalized == "重置"), None)
+    highest = next((token for token in tokens if token.roi and token.normalized == "最高"), None)
+    if reset is None or highest is None:
+        return None
+    (reset_x, reset_y), (highest_x, highest_y) = _center(reset), _center(highest)
+    if reset_x >= highest_x or abs(reset_y - highest_y) > highest.roi[3] - highest.roi[1]:
+        return None
+    return (reset_x + highest_x) // 2, (reset_y + highest_y) // 2
 
 
 def _center(token) -> tuple[int, int]:
@@ -204,6 +215,7 @@ class PackOpener:
         self.window_owner = window_owner
         self.covered_by: str | None = None
         self.maxed = False
+        self.presses = 0
         self.is_current, self.clock, self.sleep = is_current, clock, sleep
         self.limits = limits or PackLimits()
         self.frame = None
@@ -375,20 +387,19 @@ class PackOpener:
                 return self.blocked
         return "CARD_NO_EFFECT"
 
-    def _hold(self) -> str:
-        page = self._wait({"hold", "result"}, self.limits.animation_s)
-        if page == "result":
-            return "opened"
-        if page != "hold":
-            return self._reason("HOLD_PAGE_TIMEOUT")
-        button = next((token for token in self.tokens if token.roi and "按住打开" in token.normalized), None)
-        if button is None:
-            return "HOLD_BUTTON_NOT_FOUND"
-        x, y = _center(button)
-        if self._covered(x, y, "hold-open"):
+    def _press(self, point, target: str, **details) -> str:
+        """Hold the left button on the open button until the open page goes away.
+
+        The button is press-and-hold: under the pointer it turns from 开启N个
+        into 按住打开, and a click alone opens nothing.
+        """
+        x, y = int(point[0]), int(point[1])
+        if self._covered(x, y, target):
             return "CLICK_COVERED"
-        self.log("PACK_INPUT", action="hold", target="hold-open", x=x, y=y)
         self.sender.move_to(x, y)
+        self.sleep(0.3)
+        hovered = self._look() == "select" and any("按住打开" in token.normalized for token in self.tokens)
+        self.log("PACK_INPUT", action="hold", target=target, x=x, y=y, hovered=hovered, **details)
         self.sender.mouse_down()
         try:
             started = self.clock()
@@ -398,12 +409,19 @@ class PackOpener:
                 page = self._look()
                 if page == "blocked":
                     return self.blocked or "FOREGROUND_LOST"
-                if page != "hold" and self.clock() - started >= self.limits.minimum_hold_s:
+                if page != "select" and self.clock() - started >= self.limits.minimum_hold_s:
                     self.log("PACK_HOLD_RELEASED", heldMs=round((self.clock() - started) * 1000), page=page)
                     return "opened"
             return "HOLD_TIMEOUT"
         finally:
             self.sender.mouse_up()
+
+    def _lobby_empty(self) -> bool:
+        """Back in the lobby with the pack card reading 0, after at least one batch."""
+        if self.frame is None or not self.batches:
+            return False
+        reading = ApexPackReader(self.ocr).read(self.frame)
+        return reading.status == "OK" and reading.count == 0
 
     def _grid_sample(self) -> np.ndarray:
         height, width = self.frame.shape[:2]
@@ -440,6 +458,8 @@ class PackOpener:
                 remaining = deadline - self.clock()
                 page = self._wait(PACK_PAGES, min(self.limits.page_s, remaining))
             if page is None:
+                if self._lobby_empty():
+                    return self._done()
                 return self._failed(self._reason("RESULT_TIMEOUT" if self.batches else "PAGE_UNKNOWN"))
             if page == "intro":
                 if not self._click_token(lambda token: "开启组合包" in token.normalized, "intro-open", lowest=True):
@@ -450,17 +470,13 @@ class PackOpener:
                 self._key(SPACE_SCAN, "reward-continue")
                 page = None
                 continue
-            if page == "hold":
-                outcome = self._hold()
-                if outcome != "opened":
-                    return self._failed(outcome)
-                page = "result"
             if page == "result":
                 red = self._stable_result(min(deadline, self.clock() + self.limits.animation_s))
                 if red is None:
                     return self._failed(self._reason("RESULT_TIMEOUT"))
                 self.heirloom = self.heirloom or red
                 self.batches += 1
+                self.maxed, self.presses = False, 0
                 if not self.save_frame(self.frame, self.batches, red):
                     return self._failed("SCREENSHOT_FAILED")
                 self._key(ESC_SCAN, "result-back")
@@ -475,10 +491,6 @@ class PackOpener:
                 return self._failed("COUNT_UNREADABLE")
             if self.batches >= self.limits.max_batches:
                 return self._failed("BATCH_LIMIT")
-            found = open_button(self.tokens)
-            if found is None:
-                return self._failed("OPEN_BUTTON_NOT_FOUND")
-            button, amount = found
             if not self.maxed:
                 # Never the 升级N个 button above it, which spends Legend Tokens.
                 if not self._click_token(lambda token: token.normalized == "最高", "select-max", count=count):
@@ -486,10 +498,20 @@ class PackOpener:
                 self.maxed = True
                 page = None
                 continue
-            self.maxed = False
-            if not self._click(_center(button), "open-selected", amount=amount, count=count):
-                return self._failed("CLICK_COVERED")
-            page = "hold"
+            point = open_point(self.tokens)
+            if point is None:
+                return self._failed("OPEN_BUTTON_NOT_FOUND")
+            if self.presses >= PRESS_ATTEMPTS:
+                return self._failed("HOLD_NO_EFFECT")
+            self.presses += 1
+            outcome = self._press(point, "open-hold", count=count, attempt=self.presses)
+            if outcome != "opened":
+                return self._failed(outcome)
+            # The opening animation, then the rewards; back on the open page
+            # means the hold ended too early and is pressed again.
+            page = self._wait({"result", "select", "reward"}, self.limits.animation_s)
+            if page is None:
+                return self._failed(self._reason("RESULT_TIMEOUT"))
         return self._failed("SESSION_TIMEOUT")
 
 
