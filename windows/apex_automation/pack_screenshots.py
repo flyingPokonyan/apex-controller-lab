@@ -27,7 +27,7 @@ def _pending(root: Path):
     return [path for _, path in sorted(found)]
 
 
-def _encode(frame) -> bytes | None:
+def encode_jpeg(frame) -> bytes | None:
     import cv2
     image = None
     for quality in (85, 70, 55, 40, 30):
@@ -39,7 +39,7 @@ def _encode(frame) -> bytes | None:
 
 
 def store_result(run_dir: Path, runs_root: Path, frame, batch: int, heirloom: bool, lease_id: str) -> bool:
-    image = _encode(frame)
+    image = encode_jpeg(frame)
     if image is None:
         return False
     folder = Path(run_dir) / "pack-results"

@@ -1,9 +1,12 @@
 from __future__ import annotations
 
 import argparse
+import base64
 import hashlib
 import os
 from pathlib import Path
+import re
+import secrets
 import sys
 import time
 from typing import Callable
@@ -1376,18 +1379,77 @@ def run_start(
     return 0
 
 
-def run_pack_open_test(config_path: Path, *, countdown: int, look_s: float | None) -> int:
-    """Run pack opening on whatever account is signed in by hand, without Forge.
+def _pack_test_uploader():
+    """Send test frames through the EA screenshot channel Forge already accepts.
 
-    Nothing is claimed, reported or uploaded; result frames stay in the run
-    folder. With --look it only reads the screen while a person clicks through
-    the pages, and sends no input at all.
+    No lease is involved; Forge keeps them for a day under the Runner's
+    screenshots, so a hands-on test needs no file copying between machines.
+    """
+    from urllib.parse import urlsplit, urlunsplit
+    import numpy as np
+    from .pack_screenshots import encode_jpeg
+    from .reporter import UrllibReportTransport
+    try:
+        settings = load_runner_settings(
+            explicit_path=None,
+            default_path=REPOSITORY_ROOT / "windows" / "account-cycle.private.json",
+            managed=True,
+        )
+    except Exception as error:
+        print(f"没读到托管配置，截图只保存在本机：{error}")
+        return None
+    if not settings.report_url or not settings.report_token:
+        print("托管配置里没有上报地址，截图只保存在本机。")
+        return None
+    parsed = urlsplit(settings.report_url)
+    url = urlunsplit(parsed._replace(
+        path=parsed.path.rsplit("/", 1)[0] + "/ea-evidence", query="", fragment=""))
+    transport = UrllibReportTransport()
+
+    def upload(frame, step: str) -> bool:
+        image = encode_jpeg(np.ascontiguousarray(frame[:, :, :3]))
+        if image is None:
+            return False
+        payload = {
+            "schemaVersion": 1,
+            "deviceId": settings.device_id,
+            "eventId": secrets.token_hex(32),
+            "leaseId": None,
+            "step": step,
+            "page": "UNKNOWN",
+            "details": {},
+            "capturedAt": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+            "sha256": hashlib.sha256(image).hexdigest(),
+            "width": int(frame.shape[1]),
+            "height": int(frame.shape[0]),
+            "imageBase64": base64.b64encode(image).decode("ascii"),
+        }
+        try:
+            status, response, _headers = transport.send(url, settings.report_token, payload, 30)
+        except Exception as error:
+            print(f"  上报失败：{type(error).__name__}")
+            return False
+        if status != 200:
+            print(f"  上报失败：HTTP {status} {(response.get('error') or {}).get('code')}")
+            return False
+        return True
+
+    return upload
+
+
+def run_pack_open_test(config_path: Path, *, countdown: int, look_s: float | None) -> int:
+    """Run pack opening on whatever account is signed in by hand.
+
+    Nothing is claimed or reported as a game run. Every new page and each
+    batch result is saved in the run folder and also uploaded as a Runner
+    screenshot (step names starting with pack-). With --look it only reads
+    the screen while a person clicks through the pages, and sends no input.
     """
     if sys.platform != "win32":
         print("pack-open-test 只能在 Windows 上运行。", file=sys.stderr)
         return 2
 
-    from .pack_opening import classify, heirloom_visible, open_account_packs, select_count
+    from .pack_opening import PackOpener, classify, heirloom_visible, select_count
 
     if config_path.expanduser().resolve() == DEFAULT_CONFIG_PATH.resolve():
         config_path = PLAY_CONFIG_PATH
@@ -1409,23 +1471,50 @@ def run_pack_open_test(config_path: Path, *, countdown: int, look_s: float | Non
     recorder = RunRecorder(runs_root, "pack-open-test")
     folder = recorder.run_dir / "pack-results"
     folder.mkdir(parents=True, exist_ok=True)
+    upload = _pack_test_uploader()
+    stamp = time.strftime("%H%M")
+    counter = {"frames": 0, "uploads": 0}
 
-    def save(frame, name: str) -> bool:
+    def keep(frame, name: str) -> bool:
+        """Save locally, then upload the first 30 as pack-<time>-<name>."""
         import cv2
+        counter["frames"] += 1
+        if counter["frames"] > 80:
+            return True
         path = folder / f"{name}.jpg"
         ok = bool(cv2.imwrite(str(path), frame[:, :, :3]))
-        print(f"  截图：{path}" if ok else f"  截图保存失败：{path}")
+        sent = ""
+        if upload is not None and counter["uploads"] < 30:
+            step = re.sub(r"[^a-z0-9_-]", "-", f"pack-{stamp}-{name}".lower())[:96]
+            if upload(frame, step):
+                counter["uploads"] += 1
+                sent = "，已上报"
+        print(f"  截图 {path.name}{sent}" if ok else f"  截图保存失败：{path}")
         return ok
 
     def describe(frame, tokens) -> str:
         page = classify(tokens)
         if page == "select":
-            return f"{page} 数量={select_count(tokens, frame.shape[1], frame.shape[0])}"
+            count = select_count(tokens, frame.shape[1], frame.shape[0])
+            return f"select-n{'none' if count is None else count}"
         if page == "result":
-            return f"{page} 红={'是' if heirloom_visible(frame) else '否'}"
+            return f"result-red{int(heirloom_visible(frame))}"
         return page
 
-    print("开包测试：不领号、不上报，只操作当前已登录的账号。")
+    class TracingOpener(PackOpener):
+        traced = None
+
+        def _look(self):
+            page = super()._look()
+            if self.frame is not None:
+                text = describe(self.frame, self.tokens)
+                if text != self.traced:
+                    self.traced = text
+                    print(f"{time.strftime('%H:%M:%S')} {text}")
+                    keep(self.frame, f"run-{counter['frames'] + 1:02d}-{text}")
+            return page
+
+    print("开包测试：不领号、不上报游戏运行，只操作当前已登录的账号。")
     print("请先手动登录 EA、进入 Apex 大厅（或组合包页面），然后切回 Apex。按 F8 可随时中止。")
     if look_s is not None:
         print(f"只看模式：{int(look_s)} 秒内你手动点各个页面，这里打印识别结果，不发送任何输入。")
@@ -1447,26 +1536,30 @@ def run_pack_open_test(config_path: Path, *, countdown: int, look_s: float | Non
             if look_s is not None:
                 deadline = time.monotonic() + look_s
                 last = None
-                shots = 0
                 while time.monotonic() < deadline:
                     guard.ensure_not_aborted()
                     frame = source.grab()
                     text = describe(frame, tuple(ocr.read_with_boxes(frame)))
                     if text != last:
-                        shots += 1
                         print(f"{time.strftime('%H:%M:%S')} {text}")
-                        save(frame, f"look-{shots:02d}-{text.split()[0]}")
+                        keep(frame, f"look-{counter['frames'] + 1:02d}-{text}")
                         last = text
                     time.sleep(1)
                 recorder.finish("PLAYED", mode="look")
                 return 0
 
-            result = open_account_packs(
+            opener = TracingOpener(
                 source, ocr, sender, guard,
-                save_frame=lambda frame, batch, heirloom: save(
-                    frame, f"batch-{batch:02d}{'-red' if heirloom else ''}"),
+                save_frame=lambda frame, batch, heirloom: keep(
+                    frame, f"batch-{batch:02d}-red{int(heirloom)}"),
                 log=recorder.log,
             )
+            result = opener.run()
+            summary = (f"end-{result.status}-red{int(result.heirloom)}-b{result.batches}"
+                       f"-n{'none' if result.packs_before is None else result.packs_before}"
+                       + (f"-{result.reason}" if result.reason else ""))
+            if opener.frame is not None:
+                keep(opener.frame, summary)
             recorder.log("PACK_OPENING", **result.as_payload())
             recorder.finish("PLAYED", **result.as_payload())
             print(
