@@ -9,7 +9,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "windows"))
 from apex_automation.ocr_obstacles import OcrToken
 from apex_automation.pack_opening import (
     ESC_SCAN, SPACE_SCAN, PackLimits, PackOpener, classify, grid_settled, heirloom_visible,
-    open_point, select_count,
+    open_point, select_count, space_continue,
 )
 
 
@@ -404,6 +404,148 @@ class LobbyEntryTest(unittest.TestCase):
         opener.guard.expected = {"r5apex.exe"}
         self.assertTrue(opener._click((2253, 1100), "lobby-card"))
         self.assertEqual(sender.clicks, [(2253, 1100)])
+
+
+class RewardFollowUpTest(unittest.TestCase):
+    """10-20: both live runs saved one result, then failed RESULT_TIMEOUT 26s later.
+
+    Space on the spark reward either plays another open animation or returns to
+    the lobby with the granted pack on the card. The page timeout is 20s and
+    the lobby card is not a pack page, so both looked the same.
+    """
+
+    def test_a_space_prompt_without_the_title_is_still_the_reward(self):
+        self.assertTrue(space_continue(["space继续"]))
+        self.assertEqual(classify((token("SPACE 继续", (80, 90, 160, 110)),)), "reward")
+        self.assertEqual(classify((token("组合包奖励", (8, 8, 80, 24)), token("SPACE 继续", (8, 90, 40, 100)))), "result")
+
+    def test_the_open_animation_after_the_reward_is_waited_out(self):
+        clock = Clock()
+        state = {"page": "select", "count": 22, "maxed": False, "hover": False, "down": None,
+                 "claimed": False, "result_at": None}
+
+        def read(_frame):
+            if state["page"] == "select" and state["maxed"] and state["hover"] and state["down"] is not None \
+                    and clock() - state["down"] >= 0.4:
+                state.update(page="result", count=0)
+            if state["page"] == "opening" and state["result_at"] is not None and clock() >= state["result_at"]:
+                state["page"] = "result"
+            if state["page"] == "result":
+                return (token("组合包奖励", (8, 8, 80, 24)),)
+            if state["page"] == "reward":
+                return (token("已获得奖励", (40, 10, 140, 30)), token("SPACE 继续", (80, 90, 160, 110)))
+            if state["page"] == "opening":
+                return ()
+            return (token("开启组合包", (8, 4, 70, 18)), token(str(state["count"]), (10, 20, 40, 55)),
+                    token("重置", (40, 72, 70, 88)),
+                    token("按住打开" if state["hover"] else "开启1个", (90, 72, 140, 88)),
+                    token("最高", (150, 70, 190, 90)))
+
+        class Game:
+            def grab(self):
+                return np.zeros((100, 200, 3), np.uint8)
+
+            def read_with_boxes(self, frame):
+                return read(frame)
+
+        class Input:
+            def click(self, x, y):
+                if (x, y) == (170, 80):
+                    state["maxed"] = True
+
+            def move_to(self, x, y):
+                state["hover"] = (x, y) == (115, 80)
+
+            def mouse_down(self, button="left"):
+                state["down"] = clock()
+
+            def mouse_up(self, button="left"):
+                state["down"] = None
+
+            def tap_scan_code(self, code, _duration):
+                if code == ESC_SCAN and state["page"] == "result":
+                    if not state["claimed"]:
+                        state.update(page="reward", claimed=True)
+                    else:
+                        state.update(page="select", count=0)
+                elif code == SPACE_SCAN and state["page"] == "reward":
+                    # Longer than page_s, shorter than the open animation budget.
+                    state.update(page="opening", result_at=clock() + 3)
+
+            def release_all(self):
+                state["down"] = None
+
+        result = PackOpener(
+            Game(), Game(), Input(), Guard(), save_frame=lambda *_args: True,
+            log=lambda *args, **kwargs: None, clock=clock, sleep=clock.sleep,
+            limits=PackLimits(page_s=1, animation_s=8, hold_s=2, session_s=30),
+        ).run()
+        self.assertEqual((result.status, result.reason, result.batches), ("DONE", None, 2))
+
+    def test_a_pack_granted_back_on_the_lobby_card_is_opened(self):
+        clock = Clock()
+        card = (token("1", (2092, 1054, 2210, 1143)), token("APEX", (2201, 1058, 2301, 1100)),
+                token("组合包", (2198, 1094, 2308, 1143)))
+        state = {"page": "reward", "count": 1}
+
+        def read(_frame):
+            if state["page"] == "result":
+                return (token("组合包奖励", (8, 8, 80, 24)),)
+            if state["page"] == "reward":
+                return (token("已获得奖励", (40, 10, 140, 30)),)
+            if state["page"] == "lobby":
+                return card
+            return (token("开启组合包", (80, 160, 360, 240)),
+                    token(str(state["count"]), (400, 400, 520, 560)),
+                    token("重置", (40, 72, 70, 88)),
+                    token("按住打开" if state.get("hover") else "开启1个", (90, 72, 140, 88)),
+                    token("最高", (150, 70, 190, 90)))
+
+        class Game:
+            def grab(self):
+                return np.zeros((1440, 2560, 3), np.uint8)
+
+            def read_with_boxes(self, frame):
+                return read(frame)
+
+        clicks = []
+
+        class Input:
+            def click(self, x, y):
+                clicks.append((x, y))
+                if state["page"] == "lobby":
+                    state["page"] = "select"
+                elif state["page"] == "select":
+                    state["maxed"] = True
+
+            def move_to(self, x, y):
+                state["hover"] = state["page"] == "select" and (x, y) == (115, 80)
+
+            def mouse_down(self, button="left"):
+                state["down"] = clock()
+                if state.get("hover"):
+                    state["page"] = "result"
+
+            def mouse_up(self, button="left"):
+                state["down"] = None
+
+            def tap_scan_code(self, code, _duration):
+                if code == SPACE_SCAN and state["page"] == "reward":
+                    state["page"] = "lobby"
+                elif code == ESC_SCAN and state["page"] == "result":
+                    state.update(page="select", count=0)
+
+            def release_all(self):
+                state["down"] = None
+
+        # Start already on the reward page, as leave_result would have returned it.
+        result = PackOpener(
+            Game(), Game(), Input(), Guard(), save_frame=lambda *_args: True,
+            log=lambda *args, **kwargs: None, clock=clock, sleep=clock.sleep,
+            limits=PackLimits(page_s=2, animation_s=5, hold_s=2, session_s=30),
+        ).run()
+        self.assertEqual((result.status, result.reason, result.batches, result.packs_before), ("DONE", None, 1, 1))
+        self.assertTrue(any(x > 2000 for x, _y in clicks))
 
 
 class RealPageTokensTest(unittest.TestCase):

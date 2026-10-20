@@ -12,7 +12,7 @@ from typing import Callable
 
 import numpy as np
 
-from .apex_packs import ApexPackReader, pack_region
+from .apex_packs import ApexPackReader, PackReading, pack_region
 from .safety import EmergencyStop, ForegroundLost
 
 
@@ -115,11 +115,19 @@ def grid_settled(previous: np.ndarray, current: np.ndarray) -> bool:
 OPEN_BUTTON = re.compile(r"开启([0-9]{1,3})个")
 
 
+def space_continue(names) -> bool:
+    """A follow-up 'SPACE 继续' whose title the OCR missed.
+
+    Normalization drops the space, so the live prompt is one token, space继续.
+    """
+    return any("继续" in name and ("space" in name or "空格" in name) for name in names)
+
+
 def classify(tokens) -> str:
     names = [token.normalized for token in tokens]
     if any("组合包奖励" in name for name in names):
         return "result"
-    if any("已获得奖励" in name for name in names):
+    if any("已获得奖励" in name for name in names) or space_continue(names):
         return "reward"
     # The open page, whether its centre button reads 开启N个 or, under the
     # pointer, 按住打开. Before intro: after 最高 it adds a footnote ending in
@@ -234,6 +242,9 @@ class PackOpener:
         self.packs_before = None
         # Why the last look saw nothing; it names a timeout better than the page did.
         self.blocked: str | None = None
+        # Space on the spark reward can play another open animation, or drop
+        # back to the lobby with the granted pack on the card.
+        self.after_reward = False
 
     def run(self) -> PackOpeningResult:
         try:
@@ -333,6 +344,54 @@ class PackOpener:
             if self.clock() >= deadline:
                 return None
             self.sleep(0.2)
+
+    def _lobby_reading(self) -> PackReading:
+        if self.frame is None:
+            return PackReading(None, 0, "NOT_VISIBLE")
+        return ApexPackReader(self.ocr).read(self.frame)
+
+    def _wait_known(self, timeout: float) -> str | None:
+        """A pack page, or the lobby when its pack card reads a number.
+
+        The card text is too small for the full-frame read that classify uses,
+        so a return to the lobby otherwise looks like an unknown page.
+        """
+        deadline = self.clock() + timeout
+        while True:
+            page = self._look()
+            if page in PACK_PAGES:
+                return page
+            if page != "blocked" and self._lobby_reading().status == "OK":
+                return "lobby"
+            if self.clock() >= deadline:
+                return None
+            self.sleep(0.2)
+
+    def _resume_from_lobby(self) -> str | None:
+        """Open packs still on the lobby card. None means the card reads 0."""
+        deadline = self.clock() + REWARD_GRACE_S
+        while True:
+            reading = self._lobby_reading()
+            if reading.status == "OK" and reading.count > 0:
+                return self._enter_from_lobby()
+            page = self._look()
+            if page in PACK_PAGES:
+                return page
+            reading = self._lobby_reading()
+            if page != "blocked" and reading.status == "OK" and reading.count > 0:
+                return self._enter_from_lobby()
+            if self.clock() >= deadline:
+                if reading.status == "OK" and reading.count == 0:
+                    return None
+                self._log_unread()
+                return self._reason("RESULT_TIMEOUT" if self.batches else "PAGE_UNKNOWN")
+            self.sleep(0.2)
+
+    def _log_unread(self) -> None:
+        if not self.log:
+            return
+        names = [token.normalized for token in self.tokens if token.normalized][:8]
+        self.log("PACK_PAGE_UNREAD", names=names)
 
     def _covered(self, x: int, y: int, target: str) -> bool:
         """True when another program's window is on top at this point."""
@@ -443,6 +502,10 @@ class PackOpener:
             page = self._look()
             if page in PACK_PAGES and page != "result":
                 return page
+            # Esc can leave the pack UI entirely. The lobby card is not a pack
+            # page to classify(), and the granted pack is still sitting on it.
+            if page not in {"result", "blocked"} and self._lobby_reading().status == "OK":
+                return "lobby"
             if page == "result" and self.clock() - pressed_at >= 3 and presses < 3:
                 self._key(ESC_SCAN, "result-back")
                 pressed_at, presses = self.clock(), presses + 1
@@ -451,9 +514,9 @@ class PackOpener:
 
     def _lobby_empty(self) -> bool:
         """Back in the lobby with the pack card reading 0, after at least one batch."""
-        if self.frame is None or not self.batches:
+        if not self.batches:
             return False
-        reading = ApexPackReader(self.ocr).read(self.frame)
+        reading = self._lobby_reading()
         return reading.status == "OK" and reading.count == 0
 
     def _grid_sample(self) -> np.ndarray:
@@ -488,12 +551,23 @@ class PackOpener:
                 return self._failed(page)
         while self.clock() < deadline:
             if page is None:
-                remaining = deadline - self.clock()
-                page = self._wait(PACK_PAGES, min(self.limits.page_s, remaining))
+                # Claiming the spark reward can open another pack. That animation
+                # is the same length as a normal batch; the short page timeout
+                # expired while it was still playing (both 10-20 runs, 26s).
+                timeout = self.limits.animation_s if self.after_reward else self.limits.page_s
+                self.after_reward = False
+                page = self._wait_known(min(timeout, deadline - self.clock()))
+            if page == "lobby":
+                page = self._resume_from_lobby()
+                if page is None:
+                    return self._done()
             if page is None:
                 if self._lobby_empty():
                     return self._done()
+                self._log_unread()
                 return self._failed(self._reason("RESULT_TIMEOUT" if self.batches else "PAGE_UNKNOWN"))
+            if page not in PACK_PAGES:
+                return self._failed(page)
             if page == "intro":
                 if not self._click_token(lambda token: "开启组合包" in token.normalized, "intro-open", lowest=True):
                     return self._failed("INTRO_BUTTON_NOT_FOUND")
@@ -505,6 +579,7 @@ class PackOpener:
                 self.reward_presses += 1
                 self.sleep(REWARD_SETTLE_S)
                 self._key(SPACE_SCAN, "reward-continue")
+                self.after_reward = True
                 page = None
                 continue
             if page == "result":
