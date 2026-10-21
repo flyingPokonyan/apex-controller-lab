@@ -60,7 +60,10 @@ from .ocr_obstacles import (
 )
 from .ocr_states import OcrStateDetector
 from .pilot import producible_states
-from .play_session import PlaySessionRunner, SessionIdentity
+from .play_session import PlaylistRules, PlaySessionRunner, SessionIdentity
+from .playlists import (
+    TRIOS, TRIOS_TITLE, trios_capabilities, trios_game_states, trios_guard_states, trios_overlays,
+)
 from .progression_policy import ContinuePlayPolicy
 from .recorder import RunRecorder
 from .orchestration_state import AtomicCheckpointStore
@@ -483,25 +486,22 @@ def _tap_times(sender: Win32InputSender, scan_code: int, times: int) -> None:
         time.sleep(0.35)
 
 
-def _build_play_session_runner(
+def _play_rules(
     config: RunnerConfig,
-    settings: RunnerSettings,
-    runs_root: Path,
-) -> tuple[PlaySessionRunner, CapabilitySet]:
-    if not bool(config.game_states.get("enabled", False)):
-        raise ValueError("这个画像没有开启 gameStates，能力集无从判断画面")
-    if not config.capability_set:
-        raise ValueError("这个画像没有配置 capabilitySet，没有任何能力可以执行")
-
-    payload = json.loads(
-        _repository_path(config.capability_set).read_text(encoding="utf-8")
-    )
+    ocr_provider: RapidOcrProvider,
+    payload: dict,
+    states_payload: dict,
+    overlay_payload: dict | None,
+    guard_states: list[str] | None = None,
+) -> tuple[CapabilitySet, OcrStateDetector, OcrStateDetector | None]:
+    """One playlist's rules, checked against each other before any lease uses them."""
     capabilities = CapabilitySet.from_payload(payload)
-    ocr_provider = RapidOcrProvider()
-    state_detector = OcrStateDetector.from_path(
-        ocr_provider, _repository_path(config.game_states["rules"])
+    state_detector = OcrStateDetector.from_payload(ocr_provider, states_payload)
+    overlay_detector = (
+        None
+        if overlay_payload is None
+        else OcrStateDetector.from_payload(FullFrameOcrProvider(ocr_provider), overlay_payload)
     )
-    overlay_detector = _build_overlay_detector(config, ocr_provider)
     safety_rules = config.overlay_ocr.get("safetyRules")
     safety_detector = (
         None
@@ -523,7 +523,8 @@ def _build_play_session_runner(
         raise ValueError(f"能力集引用了识别不出的画面：{sorted(unknown)}")
 
     guard_states = {
-        str(value) for value in config.overlay_ocr.get("guardStates", [])
+        str(value)
+        for value in (config.overlay_ocr.get("guardStates", []) if guard_states is None else guard_states)
     }
     invalid_guards = guard_states - state_detector.states
     if invalid_guards:
@@ -643,6 +644,56 @@ def _build_play_session_runner(
                     f"clickText 兜底能力 {capability.id} 不能包含无证据按键"
                 )
 
+    return capabilities, state_detector, overlay_detector
+
+
+def _build_play_session_runner(
+    config: RunnerConfig,
+    settings: RunnerSettings,
+    runs_root: Path,
+) -> tuple[PlaySessionRunner, CapabilitySet]:
+    if not bool(config.game_states.get("enabled", False)):
+        raise ValueError("这个画像没有开启 gameStates，能力集无从判断画面")
+    if not config.capability_set:
+        raise ValueError("这个画像没有配置 capabilitySet，没有任何能力可以执行")
+
+    payload = json.loads(
+        _repository_path(config.capability_set).read_text(encoding="utf-8")
+    )
+    ocr_provider = RapidOcrProvider()
+    states_payload = json.loads(
+        _repository_path(config.game_states["rules"]).read_text(encoding="utf-8")
+    )
+    overlay_payload = None
+    if bool(config.overlay_ocr.get("enabled", False)):
+        if not config.overlay_ocr.get("rules"):
+            raise ValueError("覆盖层 OCR 已启用，但没有配置状态字典")
+        overlay_payload = json.loads(
+            _repository_path(config.overlay_ocr["rules"]).read_text(encoding="utf-8")
+        )
+    capabilities, state_detector, overlay_detector = _play_rules(
+        config, ocr_provider, payload, states_payload, overlay_payload
+    )
+    # The same rules with unranked trios as the target, for leases that ask for it.
+    trios_payload = trios_capabilities(payload)
+    trios = _play_rules(
+        config,
+        ocr_provider,
+        trios_payload,
+        trios_game_states(states_payload),
+        None if overlay_payload is None else trios_overlays(overlay_payload),
+        trios_guard_states([str(state) for state in config.overlay_ocr.get("guardStates", [])]),
+    )
+    playlists = {
+        TRIOS: PlaylistRules(
+            capabilities=trios[0],
+            actions=dict(trios_payload.get("actions", {})),
+            state_detector=trios[1],
+            overlay_detector=trios[2],
+            target_title=TRIOS_TITLE,
+        )
+    }
+
     guard = Win32SafetyGuard(config.environment["foregroundExecutables"])
     sender = Win32InputSender(
         guard,
@@ -664,6 +715,7 @@ def _build_play_session_runner(
             app_version=__version__,
             config_revision=_config_revision(config),
             notify=print,
+            playlists=playlists,
         ),
         capabilities,
     )

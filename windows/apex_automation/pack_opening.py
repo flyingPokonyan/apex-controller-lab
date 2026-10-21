@@ -18,7 +18,11 @@ from .safety import EmergencyStop, ForegroundLost
 
 ESC_SCAN = 1
 SPACE_SCAN = 57
-PACK_PAGES = frozenset({"intro", "select", "reward", "result"})
+PACK_PAGES = frozenset({"intro", "select", "reward", "result", "single"})
+# A single pack opens onto three item stands instead of the reward grid, each
+# with a rarity label. 传家宝 is the red one.
+RARITIES = frozenset({"普通", "稀有", "史诗", "传说", "传家宝"})
+SINGLE_ITEMS = 3
 # Coming back from another window, a fullscreen game is still switching
 # display modes: the first frames can be the old desktop and a click can be lost.
 FOCUS_SETTLE_S = 1.5
@@ -129,6 +133,10 @@ def classify(tokens) -> str:
         return "result"
     if any("已获得奖励" in name for name in names) or space_continue(names):
         return "reward"
+    # One pack on its own (the spark reward's, or an account holding just one):
+    # three item stands above "APEX组合包 剩余数", no 组合包奖励 title.
+    if any("剩余数" in name for name in names):
+        return "single"
     # The open page, whether its centre button reads 开启N个 or, under the
     # pointer, 按住打开. Before intro: after 最高 it adds a footnote ending in
     # 火花奖励计数器 ("11个超额组合包打开时不适用于火花奖励计数器").
@@ -137,6 +145,25 @@ def classify(tokens) -> str:
     if any(name == "火花奖励计数器" for name in names):
         return "intro"
     return "unknown"
+
+
+def single_reading(frame, tokens) -> tuple[int, bool]:
+    """Rarity labels shown on a single-pack page, and whether one of them is red.
+
+    Red is the label text 传家宝 or a red fill behind any rarity label; the
+    orange stands below the items are outside those labels.
+    """
+    labels = [token for token in tokens if token.roi and token.normalized in RARITIES]
+    red = any("传家宝" in token.normalized for token in tokens)
+    if not red and isinstance(frame, np.ndarray) and frame.ndim == 3 and frame.shape[2] >= 3:
+        mask = _red(frame)
+        for token in labels:
+            left, top, right, bottom = token.roi
+            pad_x, pad_y = (right - left) // 2, (bottom - top) // 4
+            crop = mask[max(0, top - pad_y):bottom + pad_y, max(0, left - pad_x):right + pad_x]
+            if crop.size and float(crop.mean()) >= 0.15:
+                red = True
+    return len(labels), red
 
 
 def open_point(tokens) -> tuple[int, int] | None:
@@ -269,7 +296,18 @@ class PackOpener:
             release()
 
     def _failed(self, reason: str) -> PackOpeningResult:
+        if self.batches and self.count_at_press is None and not self.heirloom:
+            # Every pack that went was seen on its result page without red; only
+            # unopened packs can be left. Red is what the opening is for, so a
+            # later step going wrong does not make this a failed opening.
+            if self.log:
+                self.log("PACK_DONE_WITH_LEFTOVER", reason=reason)
+            return PackOpeningResult("DONE", False, self.batches, self.packs_before)
         return PackOpeningResult("FAILED", self.heirloom, self.batches, self.packs_before, reason)
+
+    def _reward_leftover(self, count: int | None) -> bool:
+        """Only the packs the spark reward granted are left; those stay unopened."""
+        return bool(self.batches and self.reward_presses and count and count <= self.reward_presses)
 
     def _reason(self, default: str) -> str:
         return self.blocked or default
@@ -373,19 +411,26 @@ class PackOpener:
         while True:
             reading = self._lobby_reading()
             if reading.status == "OK" and reading.count > 0:
-                return self._enter_from_lobby()
+                return None if self._leave_reward_packs(reading.count) else self._enter_from_lobby()
             page = self._look()
             if page in PACK_PAGES:
                 return page
             reading = self._lobby_reading()
             if page != "blocked" and reading.status == "OK" and reading.count > 0:
-                return self._enter_from_lobby()
+                return None if self._leave_reward_packs(reading.count) else self._enter_from_lobby()
             if self.clock() >= deadline:
                 if reading.status == "OK" and reading.count == 0:
                     return None
                 self._log_unread()
                 return self._reason("RESULT_TIMEOUT" if self.batches else "PAGE_UNKNOWN")
             self.sleep(0.2)
+
+    def _leave_reward_packs(self, count: int) -> bool:
+        if not self._reward_leftover(count):
+            return False
+        if self.log:
+            self.log("PACK_REWARD_LEFT", count=count)
+        return True
 
     def _log_unread(self) -> None:
         if not self.log:
@@ -486,7 +531,7 @@ class PackOpener:
         finally:
             self.sender.mouse_up()
 
-    def _leave_result(self) -> str | None:
+    def _leave_result(self, current: str = "result") -> str | None:
         """Esc off the rewards page and return the page after it.
 
         Frames right after Esc can still show the rewards page (Runner 1,
@@ -500,13 +545,13 @@ class PackOpener:
         deadline = self.clock() + self.limits.page_s
         while self.clock() < deadline:
             page = self._look()
-            if page in PACK_PAGES and page != "result":
+            if page in PACK_PAGES and page != current:
                 return page
             # Esc can leave the pack UI entirely. The lobby card is not a pack
             # page to classify(), and the granted pack is still sitting on it.
-            if page not in {"result", "blocked"} and self._lobby_reading().status == "OK":
+            if page not in {current, "blocked"} and self._lobby_reading().status == "OK":
                 return "lobby"
-            if page == "result" and self.clock() - pressed_at >= 3 and presses < 3:
+            if page == current and self.clock() - pressed_at >= 3 and presses < 3:
                 self._key(ESC_SCAN, "result-back")
                 pressed_at, presses = self.clock(), presses + 1
             self.sleep(0.3)
@@ -534,6 +579,23 @@ class PackOpener:
                 current = (heirloom_visible(self.frame), self._grid_sample())
                 if previous is not None and previous[0] == current[0] and grid_settled(previous[1], current[1]):
                     return current[0]
+                previous = current
+            else:
+                previous = None
+            if self.clock() >= deadline:
+                break
+            self.sleep(0.3)
+        return None
+
+    def _stable_single(self, deadline: float):
+        """Red or not once all three stands are labelled, read the same twice in a row."""
+        previous = None
+        while self.clock() < deadline:
+            if self._look() == "single" and self.frame is not None:
+                labels, red = single_reading(self.frame, self.tokens)
+                current = red if labels >= SINGLE_ITEMS else None
+                if current is not None and previous is not None and current == previous:
+                    return current
                 previous = current
             else:
                 previous = None
@@ -582,8 +644,9 @@ class PackOpener:
                 self.after_reward = True
                 page = None
                 continue
-            if page == "result":
-                red = self._stable_result(min(deadline, self.clock() + self.limits.animation_s))
+            if page in {"result", "single"}:
+                settle = self._stable_result if page == "result" else self._stable_single
+                red = settle(min(deadline, self.clock() + self.limits.animation_s))
                 if red is None:
                     return self._failed(self._reason("RESULT_TIMEOUT"))
                 self.heirloom = self.heirloom or red
@@ -591,7 +654,7 @@ class PackOpener:
                 self.maxed, self.presses, self.count_at_press = False, 0, None
                 if not self.save_frame(self.frame, self.batches, red):
                     return self._failed("SCREENSHOT_FAILED")
-                page = self._leave_result()
+                page = self._leave_result(page)
                 if page is None:
                     if self._lobby_empty():
                         return self._done()
@@ -603,6 +666,8 @@ class PackOpener:
             if self.count_at_press is not None and count is not None and count < self.count_at_press:
                 # Packs went but their rewards were never seen: a red cannot be ruled out.
                 return self._failed("RESULT_NOT_SEEN")
+            if self._leave_reward_packs(count):
+                return self._done()
             if count == 0:
                 page = self._wait({"reward"}, REWARD_GRACE_S)
                 if page is None:
@@ -631,7 +696,7 @@ class PackOpener:
                 return self._failed(outcome)
             # The opening animation, then the rewards; back on the open page
             # means the hold ended too early and is pressed again.
-            page = self._wait({"result", "select", "reward"}, self.limits.animation_s)
+            page = self._wait({"result", "single", "select", "reward"}, self.limits.animation_s)
             if page is None:
                 return self._failed(self._reason("RESULT_TIMEOUT"))
         return self._failed("SESSION_TIMEOUT")

@@ -1645,6 +1645,7 @@ class PilotTest(unittest.TestCase):
         self.screen(modePanelTargetCard=("大逃杀", 1.0))
         self.overlay_provider.readings = {
             "bottomLeftBack": ("ESC 返回", 0.98),
+            "modePanelHeaders": [("核心", 0.99, (385, 150, 457, 196))],
             "modePanelSearch": [
                 ("进化版机器人大逃杀", 0.99, (1700, 650, 2320, 720)),
                 ("选择模式", 0.99, (980, 780, 1240, 840)),
@@ -1661,10 +1662,26 @@ class PilotTest(unittest.TestCase):
         )
         self.assertNotIn(("tap", 1, 80), self.sender.calls)
 
+    def test_a_loading_screen_with_the_bot_title_is_not_the_mode_panel(self) -> None:
+        # 10-14..10-21: the map loading screen prints 「进化版机器人大逃杀」 top
+        # left; read as the panel, the bot card was clicked into nothing until
+        # its attempts ran out. Only the real panel has its column headers.
+        self.enable_overlays()
+        self.screen(modePanelTargetCard=("大逃杀", 1.0))
+        self.overlay_provider.readings = {
+            "modePanelSearch": [("进化版机器人大逃杀", 0.99, (140, 150, 780, 230))],
+        }
+
+        record = self._settle_overlay()
+
+        self.assertNotEqual(record["state"], "MODE_PANEL_TARGET_VISIBLE")
+        self.assertEqual([call for call in self.sender.calls if call[0] == "click"], [])
+
     def test_a_split_title_clicks_the_token_that_contains_the_word(self) -> None:
         self.enable_overlays()
         self.screen(modePanelTargetCard=("大逃杀", 1.0))
         self.overlay_provider.readings = {
+            "modePanelHeaders": [("核心", 0.99, (385, 150, 457, 196))],
             "modePanelSearch": [
                 ("进化版", 0.99, (1700, 650, 1900, 720)),
                 ("机器人大逃杀", 0.99, (1900, 650, 2340, 720)),
@@ -1684,6 +1701,7 @@ class PilotTest(unittest.TestCase):
         self.screen()
         self.overlay_provider.readings = {
             "bottomLeftBack": ("ESC 返回", 0.98),
+            "modePanelHeaders": [("核心", 0.99, (385, 150, 457, 196))],
             "modePanelSearch": [
                 ("进化版机器人大逃杀", 0.99, (1700, 650, 2320, 720)),
                 ("选择模式", 0.99, (980, 780, 1240, 840)),

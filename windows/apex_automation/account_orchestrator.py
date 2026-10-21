@@ -739,6 +739,7 @@ class AccountOrchestrator:
             lease_fence=lease.lease_fence,
             target_level=lease.target_level,
             open_packs=lease.open_packs,
+            playlist=lease.playlist,
             identity_verification=IdentityVerification(
                 status="VERIFIED",
                 observed_platform="ea",

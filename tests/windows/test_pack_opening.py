@@ -9,7 +9,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "windows"))
 from apex_automation.ocr_obstacles import OcrToken
 from apex_automation.pack_opening import (
     ESC_SCAN, SPACE_SCAN, PackLimits, PackOpener, classify, grid_settled, heirloom_visible,
-    open_point, select_count, space_continue,
+    open_point, select_count, single_reading, space_continue,
 )
 
 
@@ -567,7 +567,9 @@ class RealPageTokensTest(unittest.TestCase):
 class LateSparkRewardTest(unittest.TestCase):
     """10-19 21:13: the spark reward popped up after the count reached 0, and the run had already ended."""
 
-    def test_the_late_reward_is_claimed_and_its_pack_opened(self):
+    def test_the_late_reward_is_claimed_and_its_pack_left_unopened(self):
+        # The operator only cares about red in the account's own packs; the one
+        # pack the spark reward grants stays on the card (10-21).
         clock = Clock()
         state = {"page": "select", "count": 22, "maxed": False, "hover": False, "down": None,
                  "reward_at": None, "rewards": 1}
@@ -631,9 +633,10 @@ class LateSparkRewardTest(unittest.TestCase):
         result = PackOpener(game, game, Input(), Guard(), save_frame=lambda _f, batch, red: saved.append(batch) or True,
                             log=lambda *args, **kwargs: None, clock=clock, sleep=clock.sleep,
                             limits=PackLimits(page_s=5, hold_s=2, session_s=120)).run()
-        self.assertEqual((result.status, result.batches, result.packs_before), ("DONE", 2, 22))
-        self.assertEqual(saved, [1, 2])
-        self.assertEqual(keys, [(ESC_SCAN, "result"), (SPACE_SCAN, "reward"), (ESC_SCAN, "result")])
+        self.assertEqual((result.status, result.batches, result.packs_before), ("DONE", 1, 22))
+        self.assertEqual(saved, [1])
+        self.assertEqual(keys, [(ESC_SCAN, "result"), (SPACE_SCAN, "reward")])
+        self.assertEqual(state["count"], 1)
 
     def test_packs_gone_without_a_result_page_are_not_reported_clean(self):
         clock = Clock()
@@ -674,3 +677,103 @@ class LateSparkRewardTest(unittest.TestCase):
                             log=lambda *args, **kwargs: None, clock=clock, sleep=clock.sleep,
                             limits=PackLimits(page_s=5, hold_s=2, session_s=60)).run()
         self.assertEqual((result.status, result.reason, result.heirloom), ("FAILED", "RESULT_NOT_SEEN", False))
+
+
+class SinglePackTest(unittest.TestCase):
+    """10-21: one pack on its own opens onto three item stands, not the 组合包奖励 grid.
+
+    clara_robin opened its 22, claimed the spark reward, opened that one pack and
+    waited 45 s on this unknown page: RESULT_TIMEOUT. OCR of the operator's
+    reference frame, at its own 1280x720 size.
+    """
+
+    FIXTURE = Path(__file__).parent / "fixtures" / "pack-single-clear.jpg"
+    TOKENS = (token("击杀", (191, 226, 225, 247)), token("预览", (620, 378, 657, 399)),
+              token("普通", (255, 401, 288, 421)), token("普通", (944, 400, 975, 418)),
+              token("稀有", (620, 412, 658, 435)), token("击杀台词", (241, 429, 299, 447)),
+              token("造型", (618, 445, 659, 469)), token("0", (585, 599, 609, 629)),
+              token("APEX组合包", (613, 597, 701, 617)), token("剩余数", (613, 613, 661, 633)),
+              token("ESC", (36, 662, 70, 681)), token("返回", (64, 660, 105, 681)))
+
+    def test_the_single_pack_page_is_its_own_result_page_without_red(self):
+        self.assertEqual(classify(self.TOKENS), "single")
+        self.assertEqual(single_reading(load_bgr(self.FIXTURE), self.TOKENS), (3, False))
+
+    def test_an_heirloom_label_or_a_red_label_fill_is_red(self):
+        frame = load_bgr(self.FIXTURE)
+        named = self.TOKENS + (token("传家宝", (940, 400, 980, 418)),)
+        self.assertTrue(single_reading(frame, named)[1])
+        painted = frame.copy()
+        painted[398:424, 230:312] = (20, 30, 210)
+        self.assertEqual(single_reading(painted, self.TOKENS), (3, True))
+
+    def flow(self, *, after_esc):
+        clock = Clock()
+        state = {"page": "select", "count": 1, "maxed": False, "hover": False, "down": None}
+        stands = self.TOKENS
+
+        def read(_frame):
+            if state["page"] == "select" and state["maxed"] and state["hover"] and state["down"] is not None \
+                    and clock() - state["down"] >= 0.4:
+                state.update(page="single", count=0)
+            if state["page"] == "single":
+                return stands
+            if state["page"] == "select":
+                return (token("开启组合包", (8, 4, 70, 18)), token(str(state["count"]), (10, 20, 40, 55)),
+                        token("重置", (40, 72, 70, 88)),
+                        token("按住打开" if state["hover"] else "开启 1 个", (90, 72, 140, 88)),
+                        token("最高", (150, 70, 190, 90)))
+            return ()
+
+        frame, blank = load_bgr(self.FIXTURE), np.zeros((100, 200, 3), np.uint8)
+
+        class Game:
+            def grab(self):
+                return frame if state["page"] == "single" else blank
+
+            def read_with_boxes(self, image):
+                return read(image)
+
+        keys = []
+
+        class Input:
+            def click(self, x, y):
+                if (x, y) == (170, 80):
+                    state["maxed"] = True
+                state["hover"] = False
+
+            def move_to(self, x, y):
+                state["hover"] = (x, y) == (115, 80)
+
+            def mouse_down(self, button="left"):
+                state["down"] = clock()
+
+            def mouse_up(self, button="left"):
+                state["down"] = None
+
+            def tap_scan_code(self, code, _duration):
+                keys.append((code, state["page"]))
+                if code == ESC_SCAN and state["page"] == "single":
+                    state.update(page=after_esc, maxed=False, hover=False)
+
+            def release_all(self):
+                state["down"] = None
+
+        saved, events = [], []
+        result = PackOpener(Game(), Game(), Input(), Guard(),
+                            save_frame=lambda _f, batch, red: saved.append((batch, red)) or True,
+                            log=lambda event, **payload: events.append(event), clock=clock, sleep=clock.sleep,
+                            limits=PackLimits(page_s=3, animation_s=5, hold_s=2, session_s=60)).run()
+        return result, saved, keys, events
+
+    def test_one_pack_is_opened_read_and_left_with_esc(self):
+        result, saved, keys, _events = self.flow(after_esc="select")
+        self.assertEqual((result.status, result.reason, result.batches, result.packs_before), ("DONE", None, 1, 1))
+        self.assertEqual(saved, [(1, False)])
+        self.assertEqual(keys, [(ESC_SCAN, "single")])
+
+    def test_a_page_never_named_after_a_seen_clear_batch_is_still_done(self):
+        result, saved, _keys, events = self.flow(after_esc="nowhere")
+        self.assertEqual((result.status, result.heirloom, result.batches), ("DONE", False, 1))
+        self.assertEqual(saved, [(1, False)])
+        self.assertIn("PACK_DONE_WITH_LEFTOVER", events)

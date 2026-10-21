@@ -151,6 +151,8 @@ class AccountLease:
     exit_avoid_nodes: tuple[str, ...] = ()
     exit_prefer_nodes: tuple[str, ...] = ()
     open_packs: bool = False
+    # None plays Bot Royale Evolved; "trios" plays unranked trios with fill on.
+    playlist: str | None = None
 
     def __post_init__(self) -> None:
         if self.lease_fence < 1:
@@ -612,6 +614,18 @@ class HttpAccountProvider:
         return value
 
     @staticmethod
+    def _playlist(payload: Mapping[str, object]) -> str | None:
+        """Only a playlist this Runner declared can come back; anything else is a bad lease."""
+        if "playlist" not in payload:
+            return None
+        if payload.get("playlist") != "trios" or payload.get("fill") is not True:
+            raise LeaseProviderError(
+                "Provider 响应中的 playlist 无效",
+                code="INVALID_PROVIDER_RESPONSE",
+            )
+        return "trios"
+
+    @staticmethod
     def _exit_country(payload: Mapping[str, object]) -> str:
         if "exitCountry" not in payload:
             return "HK"
@@ -674,6 +688,7 @@ class HttpAccountProvider:
             exit_avoid_nodes=self._node_names(payload.get("exitAvoidNodes")),
             exit_prefer_nodes=self._node_names(payload.get("exitPreferNodes")),
             open_packs=self._open_packs(payload),
+            playlist=self._playlist(payload),
         )
         known_account = self._lease_accounts.get(lease.lease_id)
         if known_account is not None and known_account != lease.account_id:
@@ -747,7 +762,7 @@ class HttpAccountProvider:
                 "schemaVersion": 1,
                 "taskType": task_type,
                 "clientVersion": self.client_version,
-                "capabilities": ["PACK_OPENING"],
+                "capabilities": ["PACK_OPENING", "TRIOS"],
             },
             operation_id=claim_request_id,
             allow_no_content=True,

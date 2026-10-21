@@ -155,7 +155,7 @@ class HttpAccountProviderTest(unittest.TestCase):
                 "schemaVersion": 1,
                 "taskType": "LEVEL_TO_TARGET",
                 "clientVersion": "0.5.0",
-                "capabilities": ["PACK_OPENING"],
+                "capabilities": ["PACK_OPENING", "TRIOS"],
             },
         )
         self.assertEqual(call["headers"]["Idempotency-Key"], "claim_1")

@@ -14,6 +14,7 @@ import numpy as np
 from .capabilities import Capability, CapabilityDispatcher, Decision
 from .match_behavior import FORBIDDEN_SCAN_CODES, REQUIRED_SCAN_CODES, MatchBehavior
 from .mode_panel import BOT_TITLE_WORD, CONFIRM_WORD, matching_text_token
+from .playlists import FILL_OFF_STATE, PANEL_HEADERS
 from .frame_normalization import CaptureResolutionMismatch
 from .config import RunnerConfig
 from .diagnostics import PerformanceMetrics
@@ -88,6 +89,7 @@ LOBBY_CONTEXT_STATES = frozenset(
         "LOBBY_QUEUEING",
         "LOBBY_SELECT_REQUIRED",
         "LOBBY_READY_TARGET_FILL_ON",
+        FILL_OFF_STATE,
         "LOBBY_READY_TRAINING",
         "LOBBY_READY_TARGET",
         "LOBBY_READY_WELCOME",
@@ -105,6 +107,7 @@ SAFE_LOBBY_STATES = frozenset(
     {
         "LOBBY_SELECT_REQUIRED",
         "LOBBY_READY_TARGET_FILL_ON",
+        FILL_OFF_STATE,
         "LOBBY_READY_TRAINING",
         "LOBBY_READY_TARGET",
         "LOBBY_READY_WELCOME",
@@ -209,8 +212,12 @@ class CapabilityPilot:
         transition_evidence_interval_ms: int = 10_000,
         metrics: PerformanceMetrics | None = None,
         pack_probe=None,
+        target_title: str = BOT_TITLE_WORD,
     ) -> None:
         self.config = config
+        # The word naming the target card on the mode panel: 机器人 for Bot
+        # Royale Evolved, 未上榜 when the lease asks for unranked trios.
+        self.target_title = target_title
         self.source = source
         self.sender = sender
         self.guard = guard
@@ -415,8 +422,11 @@ class CapabilityPilot:
         # unknown screen has persisted. A positive result must repeat before it
         # can authorize input; a negative result clears that screen visit.
         overlay = config.overlay_ocr
-        self.overlay_guard_states = frozenset(
-            str(value) for value in overlay.get("guardStates", [])
+        guard_states = frozenset(str(value) for value in overlay.get("guardStates", []))
+        # A trios lease names its unticked lobby where bot leases have the
+        # fill-on one; a state the detector cannot produce never matches.
+        self.overlay_guard_states = guard_states | (
+            {FILL_OFF_STATE} if "LOBBY_READY_TARGET_FILL_ON" in guard_states else set()
         )
         # Rules broad enough to describe a whole family of pages — "anything
         # with ESC 返回 in the corner" — are only safe where nothing more
@@ -1014,7 +1024,7 @@ class CapabilityPilot:
         if confirmed:
             self.counters["confirmed"] += 1
             self.recorder.log("ACTION_CONFIRMED", **payload)
-            if state in {"LOBBY_READY_TARGET", "LOBBY_READY_TARGET_FILL_ON", "LOBBY_QUEUEING"}:
+            if state in {"LOBBY_READY_TARGET", "LOBBY_READY_TARGET_FILL_ON", FILL_OFF_STATE, "LOBBY_QUEUEING"}:
                 self._bot_mode_misses = 0
                 self._unranked_fallback_armed = False
         else:
@@ -1673,13 +1683,23 @@ class CapabilityPilot:
             for token in self._last_overlay_regions.get("modePanelSearch", ())
             if getattr(token, "confidence", 0.0) >= 0.7
         )
-        title, _missing = matching_text_token(tokens, (BOT_TITLE_WORD,))
+        title, _missing = matching_text_token(tokens, (self.target_title,))
         if title is None:
+            return match
+        # A map loading screen prints the playlist title too, but never the
+        # panel's column headers.
+        headers = tuple(
+            token
+            for token in self._last_overlay_regions.get("modePanelHeaders", ())
+            if getattr(token, "confidence", 0.0) >= 0.7
+        )
+        header, _missing_header = matching_text_token(headers, tuple(PANEL_HEADERS), exact=True)
+        if header is None:
             return match
         confirm, _missing_confirm = matching_text_token(
             tokens,
             (CONFIRM_WORD,),
-            near_anchors=(BOT_TITLE_WORD,),
+            near_anchors=(self.target_title,),
         )
         state = (
             "MODE_PANEL_TARGET_HOVERED"

@@ -15,6 +15,7 @@ from .frame_normalization import (
     reference_resolution,
 )
 from .input_win32 import EmergencyStop
+from .mode_panel import BOT_TITLE_WORD
 from .ocr_states import OcrStateDetector
 from .pilot import CapabilityPilot, PilotFrameSource, PilotGuard, PilotSender
 from .progression import LobbyProgressionReader, LobbyProgressionReading
@@ -29,6 +30,17 @@ from .runner_identity import IdentityVerification, RunnerSettings
 
 
 @dataclass(frozen=True)
+class PlaylistRules:
+    """The lobby and panel rules for a playlist other than Bot Royale Evolved."""
+
+    capabilities: CapabilitySet
+    actions: dict[str, Any]
+    state_detector: OcrStateDetector
+    overlay_detector: OcrStateDetector | None
+    target_title: str
+
+
+@dataclass(frozen=True)
 class SessionIdentity:
     account_id: str | None
     device_id: str | None
@@ -37,6 +49,8 @@ class SessionIdentity:
     lease_fence: int | None = None
     target_level: int | None = None
     open_packs: bool = False
+    # None is Bot Royale Evolved; Forge names any other playlist on the lease.
+    playlist: str | None = None
 
     def __post_init__(self) -> None:
         if bool(self.account_id) != bool(self.device_id):
@@ -169,8 +183,10 @@ class PlaySessionRunner:
         config_revision: str,
         notify: Callable[[str], None] = print,
         sleep: Callable[[float], None] = time.sleep,
+        playlists: dict[str, PlaylistRules] | None = None,
     ) -> None:
         self.config = config
+        self.playlists = dict(playlists or {})
         self.capabilities = capabilities
         self.actions = actions
         self.state_detector = state_detector
@@ -250,7 +266,7 @@ class PlaySessionRunner:
         reference_size = reference_resolution(self.config.environment)
         run_context = {
             "mode": "account-cycle" if identity.managed else "play",
-            "targetMode": "bot-royale",
+            "targetMode": "unranked-trios" if identity.playlist == "trios" else "bot-royale",
             "resolution": list(capture_size),
             "referenceResolution": list(reference_size),
             "language": str(self.config.environment["language"]),
@@ -353,16 +369,20 @@ class PlaySessionRunner:
                 referenceResolution=list(reference_size),
                 interpolation="LANCZOS4",
             )
+            rules = self.playlists.get(identity.playlist) if identity.playlist else None
+            if identity.playlist:
+                recorder.log("PLAYLIST_SELECTED", playlist=identity.playlist)
             pilot = CapabilityPilot(
                 self.config,
                 apex_source,
                 self.sender,
                 self.guard,
                 recorder,
-                state_detector=self.state_detector,
-                overlay_detector=self.overlay_detector,
-                dispatcher=CapabilityDispatcher(self.capabilities),
-                actions=self.actions,
+                state_detector=rules.state_detector if rules else self.state_detector,
+                overlay_detector=rules.overlay_detector if rules else self.overlay_detector,
+                dispatcher=CapabilityDispatcher(rules.capabilities if rules else self.capabilities),
+                actions=rules.actions if rules else self.actions,
+                target_title=rules.target_title if rules else BOT_TITLE_WORD,
                 progression_reader=progression_reader,
                 progression_stable_samples=int(
                     progression_config.get("stableSamples", 2)

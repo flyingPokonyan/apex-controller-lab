@@ -96,6 +96,10 @@ class OcrStateDetector:
     @classmethod
     def from_path(cls, provider: OcrProvider, path: Path | str) -> "OcrStateDetector":
         payload = json.loads(Path(path).read_text(encoding="utf-8"))
+        return cls.from_payload(provider, payload)
+
+    @classmethod
+    def from_payload(cls, provider: OcrProvider, payload: dict) -> "OcrStateDetector":
         if int(payload.get("schemaVersion", 0)) != 1:
             raise ValueError("OCR 状态字典 schemaVersion 必须为 1")
         default_confidence = float(payload.get("defaultMinConfidence", 0.62))
