@@ -548,6 +548,49 @@ class RewardFollowUpTest(unittest.TestCase):
         self.assertTrue(any(x > 2000 for x, _y in clicks))
 
 
+    def lobby_card_run(self, counts):
+        """The lobby card reads each of ``counts`` in turn, then the last one."""
+        clock = Clock()
+        reads = iter(counts)
+        last = {"count": counts[-1]}
+        clicks = []
+
+        class Game:
+            def grab(self):
+                return np.zeros((1440, 2560, 3), np.uint8)
+
+            def read_with_boxes(self, frame):
+                last["count"] = next(reads, last["count"])
+                return (token(str(last["count"]), (2092, 1054, 2210, 1143)), token("APEX", (2201, 1058, 2301, 1100)),
+                        token("组合包", (2198, 1094, 2308, 1143)))
+
+        class Input:
+            def click(self, x, y):
+                clicks.append((x, y))
+
+            def release_all(self):
+                pass
+
+        events = []
+        result = PackOpener(
+            Game(), Game(), Input(), Guard(), save_frame=lambda *_args: True,
+            log=lambda name, **kwargs: events.append(name), clock=clock, sleep=clock.sleep,
+            limits=PackLimits(page_s=1, animation_s=2, hold_s=1, session_s=10),
+        ).run()
+        return result, clicks, events
+
+    def test_an_account_already_opened_reports_no_packs_without_a_click(self):
+        result, clicks, events = self.lobby_card_run(["0"])
+        self.assertEqual((result.status, result.batches, result.packs_before), ("NO_PACKS", 0, 0))
+        self.assertEqual(clicks, [])
+        self.assertIn("PACK_LOBBY_EMPTY", events)
+
+    def test_one_zero_read_is_not_enough_to_skip_the_packs(self):
+        _result, clicks, events = self.lobby_card_run(["0", "0", "21"])
+        self.assertNotIn("PACK_LOBBY_EMPTY", events)
+        self.assertTrue(clicks)
+
+
 class RealPageTokensTest(unittest.TestCase):
     """OCR of the 10-19 20:54 frames from Runner 1."""
 

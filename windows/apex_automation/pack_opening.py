@@ -604,10 +604,28 @@ class PackOpener:
             self.sleep(0.3)
         return None
 
+    def _lobby_reads_zero(self) -> bool:
+        """Two fresh lobby frames both read 0 on the pack card."""
+        for attempt in range(2):
+            if attempt:
+                self.sleep(0.5)
+                self._look()
+            reading = self._lobby_reading()
+            if reading.status != "OK" or reading.count != 0:
+                return False
+        self.packs_before = 0
+        return True
+
     def _run(self) -> PackOpeningResult:
         deadline = self.clock() + self.limits.session_s
         page = self._look()
         if page not in PACK_PAGES:
+            # An account whose packs were already opened (by hand, or before
+            # Forge kept a record) shows 0 on the card: nothing to click.
+            if self._lobby_reads_zero():
+                if self.log:
+                    self.log("PACK_LOBBY_EMPTY")
+                return self._done()
             page = self._enter_from_lobby()
             if page not in PACK_PAGES:
                 return self._failed(page)
