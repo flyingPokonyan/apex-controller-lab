@@ -1070,6 +1070,63 @@ class AccountOrchestratorTest(unittest.TestCase):
             )
             self.assertFalse(store.load().has_lease)
 
+    def test_a_stop_from_the_previous_process_ends_with_its_cleanup(self) -> None:
+        # D163 10-23: stopped while EA was signing out; the next start
+        # finished the sign-out, closed the lease and then stopped again.
+        with tempfile.TemporaryDirectory() as directory:
+            stopped = FakeAccountProvider.lease("acct_1")
+            next_lease = replace(FakeAccountProvider.lease("acct_2"), expected_ea_account_id="ea_2")
+            provider = FakeAccountProvider(
+                [stopped, next_lease],
+                credentials={"acct_2": SecretCredentials("next@example.test", "password")},
+                otp_factory=lambda challenge_id, started_at: OtpCode(
+                    code="123456", challenge_id=challenge_id, received_at=started_at,
+                    expires_at=started_at + timedelta(minutes=1),
+                ),
+            )
+            provider.claim("initial_claim", "LEVEL_TO_TARGET")
+            store = AtomicCheckpointStore(Path(directory) / "account-cycle-status.json")
+            store.save(OrchestrationCheckpoint(
+                device_id="device_1", workflow_phase=WorkflowPhase.EA_SIGNING_OUT,
+                lease_id=stopped.lease_id, lease_fence=stopped.lease_fence,
+                account_id=stopped.account_id, target_level=20, active_play_run_id="run_1",
+                result_status="STOPPED", result_error_code="OPERATOR_STOPPED",
+                report_evidence={"runId": "run_1", "runFinishedSeq": 12},
+            ))
+
+            class StopAgain:
+                def run(self, identity, progression_policy, capture_source, *,
+                        lease_is_current, lease_diagnostics, on_run_started):
+                    self.account_id = identity.account_id
+                    on_run_started("run_2")
+                    return PlaySessionResult(
+                        status="STOPPED", run_id="run_2", account_id=identity.account_id,
+                        lease_id=identity.lease_id, lease_fence=identity.lease_fence,
+                        level=None, xp_current_approx=None, xp_required_approx=None,
+                        progress_local_seq=None, lobby_progress_report_seq=None,
+                        run_finished_report_seq=1, frames=0, actions_sent=0,
+                        rounds_started=0, rounds_returned_to_lobby=0,
+                        report_drain=FakeDrain(accepted_through=1), error_code="OPERATOR_STOPPED",
+                    )
+
+            session = StopAgain()
+            operation_ids = iter(f"operation_{index}" for index in range(20))
+            orchestrator = AccountOrchestrator(
+                provider=provider, ea_driver=FakeEaDriver([], "ea_2"), play_session=session,
+                checkpoint_store=store, device_id="device_1", capture_source=object(),
+                recover_report_drain=lambda run_id: FakeDrain(accepted_through=12) if run_id == "run_1" else None,
+                operation_id_factory=operation_ids.__next__,
+                sleep=lambda _seconds: None, notify=lambda _: None,
+            )
+
+            # The new account's own stop still ends the loop.
+            self.assertEqual(orchestrator.run_forever(idle_s=1), 0)
+            self.assertEqual(session.account_id, "acct_2")
+            close_calls = [call[1] for call in provider.calls if call[0] == "close"]
+            self.assertEqual([(call[3], call[6]) for call in close_calls],
+                             [("RELEASED", "OPERATOR_STOPPED"), ("RELEASED", "OPERATOR_STOPPED")])
+            self.assertFalse(store.load().has_lease)
+
     def test_lease_released_from_the_console_clears_the_local_checkpoint(self) -> None:
         """An operator releasing a lease must not strand the machine.
 

@@ -160,6 +160,9 @@ class AccountOrchestrator:
         if callable(configure):
             configure(self._reserve_ui_recovery)
         self._restart_recovery_pending = self._checkpoint.has_lease
+        # Set when the operator stops a session in this process; a stop the
+        # checkpoint carries over from an earlier process ends with its cleanup.
+        self._stopped_here = False
         self._stop = threading.Event()
         self._lease_keeper: LeaseKeeper | None = None
         self._report_drain: ReportDrainHandle | None = None
@@ -1042,6 +1045,20 @@ class AccountOrchestrator:
         self,
         lease: AccountLease,
     ) -> AccountCycleResult:
+        cycle = self._finish_recorded_session(lease)
+        # The launcher never restarts a worker the operator stopped, so this
+        # process runs because someone started it again: finishing the old
+        # stop's cleanup must not stop it a second time.
+        if (cycle.outcome is AccountCycleOutcome.STOPPED
+                and not self._stopped_here and not self._stop.is_set()):
+            self.notify("上次停止时的账号已清理完毕，继续账号编排")
+            return replace(cycle, outcome=AccountCycleOutcome.COMPLETED, error_code="RESTART_RECOVERY")
+        return cycle
+
+    def _finish_recorded_session(
+        self,
+        lease: AccountLease,
+    ) -> AccountCycleResult:
         result = self._checkpoint_result()
         if result is None:
             self.notify("旧运行报告无法恢复，自动清理并释放旧租约")
@@ -1313,6 +1330,7 @@ class AccountOrchestrator:
                 on_run_started=self._record_run_started,
             )
             if result.status == "STOPPED":
+                self._stopped_here = True
                 self.notify(
                     "正在清理当前账号：关闭 Apex、退出 EA 并释放租约；"
                     "请勿再次按 Ctrl+C 或关闭 CMD，看到清理完成后再退出。"
