@@ -39,6 +39,10 @@ NAMES = {
 }
 DELAY_URL = "http://www.gstatic.com/generate_204"
 MAX_TESTS = 6
+# Since 2026-10-23 the YToo nodes keep dropping connections while the IEPL
+# airport holds, so the operator asked for IEPL nodes first. Not sharing an
+# IP with another account still outranks this. "" turns it off.
+PREFERRED_NODE_MARK = "IEPL"
 VERGE_ID = "io.github.clash-verge-rev.clash-verge-rev"
 DEFAULT_PIPE = r"\\.\pipe\verge-mihomo"
 DEFAULT_SOCKET = "/tmp/verge/verge-mihomo.sock"
@@ -327,7 +331,9 @@ class ClashExitSwitch:
         Forge lists this account's own earlier nodes (``prefer``) and the nodes
         other accounts used lately on any machine (``avoid``, least recently
         used first). They only order the choice: an avoided node is still
-        used when nothing else answers.
+        used when nothing else answers. Among nodes no other account used,
+        a ``PREFERRED_NODE_MARK`` node comes before the account's own other
+        nodes.
         """
         try:
             try:
@@ -348,11 +354,12 @@ class ClashExitSwitch:
 
             def rank(route):
                 node = route[-1][1]
-                if node in prefer:
-                    return 0, prefer.index(node)
+                later = not preferred_node(node)
                 if node in avoid:
-                    return 2, avoid.index(node)
-                return 1, len(recent) - recent.index(node) if node in recent else 0
+                    return 2, later, avoid.index(node)
+                if node in prefer:
+                    return 0, later, 0, prefer.index(node)
+                return 0, later, 1, len(recent) - recent.index(node) if node in recent else 0
             routes.sort(key=rank)
             for route in routes[:MAX_TESTS]:
                 node = route[-1][1]
@@ -491,6 +498,10 @@ def candidate_routes(proxies: dict, group: str, country: str) -> list[list[tuple
                     seen.add(leaf)
                     routes.append([(group, member), (member, leaf)])
     return routes
+
+
+def preferred_node(name: str) -> bool:
+    return not PREFERRED_NODE_MARK or PREFERRED_NODE_MARK.casefold() in name.casefold()
 
 
 def _game_node(name: str, info, country: str) -> bool:

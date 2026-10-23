@@ -177,6 +177,20 @@ class NodeChoiceTests(unittest.TestCase):
         self.assertEqual(clash.selected(), FLOWER_HK[1])
         self.assertEqual(switch(clash).current()["node"], FLOWER_HK[1])
 
+    def test_iepl_nodes_come_first_but_not_onto_another_account_s_ip(self):
+        clash = FakeClash(flower=FLOWER_HK)
+        # The account's own YToo node gives way to an IEPL node nobody used.
+        self.assertIn(switch(clash).prepare("HK", prefer=[HK[1]])["node"], FLOWER_HK)
+        # Its own IEPL node comes first of all.
+        self.assertEqual(switch(clash).prepare("HK", prefer=[HK[1], FLOWER_HK[1]])["node"], FLOWER_HK[1])
+        # IEPL nodes other accounts used rank after every unused YToo node.
+        self.assertEqual(switch(clash).prepare("HK", prefer=[HK[2]], avoid=FLOWER_HK)["node"], HK[2])
+        self.assertNotIn(switch(clash).prepare("HK", avoid=FLOWER_HK)["node"], FLOWER_HK)
+        # No IEPL node answers: the account keeps its own node.
+        self.assertEqual(switch(FakeClash(flower=FLOWER_HK, dead=FLOWER_HK)).prepare("HK", prefer=[HK[3]])["node"], HK[3])
+        with patch.object(clash_exit, "PREFERRED_NODE_MARK", ""):
+            self.assertEqual(switch(clash).prepare("HK", prefer=[HK[1]])["node"], HK[1])
+
     def test_nodes_that_cannot_carry_udp_are_never_game_exits(self):
         clash = FakeClash(flower=FLOWER_HK, flower_udp=False)
         clash.proxies[HK[1]]["udp"] = False
