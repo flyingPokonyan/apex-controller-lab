@@ -762,7 +762,7 @@ class HttpAccountProvider:
                 "schemaVersion": 1,
                 "taskType": task_type,
                 "clientVersion": self.client_version,
-                "capabilities": ["PACK_OPENING", "TRIOS", "PACK_BACKFILL"],
+                "capabilities": ["PACK_OPENING", "TRIOS", "PACK_BACKFILL", "LEGEND_TOKENS"],
             },
             operation_id=claim_request_id,
             allow_no_content=True,

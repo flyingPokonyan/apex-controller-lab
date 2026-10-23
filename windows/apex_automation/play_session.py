@@ -22,7 +22,7 @@ from .progression import LobbyProgressionReader, LobbyProgressionReading
 from .progression_policy import ProgressionPolicy
 from .recorder import RunRecorder
 from .diagnostics import PerformanceMetrics
-from .apex_packs import ApexPackReader, PackInventoryProbe
+from .apex_packs import ApexPackReader, LegendTokenReader, LobbyProbes, PackInventoryProbe
 from .notifications import NotificationCloser, Win32NotificationBackend
 from .managed_runtime import ManagedUpdateRequested
 from .reporter import RemoteReporter
@@ -357,9 +357,15 @@ class PlaySessionRunner:
                 except Exception as error:
                     recorder.log("NOTIFICATION_CLOSE_DISABLED", errorType=type(error).__name__)
             pack_probe = (
-                PackInventoryProbe(ApexPackReader(self.ocr_provider), apex_source,
-                                   self.guard, recorder.log, close_notification=close_notification,
-                                   metrics=metrics, sleep=self.sleep, is_current=lease_is_current)
+                LobbyProbes((
+                    PackInventoryProbe(ApexPackReader(self.ocr_provider), apex_source,
+                                       self.guard, recorder.log, close_notification=close_notification,
+                                       metrics=metrics, sleep=self.sleep, is_current=lease_is_current),
+                    PackInventoryProbe(LegendTokenReader(self.ocr_provider), apex_source,
+                                       self.guard, recorder.log, metrics=metrics, sleep=self.sleep,
+                                       is_current=lease_is_current,
+                                       event="LEGEND_TOKENS", field="amount", metric="tokenOcr"),
+                ))
                 if progression_reader is not None and callable(getattr(self.ocr_provider, "read_with_boxes", None))
                 else None
             )

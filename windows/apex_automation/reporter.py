@@ -471,7 +471,7 @@ class ReportSession:
             result.append(("RUN_STARTED", start_payload))
         elif name == "RUN_FINISHED":
             result.append(("RUN_FINISHED", payload))
-        elif name in {"LOBBY_PROGRESS", "APEX_PACKS", "PACK_OPENING", "PERFORMANCE_SUMMARY"}:
+        elif name in {"LOBBY_PROGRESS", "APEX_PACKS", "LEGEND_TOKENS", "PACK_OPENING", "PERFORMANCE_SUMMARY"}:
             result.append((name, payload))
         elif name == "RING_PROGRESS":
             result.append(

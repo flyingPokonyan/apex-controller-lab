@@ -221,6 +221,7 @@ class ReporterTest(unittest.TestCase):
             root = Path(temporary)
             run_dir = write_run(root, "inventory", account_id="acct_current", events=[
                 ("APEX_PACKS", {"count": 23, "confidence": .99, "readStatus": "OK", "samples": 2}),
+                ("LEGEND_TOKENS", {"amount": 12000, "confidence": .96, "readStatus": "OK", "samples": 2}),
                 ("PERFORMANCE_SUMMARY", {"windowMs": 30000, "metrics": {"capture": {
                     "count": 2, "meanMs": 10, "totalMs": 20, "maxMs": 10, "recentP95Ms": 10}}}),
                 ("STATE_UNKNOWN", {"previousState": "LOBBY_QUEUEING", "previousStateDurationMs": 45000}),
@@ -233,6 +234,8 @@ class ReporterTest(unittest.TestCase):
             events = [event for request in transport.requests for event in request["events"]]
             packs = next(e for e in events if e["type"] == "APEX_PACKS")
             self.assertEqual(packs["payload"]["count"], 23)
+            tokens = next(e for e in events if e["type"] == "LEGEND_TOKENS")
+            self.assertEqual(tokens["payload"]["amount"], 12000)
             self.assertTrue(any(e["type"] == "PERFORMANCE_SUMMARY" for e in events))
             unknown = next(e for e in events if e["type"] == "STATE_CHANGED")
             self.assertIsNone(unknown["payload"]["to"])

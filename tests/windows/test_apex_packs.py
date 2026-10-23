@@ -5,7 +5,10 @@ from types import SimpleNamespace
 import numpy as np
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "windows"))
-from apex_automation.apex_packs import ApexPackReader, PackReading, PackInventoryProbe, parse_pack_tokens
+from apex_automation.apex_packs import (
+    ApexPackReader, LegendTokenReader, LobbyProbes, PackReading, PackInventoryProbe,
+    parse_legend_tokens, parse_pack_tokens,
+)
 from apex_automation.ocr_obstacles import OcrToken
 from apex_automation.frame_normalization import ReferenceCanvasFrameSource
 from apex_automation.capture import DxcamFrameSource
@@ -43,6 +46,43 @@ class PackReaderTest(unittest.TestCase):
         self.assertEqual(reading.count, 23)
         self.assertGreater(reading.tokens[0].roi[0], 700)
         self.assertLess(seen[0][1], 230)
+
+
+def currency(text, confidence=.96, second_row=("60", "100")):
+    # Positions on the 2560x1440 canvas, as RapidOCR returned them on real lobby frames.
+    return (OcrToken(text, confidence, (2270, 18, 2400, 50)),) + tuple(
+        OcrToken(other, .9, (2264 + 97 * i, 67, 2300 + 97 * i, 95)) for i, other in enumerate(second_row))
+
+
+class LegendTokenReaderTest(unittest.TestCase):
+    def read(self, tokens):
+        return parse_legend_tokens(tokens, top=0, height=1440)
+
+    def test_real_lobby_texts_including_the_merged_next_currency(self):
+        for text, amount in (("12.0K0", 12000), ("10.2K 50", 10200), (" 11.4K  0", 11400),
+                             ("4 11.4K  15", 11400), ("7.80K50", 7800), ("3.60k50", 3600)):
+            reading = self.read(currency(text))
+            self.assertEqual((reading.status, reading.count), ("OK", amount), text)
+
+    def test_a_dropped_decimal_point_or_low_confidence_is_not_a_reading(self):
+        for tokens in (currency("540K0"), currency("12.0K0", confidence=.6), currency("600 0")):
+            self.assertIsNone(self.read(tokens).count)
+        self.assertEqual(self.read(()).status, "NOT_VISIBLE")
+
+    def test_second_row_and_disagreeing_texts_are_not_legend_tokens(self):
+        self.assertIsNone(self.read((OcrToken("4.80K", .99, (2264, 67, 2330, 95)),)).count)
+        self.assertEqual(self.read(currency("12.0K0") + currency("10.2K0")[:1]).status, "UNREADABLE")
+
+    def test_reader_pads_the_crop_and_maps_boxes_back(self):
+        frame = np.zeros((1440, 2560, 3), dtype=np.uint8)
+        seen = []
+        def read_with_boxes(crop):
+            seen.append(crop.shape)
+            return (OcrToken("12.0K0", .97, (82, 50, 212, 82)),)
+        reading = LegendTokenReader(SimpleNamespace(read_with_boxes=read_with_boxes)).read(frame)
+        self.assertEqual(reading.count, 12000)
+        self.assertEqual(reading.tokens[0].roi[:2], (2124 + 82 - 32, 50 - 32))
+        self.assertEqual(seen[0][:2], (129 + 64, 346 + 64))
 
 
 class PackProbeTest(unittest.TestCase):
@@ -114,3 +154,22 @@ class PackProbeTest(unittest.TestCase):
         probe.finish()
         self.assertEqual(self.events[-1][1]["readStatus"], "UNCONFIRMED")
         self.assertIsNone(self.events[-1][1]["count"])
+
+    def test_legend_tokens_use_their_own_event_and_field(self):
+        probe = self.make_probe([1, 1], [PackReading(12000, .96, "OK")] * 2)
+        probe.event, probe.field = "LEGEND_TOKENS", "amount"
+        for _ in range(2):
+            probe.observe()
+            self.now += 1
+        self.assertEqual(self.events, [("LEGEND_TOKENS", {"amount": 12000, "confidence": .96, "readStatus": "OK", "samples": 2})])
+
+    def test_lobby_probes_drive_every_probe(self):
+        calls = []
+        probe = lambda name: SimpleNamespace(
+            reset=lambda: calls.append((name, "reset")),
+            observe=lambda force=False: calls.append((name, "observe", force)),
+            finish=lambda is_current, budget_s: calls.append((name, "finish", budget_s)))
+        group = LobbyProbes((probe("packs"), probe("tokens")))
+        group.reset(); group.observe(); group.finish(budget_s=2)
+        self.assertEqual(calls, [("packs", "reset"), ("tokens", "reset"), ("packs", "observe", False),
+                                 ("tokens", "observe", False), ("packs", "finish", 2), ("tokens", "finish", 2)])
