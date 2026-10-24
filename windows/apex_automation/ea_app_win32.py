@@ -46,6 +46,21 @@ from .ea_app import (
     EaWindowUnavailable,
     OtpChallenge,
 )
+from .ea_dialogs import (
+    CLOUD_LAUNCH_INTERRUPTED,
+    CLOUD_UPLOAD_ERROR_TERMS,
+    CLOUD_UPLOAD_FAILED,
+    LAUNCH,
+    SIGNOUT,
+    EaDialog,
+    cloud_upload_error_point,
+    cloud_upload_error_visible,
+    cloud_upload_notice,
+    continue_local_data_point,
+    known_dialog,
+    left_aligned_block,
+    unknown_dialog_text,
+)
 from .ea_evidence import EaLoginEvidence, is_sensitive_text
 from .ea_login_input import read_focused_account
 from .ea_password_recovery import EaPasswordRecoveryMixin
@@ -73,6 +88,7 @@ from .ea_pages import (
     SUBMIT_TERMS,
     EaPage,
     phrase_point,
+    token_point,
     classify_page,
     has_any,
     identity_candidates,
@@ -201,31 +217,6 @@ APEX_UPDATE_REQUIRED_TERMS = (
     "需要更新才能启动此游戏",
     "启动此游戏需要更新",
 )
-CLOUD_DATA_ERROR_TERMS = (
-    "wecouldntloadyourclouddata",
-    "unabletoloadyourclouddata",
-    "savingyourprogresstothecloud",
-    "无法加载您的云数据",
-    "无法加载云数据",
-    "ec10600",
-    "ec10609",
-)
-CONTINUE_LOCAL_DATA_TERMS = (
-    "continuewithlocaldata",
-    "skipsyncclose",
-    "使用本地数据继续",
-    "继续使用本地数据",
-)
-CLOUD_UPLOAD_ERROR_TERMS = (
-    "failedtouploadgamedatatothecloud",
-    "无法将游戏数据上传到云端",
-    "无法将游戏数据上传至云端",
-)
-CLOUD_UPLOAD_LOCAL_SAVE_TERMS = (
-    "gameisstillsavedlocally",
-    "游戏仍保存在本地",
-)
-CLOUD_LAUNCH_INTERRUPTED_TERMS = ("yourlatestsyncwasinterrupted",)
 
 # Pages that prove no session exists yet.
 PRE_LOGIN_PAGES = (
@@ -714,53 +705,11 @@ class WindowsEaHybridDriver(EaPasswordRecoveryMixin):
     def _anchor(
         observation: EaObservation,
         terms: Sequence[str],
-        *,
-        x_range: tuple[float, float] = (0.0, 1.0),
-        y_range: tuple[float, float] = (0.0, 1.0),
-        exclude: Sequence[str] = (),
-        exact: bool = False,
+        **where,
     ) -> tuple[int, int] | None:
-        """Centre of the best on-screen token that carries one of `terms`.
+        """Centre of the best on-screen token that carries one of `terms`."""
 
-        Earlier terms win over later ones before confidence is considered, so
-        a page holding both "Next" and "Sign in" gets the control the caller
-        asked for first.
-        """
-
-        left, top, right, bottom = observation.rect
-        width = max(1, right - left)
-        height = max(1, bottom - top)
-        matches: list[tuple[int, float, int, int]] = []
-        for token in observation.tokens:
-            if token.roi is None:
-                continue
-            text = token.normalized
-            if any(term in text for term in exclude):
-                continue
-            rank = next(
-                (
-                    index
-                    for index, term in enumerate(terms)
-                    if text == term or (not exact and term in text)
-                ),
-                None,
-            )
-            if rank is None:
-                continue
-            x1, y1, x2, y2 = token.roi
-            x = (x1 + x2) // 2
-            y = (y1 + y2) // 2
-            x_ratio = (x - left) / width
-            y_ratio = (y - top) / height
-            if (
-                x_range[0] <= x_ratio <= x_range[1]
-                and y_range[0] <= y_ratio <= y_range[1]
-            ):
-                matches.append((rank, -token.confidence, x, y))
-        if not matches:
-            return None
-        _, _, x, y = min(matches)
-        return x, y
+        return token_point(observation.tokens, observation.rect, terms, **where)
 
     @staticmethod
     def _installed_library_play_point(
@@ -798,168 +747,115 @@ class WindowsEaHybridDriver(EaPasswordRecoveryMixin):
         joined = "".join(observation.normalized)
         return any(term in joined for term in terms)
 
-    @classmethod
-    def _continue_local_data_point(
-        cls,
-        observation: EaObservation,
-    ) -> tuple[int, int] | None:
-        """Return the safe recovery action only on the cloud-data error."""
-
-        if not cls._contains_any(observation, CLOUD_DATA_ERROR_TERMS):
-            return None
-        return cls._anchor(
-            observation,
-            CONTINUE_LOCAL_DATA_TERMS,
-            x_range=(0.35, 0.80),
-            y_range=(0.45, 0.90),
-        )
+    @staticmethod
+    def _continue_local_data_point(observation: EaObservation) -> tuple[int, int] | None:
+        return continue_local_data_point(observation)
 
     @staticmethod
     def _left_aligned_block(tokens: Sequence[OcrToken], head: OcrToken) -> str:
-        """Normalized text of the block whose lines start at `head`'s left edge.
+        return left_aligned_block(tokens, head)
 
-        A dialog wraps its heading and copy when the EA window is narrow, and
-        OCR returns side-panel words between those lines. Reading the block by
-        its left edge, line by line, keeps a wrapped sentence whole.
-        """
+    @staticmethod
+    def _cloud_upload_notice(observation: EaObservation) -> OcrToken | None:
+        return cloud_upload_notice(observation)
 
-        def middle(token):
-            return (token.roi[1] + token.roi[3]) / 2
+    @staticmethod
+    def _cloud_upload_error_visible(observation: EaObservation) -> bool:
+        return cloud_upload_error_visible(observation)
 
-        starts = sorted((
-            token for token in tokens
-            if abs(token.roi[0] - head.roi[0]) <= 12 and token.roi[1] >= head.roi[1] - 4
-        ), key=middle)
-        parts: list[str] = []
-        for start in starts:
-            line, end = [start], start
-            while True:
-                # A line split into several boxes continues just right of the last one.
-                following = [
-                    token for token in tokens
-                    if token not in line
-                    and abs(middle(token) - middle(start)) <= (start.roi[3] - start.roi[1]) * 0.6
-                    and end.roi[2] - 4 <= token.roi[0] <= end.roi[2] + 40
-                ]
-                if not following:
-                    break
-                end = min(following, key=lambda token: token.roi[0])
-                line.append(end)
-            parts.extend(token.normalized for token in line)
-        return "".join(parts)
-
-    @classmethod
-    def _cloud_upload_notice(cls, observation: EaObservation) -> OcrToken | None:
-        """The heading token of the upload-failed notice, read even when wrapped."""
-
-        placed = tuple(token for token in observation.tokens
-                       if token.confidence >= 0.80 and token.roi is not None)
-        left, top, right, bottom = observation.rect
-        width, height = max(1, right - left), max(1, bottom - top)
-        for head in placed:
-            if not any(head.normalized.startswith(term[:8]) for term in CLOUD_UPLOAD_ERROR_TERMS):
-                continue
-            x = ((head.roi[0] + head.roi[2]) / 2 - left) / width
-            y = ((head.roi[1] + head.roi[3]) / 2 - top) / height
-            if not (0.25 <= x <= 0.80 and 0.25 <= y <= 0.70):
-                continue
-            text = cls._left_aligned_block(placed, head)
-            if (any(term in text for term in CLOUD_UPLOAD_ERROR_TERMS)
-                    and any(term in text for term in CLOUD_UPLOAD_LOCAL_SAVE_TERMS)):
-                return head
-        return None
-
-    @classmethod
-    def _cloud_upload_error_visible(cls, observation: EaObservation) -> bool:
-        return (cls._contains_any(observation, CLOUD_UPLOAD_ERROR_TERMS)
-                or cls._cloud_upload_notice(observation) is not None)
-
-    @classmethod
-    def _cloud_upload_error_point(
-        cls, observation: EaObservation,
-    ) -> tuple[int, int] | None:
-        # The upload notice has only OK. It acknowledges the error; it does
-        # not skip sync, close EA, or prove the session has been signed out.
-        head = cls._cloud_upload_notice(observation)
-        if head is None:
-            return None
-        placed = replace(observation, tokens=tuple(
-            token for token in observation.tokens if token.confidence >= 0.80
-        ))
-        button = cls._anchor(placed, ("ok", "确定"), exact=True,
-                             x_range=(0.40, 0.85), y_range=(0.40, 0.90))
-        if button is None or button[1] <= (head.roi[1] + head.roi[3]) // 2:
-            return None
-        return button
+    @staticmethod
+    def _cloud_upload_error_point(observation: EaObservation) -> tuple[int, int] | None:
+        return cloud_upload_error_point(observation)
 
     def _dismiss_cloud_upload_error(
         self, hwnd: int, observation: EaObservation,
     ) -> EaObservation:
-        if not self._cloud_upload_error_visible(observation):
+        return self._answer_dialog(hwnd, observation, CLOUD_UPLOAD_FAILED)
+
+    def _cancel_interrupted_cloud_launch(
+        self, hwnd: int, observation: EaObservation,
+    ) -> EaObservation:
+        return self._answer_dialog(hwnd, observation, CLOUD_LAUNCH_INTERRUPTED)
+
+    def _answer_dialogs(
+        self, hwnd: int, observation: EaObservation, context: str,
+    ) -> tuple[EaObservation, EaDialog | None]:
+        """Answer the known dialogs of `context` on screen, one after another.
+
+        Returns the last dialog answered, so the launch wait can restart its
+        clock when that answer started Apex.
+        """
+
+        answered = None
+        for _ in range(3):
+            dialog = known_dialog(observation, context)
+            if dialog is None:
+                break
+            observation = self._answer_dialog(hwnd, observation, dialog)
+            answered = dialog
+            if dialog.launches:
+                break
+        return observation, answered
+
+    def _answer_dialog(
+        self, hwnd: int, observation: EaObservation, dialog: EaDialog,
+    ) -> EaObservation:
+        """Press a known dialog's controls and prove it went away (ea_dialogs)."""
+
+        if not dialog.visible(observation):
             return observation
         clear_samples = 0
         for attempt in range(1, 3):
-            point = self._cloud_upload_error_point(observation)
-            if point is None:
-                self._record("cloud-upload-error-action-missing", observation)
-                raise EaAppAutomationError("EA 云端上传失败提示未找到可信 OK 按钮")
-            self._record("cloud-upload-error-ack", observation, attempt=attempt)
-            self._click_point(hwnd, *point)
-            self.notify("EA 云端数据上传失败，已确认提示，正在核对弹窗是否关闭")
+            controls = dialog.controls(observation)
+            if not controls:
+                self._record(dialog.step("action-missing"), observation)
+                raise dialog.error(dialog.missing)
+            self._record(dialog.step(dialog.press), observation, attempt=attempt)
+            for index, point in enumerate(controls):
+                if index:
+                    self.sleep(0.7)
+                if dialog.launches and index == len(controls) - 1:
+                    self._request_apex_launch(hwnd, point)
+                else:
+                    self._click_point(hwnd, *point)
+            self.notify(dialog.notice)
+            fresh = False
             for _ in range(4):
                 self.sleep(1.0)
-                observation = self._observe(hwnd)
-                visible = self._cloud_upload_error_visible(observation)
+                if dialog.launches and self._apex_running():
+                    return observation
+                try:
+                    observation = self._observe(hwnd)
+                    fresh = True
+                except EaAppAutomationError:
+                    # EA hides or rebuilds its window while it starts Apex;
+                    # the launch wait keeps watching for the process.
+                    if not dialog.launches:
+                        raise
+                    fresh = False
+                    continue
+                visible = dialog.visible(observation)
+                if dialog.launches and not visible:
+                    self._record(dialog.step("dismissed"), observation)
+                    return observation
+                # A blank frame or a different page cannot prove dismissal.
                 clear = not visible and observation.page in (
                     EaPage.SIGNED_IN, EaPage.BANNED, *PRE_LOGIN_PAGES,
                 )
                 clear_samples = clear_samples + 1 if clear else 0
                 if clear_samples >= 2:
-                    self._record("cloud-upload-error-dismissed", observation)
+                    self._record(dialog.step("dismissed"), observation)
                     return observation
-            # Retry only if the same known dialog is still visible. An empty
-            # capture or a different page is never permission to click again.
-            if not self._cloud_upload_error_visible(observation):
+            if dialog.launches and not fresh:
+                return observation
+            # Press again only while the same dialog is still on screen.
+            if not dialog.visible(observation):
                 break
-        self._record("cloud-upload-error-stuck", observation)
-        raise EaAppAutomationError("EA 云端上传失败提示未能确认关闭，已停止点击")
+        self._record(dialog.step("stuck"), observation)
+        raise dialog.error(dialog.stuck)
 
-    def _cancel_interrupted_cloud_launch(
-        self, hwnd: int, observation: EaObservation,
-    ) -> EaObservation:
-        # This modal offers Launch game / Cancel, not the upload notice's OK.
-        # During sign-out cancel the pending launch, then still verify logout.
-        if not self._contains_any(observation, CLOUD_LAUNCH_INTERRUPTED_TERMS):
-            return observation
-        for attempt in range(1, 3):
-            placed = replace(observation, tokens=tuple(
-                token for token in observation.tokens if token.confidence >= 0.80
-            ))
-            title = phrase_point(placed.tokens, placed.rect, CLOUD_LAUNCH_INTERRUPTED_TERMS[0],
-                                 x_range=(0.25, 0.80), y_range=(0.20, 0.65))
-            cancel = self._anchor(placed, ("cancel", "取消"), exact=True,
-                                  x_range=(0.40, 0.85), y_range=(0.40, 0.85))
-            launch = self._anchor(placed, ("launchgame", "启动游戏", "开始游戏"), exact=True,
-                                  x_range=(0.35, 0.85), y_range=(0.40, 0.85))
-            if title is None or cancel is None or launch is None or cancel[1] <= title[1]:
-                self._record("signout-cloud-launch-action-missing", observation)
-                raise EaAppAutomationError("EA 云同步中断弹窗未找到可信取消按钮")
-            self._record("signout-cloud-launch-cancel", observation, attempt=attempt)
-            self._click_point(hwnd, *cancel)
-            clear_samples = 0
-            for _ in range(4):
-                self.sleep(1.0)
-                observation = self._observe(hwnd)
-                visible = self._contains_any(observation, CLOUD_LAUNCH_INTERRUPTED_TERMS)
-                clear = not visible and observation.page in (EaPage.SIGNED_IN, EaPage.BANNED, *PRE_LOGIN_PAGES)
-                clear_samples = clear_samples + 1 if clear else 0
-                if clear_samples >= 2:
-                    self._record("signout-cloud-launch-dismissed", observation)
-                    return observation
-            if not self._contains_any(observation, CLOUD_LAUNCH_INTERRUPTED_TERMS):
-                break
-        self._record("signout-cloud-launch-stuck", observation)
-        raise EaAppAutomationError("EA 云同步中断弹窗未能确认关闭")
+    def _apex_running(self) -> bool:
+        return any(self._process_running(name) for name in APEX_EXECUTABLES)
 
     @classmethod
     def _apex_update_point(
@@ -3177,9 +3073,9 @@ class WindowsEaHybridDriver(EaPasswordRecoveryMixin):
         update_deadline: float | None = None
         update_clicked_at = 0.0
         update_clicks = 0
-        cloud_recovery_clicks = 0
         update_wait_notice_at = 0.0
         entry_retries = 0
+        unknown_dialog: str | None = None
 
         while True:
             if any(self._process_running(name) for name in APEX_EXECUTABLES):
@@ -3189,6 +3085,8 @@ class WindowsEaHybridDriver(EaPasswordRecoveryMixin):
             if update_deadline is not None and now >= update_deadline:
                 raise EaApexStartFailed("EA App 中 Apex 更新等待超过 2 小时")
             if launch_deadline is not None and now >= launch_deadline:
+                if unknown_dialog:
+                    raise EaApexStartFailed(f"点击 EA Play 后未发现 Apex 进程，EA 弹窗未识别：{unknown_dialog[:80]}")
                 raise EaApexStartFailed("点击 EA Play 后未发现 Apex 进程")
             if (
                 update_deadline is None
@@ -3222,26 +3120,20 @@ class WindowsEaHybridDriver(EaPasswordRecoveryMixin):
                 self.sleep(2.0)
                 continue
 
-            observation = self._dismiss_cloud_upload_error(hwnd, observation)
-            observation = self._dismiss_library_tour(hwnd, observation)
-            self._raise_if_account_banned(hwnd, observation)
-            local_data = self._continue_local_data_point(observation)
-            if local_data is not None:
-                if cloud_recovery_clicks >= 2:
-                    self._record("apex-cloud-data-stuck", observation)
-                    raise EaApexStartFailed(
-                        "EA App 云存档错误在两次本地数据恢复后仍未关闭"
-                    )
-                cloud_recovery_clicks += 1
-                self._record(
-                    "apex-cloud-data-local",
-                    observation,
-                    attempt=cloud_recovery_clicks,
-                )
-                self.notify("EA 云存档不可用，选择本地数据继续启动 Apex")
-                launch_deadline = self._request_apex_launch(hwnd, local_data)
+            observation, answered = self._answer_dialogs(hwnd, observation, LAUNCH)
+            if answered is not None and answered.launches:
+                launch_deadline = self._apex_launch_pending_until
                 self.sleep(2.0)
                 continue
+            observation = self._dismiss_library_tour(hwnd, observation)
+            self._raise_if_account_banned(hwnd, observation)
+            if launch_deadline is not None and unknown_dialog is None:
+                # Not answered, but named: the screenshot and the failure say
+                # what EA showed instead of only that Apex never started.
+                unknown_dialog = unknown_dialog_text(observation)
+                if unknown_dialog:
+                    self._record("apex-launch-dialog-unknown", observation, dialog=unknown_dialog)
+                    self.notify(f"EA 弹出未识别的对话框，继续等待 Apex 启动：{unknown_dialog[:80]}")
 
             update = self._apex_update_point(observation)
             if update is not None:

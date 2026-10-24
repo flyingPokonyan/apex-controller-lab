@@ -1,0 +1,191 @@
+{
+  "rect": [
+    192,
+    104,
+    1728,
+    936
+  ],
+  "tokens": [
+    {
+      "text": "Home",
+      "confidence": 0.99999,
+      "roi": [
+        259,
+        174,
+        307,
+        196
+      ]
+    },
+    {
+      "text": "Browse",
+      "confidence": 0.99998,
+      "roi": [
+        259,
+        235,
+        316,
+        256
+      ]
+    },
+    {
+      "text": "Overview",
+      "confidence": 0.99991,
+      "roi": [
+        477,
+        280,
+        556,
+        300
+      ]
+    },
+    {
+      "text": "Currency",
+      "confidence": 0.99992,
+      "roi": [
+        579,
+        277,
+        659,
+        303
+      ]
+    },
+    {
+      "text": "Add-ons",
+      "confidence": 0.99986,
+      "roi": [
+        682,
+        278,
+        756,
+        299
+      ]
+    },
+    {
+      "text": "Library",
+      "confidence": 0.99996,
+      "roi": [
+        257,
+        292,
+        316,
+        319
+      ]
+    },
+    {
+      "text": "Apex Legends",
+      "confidence": 0.99987,
+      "roi": [
+        739,
+        365,
+        832,
+        388
+      ]
+    },
+    {
+      "text": "Cloud sync failed",
+      "confidence": 0.99996,
+      "roi": [
+        740,
+        389,
+        921,
+        415
+      ]
+    },
+    {
+      "text": "Your Apex Legends save data couldn't be synced. Choose which save you'd like to",
+      "confidence": 0.99399,
+      "roi": [
+        682,
+        429,
+        1232,
+        449
+      ]
+    },
+    {
+      "text": "use to continue. This will overwrite your other save.",
+      "confidence": 0.99696,
+      "roi": [
+        679,
+        447,
+        1027,
+        468
+      ]
+    },
+    {
+      "text": "Apex Legends",
+      "confidence": 0.99951,
+      "roi": [
+        260,
+        496,
+        363,
+        516
+      ]
+    },
+    {
+      "text": "APEX",
+      "confidence": 0.99922,
+      "roi": [
+        520,
+        497,
+        643,
+        568
+      ]
+    },
+    {
+      "text": "Continue with local save",
+      "confidence": 0.99913,
+      "roi": [
+        734,
+        497,
+        979,
+        519
+      ]
+    },
+    {
+      "text": "Last modified: Oct 23, 2026, 9:00 PM",
+      "confidence": 0.97105,
+      "roi": [
+        734,
+        522,
+        1059,
+        542
+      ]
+    },
+    {
+      "text": "Replace local save with cloud save",
+      "confidence": 0.99994,
+      "roi": [
+        733,
+        594,
+        1077,
+        614
+      ]
+    },
+    {
+      "text": "Last modified: Oct 23, 2026, 1:24 PM",
+      "confidence": 0.97954,
+      "roi": [
+        733,
+        617,
+        1059,
+        637
+      ]
+    },
+    {
+      "text": "CONFIRM",
+      "confidence": 0.99995,
+      "roi": [
+        1048,
+        685,
+        1125,
+        705
+      ]
+    },
+    {
+      "text": "CANCEL",
+      "confidence": 0.99993,
+      "roi": [
+        1156,
+        684,
+        1224,
+        704
+      ]
+    }
+  ],
+  "source": "Runner 1 (D135) lease 3241, 2026-10-24 01:04Z, app-recovery-menu-open: RapidOCR 3.9.2 of the EA window; dialog, page tabs and the game art on the option row only, no account identifiers."
+}

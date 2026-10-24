@@ -323,6 +323,59 @@ def password_page_blocker(normalized_tokens: Iterable[str]) -> str:
     return "NO_PASSWORD_FIELD"
 
 
+def token_point(
+    tokens: Iterable[object],
+    rect: tuple[int, int, int, int],
+    terms: Sequence[str],
+    *,
+    x_range: tuple[float, float] = (0.0, 1.0),
+    y_range: tuple[float, float] = (0.0, 1.0),
+    exclude: Sequence[str] = (),
+    exact: bool = False,
+) -> tuple[int, int] | None:
+    """Centre of the best on-screen token that carries one of `terms`.
+
+    Earlier terms win over later ones before confidence is considered, so
+    a page holding both "Next" and "Sign in" gets the control the caller
+    asked for first.
+    """
+
+    left, top, right, bottom = rect
+    width = max(1, right - left)
+    height = max(1, bottom - top)
+    matches: list[tuple[int, float, int, int]] = []
+    for token in tokens:
+        if getattr(token, "roi", None) is None:
+            continue
+        text = token.normalized
+        if any(term in text for term in exclude):
+            continue
+        rank = next(
+            (
+                index
+                for index, term in enumerate(terms)
+                if text == term or (not exact and term in text)
+            ),
+            None,
+        )
+        if rank is None:
+            continue
+        x1, y1, x2, y2 = token.roi
+        x = (x1 + x2) // 2
+        y = (y1 + y2) // 2
+        x_ratio = (x - left) / width
+        y_ratio = (y - top) / height
+        if (
+            x_range[0] <= x_ratio <= x_range[1]
+            and y_range[0] <= y_ratio <= y_range[1]
+        ):
+            matches.append((rank, -token.confidence, x, y))
+    if not matches:
+        return None
+    _, _, x, y = min(matches)
+    return x, y
+
+
 def phrase_point(
     tokens: Iterable[object],
     rect: tuple[int, int, int, int],
