@@ -39,10 +39,10 @@ NAMES = {
 }
 DELAY_URL = "http://www.gstatic.com/generate_204"
 MAX_TESTS = 6
-# Since 2026-10-23 the YToo nodes keep dropping connections while the IEPL
-# airport holds, so the operator asked for IEPL nodes first. Not sharing an
-# IP with another account still outranks this. "" turns it off.
-PREFERRED_NODE_MARK = "IEPL"
+# Nodes whose name holds this mark come first, e.g. "IEPL" while one airport
+# keeps dropping connections (2026-10-23). Not sharing an IP with another
+# account still outranks it. "" ranks every airport alike (since 2026-10-24).
+PREFERRED_NODE_MARK = ""
 VERGE_ID = "io.github.clash-verge-rev.clash-verge-rev"
 DEFAULT_PIPE = r"\\.\pipe\verge-mihomo"
 DEFAULT_SOCKET = "/tmp/verge/verge-mihomo.sock"
