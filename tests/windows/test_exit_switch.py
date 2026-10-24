@@ -177,7 +177,8 @@ class NodeChoiceTests(unittest.TestCase):
         self.assertEqual(clash.selected(), FLOWER_HK[1])
         self.assertEqual(switch(clash).current()["node"], FLOWER_HK[1])
 
-    def test_by_default_the_account_keeps_its_own_node_on_either_airport(self):
+    @patch.object(clash_exit, "PREFERRED_NODE_MARK", "")
+    def test_without_a_mark_the_account_keeps_its_own_node_on_either_airport(self):
         clash = FakeClash(flower=FLOWER_HK)
         self.assertEqual(switch(clash).prepare("HK", prefer=[HK[1]])["node"], HK[1])
         self.assertEqual(switch(clash).prepare("HK", prefer=[FLOWER_HK[0]])["node"], FLOWER_HK[0])

@@ -39,10 +39,11 @@ NAMES = {
 }
 DELAY_URL = "http://www.gstatic.com/generate_204"
 MAX_TESTS = 6
-# Nodes whose name holds this mark come first, e.g. "IEPL" while one airport
-# keeps dropping connections (2026-10-23). Not sharing an IP with another
-# account still outranks it. "" ranks every airport alike (since 2026-10-24).
-PREFERRED_NODE_MARK = ""
+# Nodes whose name holds this mark come first. Not sharing an IP with another
+# account still outranks it. "" ranks every airport alike. IEPL again since
+# 2026-10-24: through D163's line YToo nodes leave EA's account panel blank
+# (1 of 8 leases fine since 10-22, IEPL 9 of 11).
+PREFERRED_NODE_MARK = "IEPL"
 VERGE_ID = "io.github.clash-verge-rev.clash-verge-rev"
 DEFAULT_PIPE = r"\\.\pipe\verge-mihomo"
 DEFAULT_SOCKET = "/tmp/verge/verge-mihomo.sock"
