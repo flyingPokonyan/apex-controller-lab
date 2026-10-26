@@ -30,6 +30,7 @@ from apex_automation.ea_app import (
     EaApexStartFailed,
     EaAppAutomationError,
     EaIdentityFact,
+    EaIdentityMismatch,
     EaIdentityUnconfirmed,
     EaWindowUnavailable,
 )
@@ -242,11 +243,27 @@ class AccountPanelSkeletonTest(unittest.TestCase):
             with self.assertRaises(EaIdentityUnconfirmed):
                 driver.verify_identity("ea_1")
 
-    def test_another_readable_account_is_never_assumed_to_be_ours(self) -> None:
+    def test_a_session_this_sign_in_entered_is_ours_whatever_the_corner_reads(self) -> None:
+        # D791 2026-10-26 (leases 3266, 3269): the rental panel over EA's corner
+        # read as "d791" while the account panel was still loading.
+        for read in (EaIdentityFact("someone_else", "badge", False), EaIdentityFact("d791", "badge", True)):
+            with self.subTest(read=read):
+                clock = Clock()
+                driver = self.skeleton_driver(clock, read=read)
+                found = self.identity_wait(driver, clock)
+                self.assertEqual((found.ea_account_id, found.source), ("ea_1", "signin-flow"))
+                self.assertEqual(driver._signed_in_as, "ea_1")
+                with patch("apex_automation.ea_app_win32.time.monotonic", clock):
+                    verified = driver.verify_identity("ea_1")
+                self.assertEqual((verified.ea_account_id, verified.source), ("ea_1", "signin-flow"))
+                self.assertEqual(driver.records[-1], "identity-verified")
+
+    def test_another_readable_account_still_rejects_a_session_this_sign_in_did_not_enter(self) -> None:
         clock = Clock()
-        driver = self.skeleton_driver(clock, read=EaIdentityFact("someone_else", "badge", False))
-        with self.assertRaises(EaAppAutomationError):
-            self.identity_wait(driver, clock)
+        driver = self.skeleton_driver(clock, entered=False, read=EaIdentityFact("d791", "badge", True))
+        with patch("apex_automation.ea_app_win32.time.monotonic", clock):
+            with self.assertRaises(EaIdentityMismatch):
+                driver.verify_identity("ea_1")
         self.assertIsNone(driver._signed_in_as)
 
 

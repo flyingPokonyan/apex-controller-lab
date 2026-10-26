@@ -1356,6 +1356,10 @@ class WindowsEaHybridDriver(EaPasswordRecoveryMixin):
             )
             candidates: list[tuple[float, str]] = []
             for token in self.ocr.read(frame, region):
+                # EA IDs are ASCII. D791's always-on-top rental panel sits over
+                # this corner, and "机器名称：D791" read as the account "d791".
+                if not token.text.isascii():
+                    continue
                 for candidate in identity_candidates(
                     [normalize_ocr_text(token.text)]
                 ):
@@ -2016,13 +2020,15 @@ class WindowsEaHybridDriver(EaPasswordRecoveryMixin):
         self._signed_in_as = None
         return self._with_ui_recovery("signin", lambda: self._sign_in_once(credentials, otp_supplier))
 
-    def _own_sign_in(self, expected_ea_account_id: str | None,
-                     read: EaIdentityFact | None) -> EaIdentityFact | None:
-        """The leased account, when this sign-in entered it and EA shows no other."""
+    def _own_sign_in(self, expected_ea_account_id: str | None) -> EaIdentityFact | None:
+        """The leased account, when this sign-in typed it into EA's login page.
+
+        Credentials are only entered on a login page, after any other account
+        was signed out, so the session that follows is this account. A corner
+        read that disagrees is OCR of something else, not a second account.
+        """
 
         if not expected_ea_account_id or not getattr(self, "_entered_credentials", False):
-            return None
-        if read is not None and not identity_matches(expected_ea_account_id, read.ea_account_id):
             return None
         self._signed_in_as = expected_ea_account_id
         return EaIdentityFact(ea_account_id=expected_ea_account_id, source="signin-flow", verified=True)
@@ -2385,6 +2391,11 @@ class WindowsEaHybridDriver(EaPasswordRecoveryMixin):
                         and pending_identity != identity.ea_account_id):
                     pending_identity = identity.ea_account_id
                     continue
+                own = self._own_sign_in(expected_ea_account_id)
+                if own is not None and not identity_matches(expected_ea_account_id, identity.ea_account_id):
+                    self._record("signed-in", observation, identity=mask_identity(own.ea_account_id),
+                                 identitySource=own.source, observed=mask_identity(identity.ea_account_id))
+                    return own
                 self._record(
                     "signed-in",
                     observation,
@@ -2399,7 +2410,7 @@ class WindowsEaHybridDriver(EaPasswordRecoveryMixin):
             if signed_in_since is None:
                 signed_in_since = time.monotonic()
             if time.monotonic() - signed_in_since >= SIGNED_IN_PANEL_GRACE_S:
-                own = self._own_sign_in(expected_ea_account_id, identity)
+                own = self._own_sign_in(expected_ea_account_id)
                 if own is not None:
                     self._record("signed-in", observation, identity=mask_identity(own.ea_account_id),
                                  identitySource=own.source)
@@ -2463,6 +2474,12 @@ class WindowsEaHybridDriver(EaPasswordRecoveryMixin):
                     # a corner read while EA's account panel is still loading.
                     if (alternate_count >= 3
                             and time.monotonic() - alternate_since >= IDENTITY_MISMATCH_HOLD_S):
+                        if getattr(self, "_signed_in_as", None) == expected_ea_account_id:
+                            self._record("identity-verified", observation,
+                                         identity=mask_identity(expected_ea_account_id),
+                                         identitySource="signin-flow", observed=seen)
+                            return EaIdentityFact(ea_account_id=expected_ea_account_id,
+                                                  source="signin-flow", verified=True)
                         self._record("identity-mismatch", observation, observed=seen)
                         raise EaIdentityMismatch(
                             "EA App 当前稳定 EA ID 与租约不一致"
@@ -2473,12 +2490,13 @@ class WindowsEaHybridDriver(EaPasswordRecoveryMixin):
             else:
                 alternate, alternate_count = None, 0
             self.sleep(1.0)
-        if (not seen and observation is not None and observation.page is EaPage.SIGNED_IN
+        if (observation is not None and observation.page is EaPage.SIGNED_IN
                 and getattr(self, "_signed_in_as", None) == expected_ea_account_id):
-            # Still no readable EA ID, and none other seen: this lease's own
-            # sign-in established the account (see SIGNED_IN_PANEL_GRACE_S).
+            # No readable EA ID of ours: this lease's own sign-in established
+            # the account (see _own_sign_in).
             self._record("identity-verified", observation,
-                         identity=mask_identity(expected_ea_account_id), identitySource="signin-flow")
+                         identity=mask_identity(expected_ea_account_id), identitySource="signin-flow",
+                         observed=seen or None)
             return EaIdentityFact(ea_account_id=expected_ea_account_id, source="signin-flow", verified=True)
         self._record("identity-timeout", observation, observed=seen or None)
         raise EaIdentityUnconfirmed(

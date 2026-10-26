@@ -367,6 +367,25 @@ class IdentityMatchTest(unittest.TestCase):
 
         self.assertIsNone(driver._identity(1))
 
+    def test_identity_reader_skips_text_from_other_windows_over_the_corner(self) -> None:
+        # D791's always-on-top rental panel covers EA's badge corner.
+        class Ocr:
+            def read(self, frame, region):
+                if region.roi[1] >= 100:
+                    return (OcrToken("lagoon3161", 0.998),)
+                return (OcrToken("机器名称：D791", 0.999), OcrToken("IP地址：", 0.98))
+
+        driver = object.__new__(WindowsEaHybridDriver)
+        driver.evidence = None
+        driver.ocr = Ocr()
+        driver._live = lambda hwnd: hwnd
+        driver._frame = lambda: np.zeros((1080, 1920), dtype=np.uint8)
+        driver._clip_rect = lambda hwnd, frame: (0, 0, 1920, 1080)
+
+        self.assertEqual(driver._identity(1).ea_account_id, "lagoon3161")
+        Ocr.read = lambda self, frame, region: (OcrToken("机器名称：D791", 0.999),)
+        self.assertIsNone(driver._identity(1))
+
     def test_identity_reader_falls_back_to_the_lower_home_badge(self) -> None:
         regions = []
 

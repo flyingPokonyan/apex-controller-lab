@@ -62,6 +62,13 @@ class IdentityEvidenceTest(unittest.TestCase):
         # Held for the 10 s a loading account panel needs, one read a second.
         self.assertEqual(driver._identity.call_count, 11)
 
+    def test_consistent_wrong_badges_do_not_reject_this_leases_own_sign_in(self):
+        driver = self.driver(self.fact("d791"))
+        driver._signed_in_as = "wanted"
+        found = driver.verify_identity("wanted")
+        self.assertEqual((found.ea_account_id, found.source, found.verified), ("wanted", "signin-flow", True))
+        self.assertEqual(driver._record.call_args.args[0], "identity-verified")
+
     def test_a_wrong_badge_while_ea_is_still_loading_does_not_reject(self):
         driver = self.driver([self.fact("loading-corner")] * 5 + [self.fact("wanted")])
         self.assertEqual(driver.verify_identity("wanted").ea_account_id, "wanted")
