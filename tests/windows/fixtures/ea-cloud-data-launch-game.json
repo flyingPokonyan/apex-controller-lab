@@ -1,0 +1,531 @@
+{
+ "source": "D791 2026-10-26 15:32 BJ, lease 3268 (user remote capture, scaled to 1920x1080)",
+ "rect": [
+  192,
+  104,
+  1728,
+  936
+ ],
+ "tokens": [
+  {
+   "text": "三",
+   "confidence": 0.64198,
+   "roi": [
+    200,
+    113,
+    223,
+    133
+   ]
+  },
+  {
+   "text": "EA",
+   "confidence": 0.99987,
+   "roi": [
+    940,
+    109,
+    978,
+    137
+   ]
+  },
+  {
+   "text": "□",
+   "confidence": 0.97298,
+   "roi": [
+    1657,
+    113,
+    1679,
+    134
+   ]
+  },
+  {
+   "text": "×",
+   "confidence": 0.9547,
+   "roi": [
+    1696,
+    113,
+    1719,
+    134
+   ]
+  },
+  {
+   "text": "For better connection stability, we recommend using UU Booster",
+   "confidence": 0.99418,
+   "roi": [
+    251,
+    149,
+    691,
+    172
+   ]
+  },
+  {
+   "text": "×",
+   "confidence": 0.51024,
+   "roi": [
+    1687,
+    147,
+    1713,
+    173
+   ]
+  },
+  {
+   "text": "Home",
+   "confidence": 0.99996,
+   "roi": [
+    256,
+    206,
+    308,
+    233
+   ]
+  },
+  {
+   "text": "Search games and add-ons",
+   "confidence": 0.99988,
+   "roi": [
+    609,
+    206,
+    802,
+    229
+   ]
+  },
+  {
+   "text": "0",
+   "confidence": 0.62094,
+   "roi": [
+    1271,
+    207,
+    1293,
+    228
+   ]
+  },
+  {
+   "text": "fixture-player",
+   "confidence": 0.99777,
+   "roi": [
+    1538,
+    206,
+    1625,
+    232
+   ]
+  },
+  {
+   "text": "品",
+   "confidence": 0.50786,
+   "roi": [
+    214,
+    266,
+    242,
+    294
+   ]
+  },
+  {
+   "text": "Browse",
+   "confidence": 0.99998,
+   "roi": [
+    257,
+    266,
+    317,
+    293
+   ]
+  },
+  {
+   "text": "Apex Legends",
+   "confidence": 0.99996,
+   "roi": [
+    474,
+    258,
+    683,
+    297
+   ]
+  },
+  {
+   "text": "Overview",
+   "confidence": 0.99994,
+   "roi": [
+    475,
+    312,
+    558,
+    336
+   ]
+  },
+  {
+   "text": "Currency",
+   "confidence": 0.99984,
+   "roi": [
+    578,
+    311,
+    660,
+    337
+   ]
+  },
+  {
+   "text": "Add-ons",
+   "confidence": 0.99994,
+   "roi": [
+    682,
+    313,
+    756,
+    334
+   ]
+  },
+  {
+   "text": "Library",
+   "confidence": 0.99997,
+   "roi": [
+    257,
+    328,
+    316,
+    353
+   ]
+  },
+  {
+   "text": "EA Play",
+   "confidence": 0.99747,
+   "roi": [
+    257,
+    385,
+    318,
+    413
+   ]
+  },
+  {
+   "text": "We couldn't load your cloud data",
+   "confidence": 0.99178,
+   "roi": [
+    688,
+    384,
+    1084,
+    414
+   ]
+  },
+  {
+   "text": "Apex Le",
+   "confidence": 0.99965,
+   "roi": [
+    577,
+    417,
+    668,
+    450
+   ]
+  },
+  {
+   "text": "We couldn't connect to the cloud or find any local data for",
+   "confidence": 0.99848,
+   "roi": [
+    686,
+    425,
+    1197,
+    452
+   ]
+  },
+  {
+   "text": "Add some friends or connect your social",
+   "confidence": 0.99986,
+   "roi": [
+    1479,
+    431,
+    1720,
+    452
+   ]
+  },
+  {
+   "text": "this game. If you recently launched the EA app on a different",
+   "confidence": 0.99624,
+   "roi": [
+    689,
+    451,
+    1216,
+    474
+   ]
+  },
+  {
+   "text": "accounts.",
+   "confidence": 0.99997,
+   "roi": [
+    1567,
+    453,
+    1632,
+    473
+   ]
+  },
+  {
+   "text": "Installed games",
+   "confidence": 0.99989,
+   "roi": [
+    200,
+    467,
+    303,
+    487
+   ]
+  },
+  {
+   "text": "device, we recommend using that same device so we can try",
+   "confidence": 0.99933,
+   "roi": [
+    686,
+    473,
+    1214,
+    500
+   ]
+  },
+  {
+   "text": "to restore your cloud data. Or you can create a new save by",
+   "confidence": 0.9912,
+   "roi": [
+    688,
+    499,
+    1203,
+    522
+   ]
+  },
+  {
+   "text": "FIND FRIENDS",
+   "confidence": 0.99542,
+   "roi": [
+    1542,
+    490,
+    1657,
+    510
+   ]
+  },
+  {
+   "text": "Apex Legends",
+   "confidence": 0.98962,
+   "roi": [
+    257,
+    527,
+    364,
+    553
+   ]
+  },
+  {
+   "text": "launching the game now.",
+   "confidence": 0.99952,
+   "roi": [
+    688,
+    520,
+    904,
+    546
+   ]
+  },
+  {
+   "text": "Error code: EC:10606",
+   "confidence": 0.99867,
+   "roi": [
+    688,
+    568,
+    886,
+    591
+   ]
+  },
+  {
+   "text": " IMPORT FRIENDS",
+   "confidence": 0.95708,
+   "roi": [
+    1490,
+    609,
+    1654,
+    629
+   ]
+  },
+  {
+   "text": "LAUNCH GAME",
+   "confidence": 0.99928,
+   "roi": [
+    996,
+    629,
+    1112,
+    649
+   ]
+  },
+  {
+   "text": "CANCEL",
+   "confidence": 0.99992,
+   "roi": [
+    1149,
+    629,
+    1215,
+    650
+   ]
+  },
+  {
+   "text": "b 4,2019",
+   "confidence": 0.97283,
+   "roi": [
+    1355,
+    624,
+    1426,
+    645
+   ]
+  },
+  {
+   "text": "Steam",
+   "confidence": 0.99908,
+   "roi": [
+    1545,
+    654,
+    1593,
+    675
+   ]
+  },
+  {
+   "text": "No friends found",
+   "confidence": 0.98364,
+   "roi": [
+    1548,
+    672,
+    1670,
+    692
+   ]
+  },
+  {
+   "text": "PlayStation",
+   "confidence": 0.99986,
+   "roi": [
+    1545,
+    719,
+    1624,
+    740
+   ]
+  },
+  {
+   "text": "Import friends from..",
+   "confidence": 0.95736,
+   "roi": [
+    1545,
+    737,
+    1675,
+    757
+   ]
+  },
+  {
+   "text": "Achievements (1/12 unlocked)",
+   "confidence": 0.9883,
+   "roi": [
+    476,
+    757,
+    720,
+    780
+   ]
+  },
+  {
+   "text": "Xbox",
+   "confidence": 0.99827,
+   "roi": [
+    1546,
+    784,
+    1585,
+    803
+   ]
+  },
+  {
+   "text": "Win a game as an assault character",
+   "confidence": 0.98187,
+   "roi": [
+    566,
+    822,
+    778,
+    846
+   ]
+  },
+  {
+   "text": "Apex Assault",
+   "confidence": 0.99887,
+   "roi": [
+    567,
+    802,
+    655,
+    825
+   ]
+  },
+  {
+   "text": "Reach player level 50",
+   "confidence": 0.99441,
+   "roi": [
+    891,
+    833,
+    1021,
+    853
+   ]
+  },
+  {
+   "text": "The Player",
+   "confidence": 0.99983,
+   "roi": [
+    892,
+    814,
+    964,
+    835
+   ]
+  },
+  {
+   "text": "Decked Out",
+   "confidence": 0.99926,
+   "roi": [
+    1219,
+    806,
+    1299,
+    826
+   ]
+  },
+  {
+   "text": "Equip any 2 legendary equipment",
+   "confidence": 0.99071,
+   "roi": [
+    1219,
+    827,
+    1417,
+    847
+   ]
+  },
+  {
+   "text": "Import friends from Xbox",
+   "confidence": 0.98552,
+   "roi": [
+    1546,
+    803,
+    1698,
+    820
+   ]
+  },
+  {
+   "text": "Oct 16, 2026",
+   "confidence": 0.93866,
+   "roi": [
+    569,
+    841,
+    673,
+    864
+   ]
+  },
+  {
+   "text": "items at the same time.",
+   "confidence": 0.99977,
+   "roi": [
+    1219,
+    843,
+    1360,
+    860
+   ]
+  },
+  {
+   "text": "1→",
+   "confidence": 0.91244,
+   "roi": [
+    1679,
+    885,
+    1703,
+    907
+   ]
+  },
+  {
+   "text": "VIEW ALL",
+   "confidence": 0.98547,
+   "roi": [
+    919,
+    905,
+    999,
+    925
+   ]
+  }
+ ]
+}

@@ -24,6 +24,7 @@ from apex_automation.ea_app import (
     EaLoginRejected,
     EaOtpUnavailable,
 )
+from apex_automation.ea_dialogs import CLOUD_DATA_ERROR, LAUNCH, SIGNOUT, known_dialog
 from apex_automation.ea_app_win32 import (
     EaObservation,
     WindowsEaHybridDriver,
@@ -1107,6 +1108,52 @@ class EaLaunchRecoveryTest(unittest.TestCase):
             ["apex-entry", "apex-play", "apex-cloud-data-local"],
         )
         self.assertTrue(any("本地数据" in notice for notice in notices))
+
+    def test_cloud_data_error_without_local_data_launches_a_new_save(self) -> None:
+        # D791, 2026-10-26 leases 3267/3268: EC:10606 offers LAUNCH GAME / CANCEL.
+        entry = self.observation(("Apex Legends", 120, 460))
+        play = self.observation(("Apex Legends", 800, 280), ("PLAY", 1150, 700))
+        cloud_error = self.observation(
+            ("We couldn't load your cloud data", 960, 400),
+            ("Error code: EC:10606", 900, 600),
+            ("LAUNCH GAME", 1050, 660),
+            ("CANCEL", 1190, 660),
+        )
+        clicks: list[tuple[int, int]] = []
+        records: list[str] = []
+        driver = self.driver([entry, play, cloud_error], clicks, records)
+        driver._process_running = lambda _name: len(clicks) >= 3
+
+        driver.start_apex()
+
+        self.assertEqual(clicks, [(120, 460), (1150, 700), (1050, 660)])
+        self.assertEqual(records, ["apex-entry", "apex-play", "apex-cloud-data-local"])
+
+    def test_launch_game_is_pressed_only_on_the_cloud_data_dialog(self) -> None:
+        title = ("We couldn't load your cloud data", 960, 400)
+        launch = ("LAUNCH GAME", 1050, 660)
+        cancel = ("CANCEL", 1190, 660)
+        self.assertEqual(CLOUD_DATA_ERROR.controls(self.observation(title, launch, cancel)), ((1050, 660),))
+        for placed in (
+            (launch, cancel),
+            (title, launch),
+            (title, ("LAUNCH GAME", 1050, 760), cancel),
+            (("Your latest sync was interrupted", 960, 400), launch, cancel),
+            (title, ("Launching game...", 1050, 660), cancel),
+        ):
+            self.assertIsNone(known_dialog(self.observation(*placed), LAUNCH), placed)
+
+    def test_real_d791_cloud_data_frame_presses_launch_game(self) -> None:
+        data = json.loads((REPOSITORY_ROOT / "tests" / "windows" / "fixtures"
+                           / "ea-cloud-data-launch-game.json").read_text(encoding="utf-8"))
+        tokens = tuple(OcrToken(t["text"], t["confidence"], tuple(t["roi"])) for t in data["tokens"])
+        observation = EaObservation(
+            rect=tuple(data["rect"]), frame=np.zeros((1, 1), dtype=np.uint8), tokens=tokens,
+            page=classify_page(token.normalized for token in tokens),
+        )
+        self.assertIs(known_dialog(observation, LAUNCH), CLOUD_DATA_ERROR)
+        self.assertEqual(CLOUD_DATA_ERROR.controls(observation), ((1054, 639),))
+        self.assertIsNone(known_dialog(observation, SIGNOUT))
 
     def test_cloud_sync_close_does_not_release_a_session_without_login_evidence(self) -> None:
         signed_in = EaObservation(

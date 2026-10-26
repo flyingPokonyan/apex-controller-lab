@@ -181,6 +181,7 @@ CLOUD_DATA_ERROR_TERMS = (
     "无法加载您的云数据",
     "无法加载云数据",
     "ec10600",
+    "ec10606",
     "ec10609",
 )
 CONTINUE_LOCAL_DATA_TERMS = (
@@ -189,6 +190,7 @@ CONTINUE_LOCAL_DATA_TERMS = (
     "使用本地数据继续",
     "继续使用本地数据",
 )
+LAUNCH_GAME_TERMS = ("launchgame", "启动游戏", "开始游戏")
 
 
 def continue_local_data_point(observation) -> Point | None:
@@ -196,8 +198,32 @@ def continue_local_data_point(observation) -> Point | None:
 
     if not _contains(observation, CLOUD_DATA_ERROR_TERMS):
         return None
-    return token_point(observation.tokens, observation.rect, CONTINUE_LOCAL_DATA_TERMS,
-                       x_range=(0.35, 0.80), y_range=(0.45, 0.90))
+    point = token_point(observation.tokens, observation.rect, CONTINUE_LOCAL_DATA_TERMS,
+                        x_range=(0.35, 0.80), y_range=(0.45, 0.90))
+    return point if point is not None else new_save_launch_point(observation)
+
+
+def new_save_launch_point(observation) -> Point | None:
+    """Launch game on the EC:10606 variant: no cloud or local data, start a new save.
+
+    2026-10-26, D791 leases 3267/3268: "We couldn't load your cloud data" with
+    LAUNCH GAME / CANCEL instead of Continue with local data. Launch game
+    starts with a new local save, the same outcome as the local-data choice.
+    """
+
+    placed, rect = _trusted(observation), observation.rect
+    title = phrase_point(placed, rect, CLOUD_DATA_ERROR_TERMS[0],
+                         x_range=(0.20, 0.80), y_range=(0.15, 0.65))
+    launch = token_point(placed, rect, LAUNCH_GAME_TERMS, exact=True,
+                         x_range=(0.35, 0.85), y_range=(0.40, 0.90))
+    cancel = token_point(placed, rect, ("cancel", "取消"), exact=True,
+                         x_range=(0.40, 0.90), y_range=(0.40, 0.90))
+    if title is None or launch is None or cancel is None:
+        return None
+    # One button row under the title, Launch game left of Cancel.
+    if not (launch[1] > title[1] and abs(launch[1] - cancel[1]) <= 20 and launch[0] < cancel[0]):
+        return None
+    return launch
 
 
 # --- Cloud sync failed: choose which save (local / cloud, Confirm) -------------
