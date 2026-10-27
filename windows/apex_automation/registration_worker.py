@@ -4,6 +4,7 @@ from __future__ import annotations
 import json
 import hashlib
 import datetime as dt
+import http.client
 import os
 from pathlib import Path
 import subprocess
@@ -77,8 +78,14 @@ class BitBrowser:
                       headers={'Content-Type': 'application/json', **({'x-api-key': self.api_key} if self.api_key else {})})
 
         def send():
-            with self.opener.open(req, timeout=10) as response:
-                return json.loads(response.read())
+            try:
+                with self.opener.open(req, timeout=10) as response:
+                    return json.loads(response.read())
+            except http.client.HTTPException as error:
+                # 54345 is in Windows' ephemeral range: with no BitBrowser
+                # listening, a connect can land on itself and read back its own
+                # request line (BadStatusLine). That is an absent Local API.
+                raise ConnectionError(f'BitBrowser Local API 无有效响应：{error!r}') from error
         # Shares the machine-wide turn with registration children opening windows.
         body = call_local_api(send, unreachable=(OSError,))
         if not isinstance(body, dict) or body.get('success') is not True:

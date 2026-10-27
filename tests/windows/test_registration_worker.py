@@ -1,3 +1,4 @@
+import http.client
 import json
 from pathlib import Path
 import sys
@@ -270,6 +271,21 @@ class RegistrationWorkerTests(unittest.TestCase):
         self.worker.bit.pids.side_effect = OSError('not running')
         self.worker.request.side_effect = [{'batch': None}, {'action': 'game'}]
         self.assertFalse(self.worker.before_game(self.ea))
+        self.ea.ensure_started.assert_called_once()
+
+    def test_local_api_port_connected_to_itself_is_an_absent_bitbrowser(self):
+        # D791 2026-10-26: no BitBrowser, the connect landed on its own port and
+        # read back "POST /browser/pids/all HTTP/1.1" as the status line.
+        from apex_registration.utils import bitbrowser
+        self.enterContext(patch.dict('os.environ', {'APEX_BITBROWSER_LOCK_DIR': str(self.root)}))
+        self.enterContext(patch.object(bitbrowser.time, 'sleep'))
+        bit = BitBrowser('http://127.0.0.1:54345')
+        bit.opener = Mock()
+        bit.opener.open.side_effect = http.client.BadStatusLine('POST /browser/pids/all HTTP/1.1')
+        self.worker.bit = bit
+        self.worker.request.side_effect = [{'batch': None}, {'action': 'game'}]
+        self.assertFalse(self.worker.before_game(self.ea))
+        self.assertEqual(self.worker.request.call_args_list[1].args[2]['error'], 'BitBrowser Local API 未就绪')
         self.ea.ensure_started.assert_called_once()
 
     def test_parent_preserves_acknowledged_child_failure(self):
