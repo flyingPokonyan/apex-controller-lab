@@ -27,6 +27,7 @@ from .ea_app import (
     EaCacheCleanupFailed,
     EaApexControlMissing,
     EaApexDownloadRequired,
+    EaApexLaunchStalled,
     EaApexStartFailed,
     EaAppDriver,
     EaCredentialsRejected,
@@ -1260,6 +1261,7 @@ class AccountOrchestrator:
 
             self._update_checkpoint(workflow_phase=WorkflowPhase.APEX_STARTING)
             restart_reason: str | None = None
+            launch_stalled = False
             try:
                 self.ea_driver.start_apex()
             except EaApexDownloadRequired:
@@ -1284,12 +1286,21 @@ class AccountOrchestrator:
                 # EA showed no entry or Play, so nothing was launched. A stuck
                 # page usually recovers after a restart, far cheaper than a new login.
                 restart_reason = f"EA App 未显示 Apex 启动入口，自动执行一次 Restart app 后复查：{error}"
+            except EaApexLaunchStalled as error:
+                # About one Play in thirteen leaves EA on "Launching game…" until
+                # the lease fails; the next lease's restarted EA then launches
+                # in seconds. Restart here and click once more, not log in again.
+                restart_reason = f"点击 Play 后 Apex 没有启动，重启 EA 后在当前登录里再试一次：{error}"
+                launch_stalled = True
             if restart_reason is not None:
                 self.notify(restart_reason)
                 lease_gate = self._lease_gate(keeper)
                 if lease_gate is not None:
                     return lease_gate
-                self.ea_driver.restart_app()
+                if launch_stalled:
+                    self.ea_driver.recover_stalled_launch()
+                else:
+                    self.ea_driver.restart_app()
                 lease_gate = self._lease_gate(keeper)
                 if lease_gate is not None:
                     return lease_gate

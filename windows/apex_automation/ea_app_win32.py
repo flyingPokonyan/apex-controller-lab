@@ -30,6 +30,7 @@ from .ea_app import (
     EaAppAutomationError,
     EaApexControlMissing,
     EaApexDownloadRequired,
+    EaApexLaunchStalled,
     EaApexStartFailed,
     EaCaptchaRequired,
     EaCaptureUnavailable,
@@ -3007,6 +3008,18 @@ class WindowsEaHybridDriver(EaPasswordRecoveryMixin):
             + (f"：{last_error}" if last_error else "")
         )
 
+    def recover_stalled_launch(self) -> None:
+        """Restart EA's process after Play left it on "Launching game…".
+
+        The modal can hide EA's own menu, and the next lease's freshly
+        restarted EA reached the game in seconds. The session survives the
+        restart; the caller verifies the identity before clicking Play again.
+        """
+
+        if any(self._process_running(name) for name in APEX_EXECUTABLES):
+            return  # The game came after all; start_apex will take it as started.
+        self._recover_ui_surface("launch")
+
     def restart_app(self) -> EaUiState:
         """Restart EA through its own menu and wait for a readable session."""
 
@@ -3104,8 +3117,8 @@ class WindowsEaHybridDriver(EaPasswordRecoveryMixin):
                 raise EaApexStartFailed("EA App 中 Apex 更新等待超过 2 小时")
             if launch_deadline is not None and now >= launch_deadline:
                 if unknown_dialog:
-                    raise EaApexStartFailed(f"点击 EA Play 后未发现 Apex 进程，EA 弹窗未识别：{unknown_dialog[:80]}")
-                raise EaApexStartFailed("点击 EA Play 后未发现 Apex 进程")
+                    raise EaApexLaunchStalled(f"点击 EA Play 后未发现 Apex 进程，EA 弹窗未识别：{unknown_dialog[:80]}")
+                raise EaApexLaunchStalled("点击 EA Play 后未发现 Apex 进程")
             if (
                 update_deadline is None
                 and launch_deadline is None

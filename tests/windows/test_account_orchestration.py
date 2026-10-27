@@ -35,6 +35,7 @@ from apex_automation.ea_app import (
     EaAccountBanned,
     EaAppAutomationError,
     EaApexDownloadRequired,
+    EaApexLaunchStalled,
     EaApexStartFailed,
     EaCredentialsRejected,
     EaIdentityFact,
@@ -461,6 +462,9 @@ class FakeEaDriver:
     def restart_app(self) -> EaUiState:
         self.log.append("ea.restart")
         return EaUiState.SIGNED_IN
+
+    def recover_stalled_launch(self) -> None:
+        self.log.append("ea.recover_launch")
 
     def start_apex(self) -> None:
         self.log.append("apex.start")
@@ -1828,6 +1832,75 @@ class AccountOrchestratorTest(unittest.TestCase):
             self.assertEqual(log.count("apex.start"), 4)
             self.assertEqual(log.count("ea.repair_install"), 2)
             self.assertEqual(log.count("ea.restart"), 1)
+
+    def _stalled_launch_run(self, directory, stalls):
+        now = datetime.now(timezone.utc)
+        lease = replace(
+            FakeAccountProvider.lease("acct_1", now=now),
+            expected_ea_account_id="ea_1",
+        )
+        provider = FakeAccountProvider(
+            [lease],
+            credentials={"acct_1": SecretCredentials("login@example.test", "password")},
+            otp_factory=lambda challenge_id, started_at: OtpCode(
+                code="123456",
+                challenge_id=challenge_id,
+                received_at=started_at,
+                expires_at=started_at + timedelta(minutes=1),
+            ),
+        )
+        log: list[str] = []
+
+        class StalledLaunchDriver(FakeEaDriver):
+            def __init__(self):
+                super().__init__(log, "ea_1")
+                self.starts = 0
+
+            def start_apex(self) -> None:
+                self.starts += 1
+                self.log.append("apex.start")
+                if self.starts <= stalls:
+                    raise EaApexLaunchStalled("点击 EA Play 后未发现 Apex 进程")
+
+        result = AccountOrchestrator(
+            provider=provider,
+            ea_driver=StalledLaunchDriver(),
+            play_session=FakeManagedSession(log, FakeDrain()),
+            checkpoint_store=AtomicCheckpointStore(Path(directory) / "account-cycle-status.json"),
+            device_id="device_1",
+            capture_source=object(),
+            operation_id_factory=iter(["claim_1", "renew_1", "credentials_1", "otp_1", "close_1"]).__next__,
+            completion_poll_s=0.1,
+            sleep=lambda _: None,
+            notify=lambda _: None,
+        ).run_once()
+        return result, log
+
+    def test_stalled_launch_restarts_ea_and_plays_in_the_same_login(self) -> None:
+        # D791 lease 5f679317 (2026-10-27): EA sat on "Launching game…" and the
+        # lease failed; the next lease's restarted EA reached the game in 29 s.
+        with tempfile.TemporaryDirectory() as directory:
+            result, log = self._stalled_launch_run(directory, stalls=1)
+
+            self.assertEqual(result.outcome, AccountCycleOutcome.COMPLETED)
+            self.assertIsNone(result.error_code)
+            self.assertEqual(log.count("ea.sign_in"), 1)
+            self.assertEqual(log.count("apex.start"), 2)
+            self.assertNotIn("ea.restart", log)
+            recover = log.index("ea.recover_launch")
+            verify = log.index("ea.verify_identity", recover)
+            self.assertLess(verify, log.index("apex.start", recover))
+            self.assertLess(log.index("apex.start", recover), log.index("play.start"))
+
+    def test_launch_stalling_again_after_restart_fails_the_lease_as_before(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            result, log = self._stalled_launch_run(directory, stalls=2)
+
+            self.assertEqual(result.outcome, AccountCycleOutcome.COMPLETED)
+            self.assertEqual(result.error_code, "APEX_START_FAILED")
+            self.assertEqual(log.count("ea.recover_launch"), 1)
+            self.assertEqual(log.count("apex.start"), 2)
+            self.assertNotIn("play.start", log)
 
     def test_transient_renew_failure_after_apex_start_recovers_in_place(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

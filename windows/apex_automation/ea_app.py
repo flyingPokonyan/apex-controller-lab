@@ -105,6 +105,10 @@ class EaApexControlMissing(EaApexStartFailed):
     """EA never showed the Apex entry or a Play/Update control; nothing was launched."""
 
 
+class EaApexLaunchStalled(EaApexStartFailed):
+    """Play was clicked but no game process came; EA sat on "Launching game…"."""
+
+
 class EaOtpUnavailable(EaAppAutomationError):
     """EA asked for a code this runner has no way to produce."""
 
@@ -158,6 +162,8 @@ class EaAppDriver(Protocol):
 
     def restart_app(self) -> EaUiState: ...
 
+    def recover_stalled_launch(self) -> None: ...
+
     def start_apex(self) -> None: ...
 
     def stop_apex(self, *, settle_launch=False) -> ApexExitEvidence: ...
@@ -205,6 +211,9 @@ class UnavailableEaAppDriver:
     def restart_app(self) -> EaUiState:
         self._unavailable()
         return EaUiState.UNKNOWN
+
+    def recover_stalled_launch(self) -> None:
+        self._unavailable()
 
     def start_apex(self) -> None:
         self._unavailable()

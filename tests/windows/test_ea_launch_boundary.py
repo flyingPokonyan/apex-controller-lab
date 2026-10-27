@@ -123,9 +123,9 @@ class LaunchCleanupTest(unittest.TestCase):
         self.assertGreaterEqual(now[0], 150)
 
     def test_second_launch_is_the_last_before_cleanup(self):
-        from apex_automation.ea_app import EaApexStartFailed
+        from apex_automation.ea_app import EaApexLaunchStalled
         driver, now, clicks, records = self.launch(game_starts_at=float("inf"))
-        with self.assertRaisesRegex(EaApexStartFailed, "未发现 Apex 进程"):
+        with self.assertRaisesRegex(EaApexLaunchStalled, "未发现 Apex 进程"):
             driver.start_apex()
         self.assertEqual(clicks.count((1150, 700)), 2)
         self.assertEqual(records.count("apex-play-again"), 1)

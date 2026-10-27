@@ -170,7 +170,7 @@ def _cache_cleanup(value):
 
 
 def _recovery_steps(value):
-    if not isinstance(value, list) or any(step not in {"preflight", "signin", "signout"} for step in value):
+    if not isinstance(value, list) or any(step not in {"preflight", "signin", "signout", "launch"} for step in value):
         raise ValueError("invalid EA recovery steps")
     return tuple(dict.fromkeys(value))
 

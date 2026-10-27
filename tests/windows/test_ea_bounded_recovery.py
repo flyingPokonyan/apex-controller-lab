@@ -76,6 +76,21 @@ class BoundedRecoveryTest(unittest.TestCase):
         driver.restart_app.assert_not_called()
         driver._restart_ea_process.assert_not_called()
 
+    def test_stalled_launch_restarts_the_ea_process_once_per_lease(self):
+        driver = self.driver()
+        driver.recover_stalled_launch()
+        driver._restart_ea_process.assert_called_once()
+        driver.restart_app.assert_not_called()  # EA's menu can sit under "Launching game…".
+        with self.assertRaises(EaUiRecoveryExhausted):
+            driver.recover_stalled_launch()
+        driver._restart_ea_process.assert_called_once()
+
+    def test_a_game_that_started_late_is_not_restarted(self):
+        driver = self.driver()
+        driver._process_running.return_value = True
+        driver.recover_stalled_launch()
+        driver._restart_ea_process.assert_not_called()
+
     def test_password_rejection_keeps_its_existing_password_reset_path(self):
         driver = self.driver()
         driver._sign_in_once = Mock(side_effect=EaCredentialsRejected('confirmed rejection'))
