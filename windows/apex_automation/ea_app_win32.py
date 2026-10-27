@@ -3018,7 +3018,15 @@ class WindowsEaHybridDriver(EaPasswordRecoveryMixin):
 
         if any(self._process_running(name) for name in APEX_EXECUTABLES):
             return  # The game came after all; start_apex will take it as started.
-        self._recover_ui_surface("launch")
+        try:
+            self._recover_ui_surface("launch")
+        except EaUiRecoveryExhausted as error:
+            if any(self._process_running(name) for name in APEX_EXECUTABLES):
+                return
+            # Keep the lease's ending a machine-side launch failure as before
+            # this retry existed. Forge cools the account down on
+            # EA_RECOVERY_EXHAUSTED, which would blame it for this desktop.
+            raise EaApexStartFailed(f"重启 EA 后仍无法再次启动 Apex：{error}") from error
 
     def restart_app(self) -> EaUiState:
         """Restart EA through its own menu and wait for a readable session."""

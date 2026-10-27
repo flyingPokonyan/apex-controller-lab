@@ -7,7 +7,8 @@ from unittest.mock import Mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2] / 'windows'))
 from apex_automation.ea_app import (
-    EaAppAutomationError, EaCaptureUnavailable, EaCredentialsRejected, EaIdentityFact, EaUiRecoveryExhausted,
+    EaApexStartFailed, EaAppAutomationError, EaCaptureUnavailable, EaCredentialsRejected, EaIdentityFact,
+    EaUiRecoveryExhausted,
 )
 from apex_automation.ea_app_win32 import WindowsEaHybridDriver
 from apex_automation.ea_pages import EaPage
@@ -81,9 +82,20 @@ class BoundedRecoveryTest(unittest.TestCase):
         driver.recover_stalled_launch()
         driver._restart_ea_process.assert_called_once()
         driver.restart_app.assert_not_called()  # EA's menu can sit under "Launching game…".
-        with self.assertRaises(EaUiRecoveryExhausted):
+        with self.assertRaises(EaApexStartFailed) as raised:
             driver.recover_stalled_launch()
         driver._restart_ea_process.assert_called_once()
+        self.assertNotIsInstance(raised.exception, EaUiRecoveryExhausted)
+
+    def test_failed_restart_after_a_stall_still_ends_as_a_launch_failure(self):
+        # EA_RECOVERY_EXHAUSTED would put the account on Forge's cooldown for
+        # what is a desktop problem; APEX_START_FAILED is what it was before.
+        driver = self.driver()
+        driver._restart_ea_process.side_effect = EaUiRecoveryExhausted("EA 重启后仍没有可识别页面")
+        with self.assertRaises(EaApexStartFailed) as raised:
+            driver.recover_stalled_launch()
+        self.assertEqual(raised.exception.reason_code, "APEX_START_FAILED")
+        self.assertNotIsInstance(raised.exception, EaUiRecoveryExhausted)
 
     def test_a_game_that_started_late_is_not_restarted(self):
         driver = self.driver()
