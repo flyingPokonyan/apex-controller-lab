@@ -157,6 +157,9 @@ class PilotSender(Protocol):
     def tap_scan_code(self, scan_code: int, duration_ms: int) -> None: ...
     def hold_scan_codes(self, scan_codes: Iterable[int], duration_ms: int) -> None: ...
     def move_mouse(self, dx: int, dy: int) -> None: ...
+    def hold_scan_codes_looking(
+        self, scan_codes: Iterable[int], duration_ms: int, moves: Iterable[tuple[int, int]]
+    ) -> None: ...
     def hold_mouse_button(self, button: str, duration_ms: int) -> None: ...
     def release_all(self) -> None: ...
 
@@ -733,6 +736,18 @@ class CapabilityPilot:
                 or not all(isinstance(code, int) for code in scan_codes)
             ):
                 raise ValueError(f"动作序列 {action_name} 第 {index} 步没有按键")
+            look = raw_step.get("look")
+            if look is not None and (
+                not isinstance(look, list)
+                or len(look) > 240
+                or not all(
+                    isinstance(move, (list, tuple))
+                    and len(move) == 2
+                    and all(isinstance(value, int) and abs(value) <= 300 for value in move)
+                    for move in look
+                )
+            ):
+                raise ValueError(f"动作序列 {action_name} 第 {index} 步移动中的视角轨迹无效")
 
     # ------------------------------------------------------------------ input
 
@@ -987,6 +1002,9 @@ class CapabilityPilot:
             if self.observed_state == "IN_MATCH_ALIVE"
             else 0
         )
+        if hasattr(self.hud_reader, "want_heading"):
+            # The compass costs an OCR pass; only the calibration needs it.
+            self.hud_reader.want_heading = not self.match_brain.mouse.can_turn
         with self.metrics.measure("hudRead"):
             reading = self.hud_reader.read(frame)
         self._brain_used_this_round = True
@@ -1011,6 +1029,11 @@ class CapabilityPilot:
         if step_type == "holdKeys":
             scan_codes = [int(code) for code in raw_step["scanCodes"]]
             duration_ms = int(raw_step["durationMs"])
+            look = raw_step.get("look")
+            if look:
+                moves = [(int(dx), int(dy)) for dx, dy in look]
+                self.sender.hold_scan_codes_looking(scan_codes, duration_ms, moves)
+                return {"type": step_type, "scanCodes": scan_codes, "durationMs": duration_ms, "lookTicks": len(moves)}
             self.sender.hold_scan_codes(scan_codes, duration_ms)
             return {"type": step_type, "scanCodes": scan_codes, "durationMs": duration_ms}
         scan_code = int(raw_step["scanCode"])

@@ -229,6 +229,8 @@ class FrameHud:
     def __init__(self, ocr: OcrProvider | None = None) -> None:
         self.ocr = ocr
         self._last_scene: np.ndarray | None = None
+        # The brain turns this off once it has measured the mouse scale.
+        self.want_heading = True
 
     def read(self, frame: np.ndarray) -> HudReading:
         if frame.shape[1] != FRAME_SIZE[0] or frame.shape[0] != FRAME_SIZE[1]:
@@ -249,7 +251,7 @@ class FrameHud:
             hurt=trail,
             pickup_prompt=self._prompt(frame),
             hit_confirmed=target_bar_near_crosshair(frame, red),
-            heading=self.heading(frame),
+            heading=self.heading(frame) if self.want_heading else None,
             scene_change=change,
         )
 
