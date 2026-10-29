@@ -60,7 +60,7 @@
     "sampleMs": 5000,
     "maxFrames": 8,
     "maxRounds": 2,
-    "mode": "probe",
+    "mode": "random",
     "preferredLegend": "命脉",
     "probeIntervalMs": 6000,
     "probeMaxPerRound": 5
