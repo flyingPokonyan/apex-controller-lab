@@ -378,6 +378,8 @@ class PlaySessionRunner:
             rules = self.playlists.get(identity.playlist) if identity.playlist else None
             if identity.playlist:
                 recorder.log("PLAYLIST_SELECTED", playlist=identity.playlist)
+            from .hud import FrameHud
+
             pilot = CapabilityPilot(
                 self.config,
                 apex_source,
@@ -404,6 +406,8 @@ class PlaySessionRunner:
                 metrics=metrics,
                 pack_probe=pack_probe,
                 maintenance=self.maintenance,
+                # Only read by the active in-match profile.
+                hud_reader=FrameHud(self.ocr_provider),
             )
             outcome = pilot.run(duration_s=duration_s)
             if outcome == "TARGET_REACHED":

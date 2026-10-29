@@ -1,0 +1,107 @@
+{
+  "hurt_arrow": {
+    "note": "trios 4:16.75: shot from behind-left, red trail on the health bar",
+    "pieces": [
+      {
+        "file": "hurt_arrow_0.jpg",
+        "x": 0,
+        "y": 1270
+      },
+      {
+        "file": "hurt_arrow_1.jpg",
+        "x": 1760,
+        "y": 1270
+      },
+      {
+        "file": "hurt_arrow_2.jpg",
+        "x": 980,
+        "y": 700
+      }
+    ]
+  },
+  "empty_handed": {
+    "note": "Bot Royale 2:20: landed, both weapon slots empty, full health",
+    "pieces": [
+      {
+        "file": "empty_handed_0.jpg",
+        "x": 0,
+        "y": 1270
+      },
+      {
+        "file": "empty_handed_1.jpg",
+        "x": 1760,
+        "y": 1270
+      }
+    ]
+  },
+  "pistol": {
+    "note": "Bot Royale 3:15: P2020 in hand",
+    "pieces": [
+      {
+        "file": "pistol_0.jpg",
+        "x": 0,
+        "y": 1270
+      },
+      {
+        "file": "pistol_1.jpg",
+        "x": 1760,
+        "y": 1270
+      }
+    ]
+  },
+  "hud_hidden": {
+    "note": "Bot Royale 4:02.5: the game hid the bottom HUD for a moment",
+    "pieces": [
+      {
+        "file": "hud_hidden_0.jpg",
+        "x": 0,
+        "y": 1270
+      },
+      {
+        "file": "hud_hidden_1.jpg",
+        "x": 1760,
+        "y": 1270
+      }
+    ]
+  },
+  "pickup_card": {
+    "note": "Bot Royale 2:48: ground item card with E 捡起",
+    "pieces": [
+      {
+        "file": "pickup_card_0.jpg",
+        "x": 0,
+        "y": 1270
+      },
+      {
+        "file": "pickup_card_1.jpg",
+        "x": 1760,
+        "y": 1270
+      },
+      {
+        "file": "pickup_card_2.jpg",
+        "x": 1330,
+        "y": 370
+      }
+    ]
+  },
+  "target_bar": {
+    "note": "trios 4:18.50: the shot enemy's thin red bar right above the crosshair",
+    "pieces": [
+      {
+        "file": "target_bar_0.jpg",
+        "x": 0,
+        "y": 1270
+      },
+      {
+        "file": "target_bar_1.jpg",
+        "x": 1760,
+        "y": 1270
+      },
+      {
+        "file": "target_bar_2.jpg",
+        "x": 1150,
+        "y": 520
+      }
+    ]
+  }
+}

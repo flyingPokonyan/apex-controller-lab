@@ -68,6 +68,25 @@
       },
       "_note": "落地后的对局行为。前进、侧移、后退每次按住 1 到 5 秒，时长当场随机，不按 Shift，同一个动作不连着做。往前有时同时带 A 或 D。跳跃不配前进。每局开始重抽比例。扫描码必须和上面的键位假定一致。"
     },
+    "inMatchActive": {
+      "generate": "inMatchActive",
+      "scanCodes": {
+        "forward": 17,
+        "left": 30,
+        "back": 31,
+        "right": 32,
+        "jump": 57,
+        "melee": 47,
+        "tactical": 16,
+        "interact": 18,
+        "sprint": 42,
+        "crouch": 29,
+        "ultimate": 44
+      },
+      "mouse": {},
+      "crouchMode": "hold",
+      "_note": "主动打法（docs：RUNNER_ACTIVE_BEHAVIOR_DESIGN_2026-10-29）。常态是搜东西：冲刺、走、蹲走、滑铲、低头扫视，每段最多按住 1.5 秒；屏幕上有拾取提示就按 E；被打了转向受击方向（没有方向就分几步转一圈），有枪点射、没枪冲过去挥拳。Shift、Ctrl 只在地面存活满 10 秒后才发，跳伞机上 LCTRL 是脱离小队。mouse 留空时 Runner 用顶部指南针自己量每度多少鼠标单位（countsPerDegree），量完才按角度转身、回正视角。crouchMode：游戏里 LCTRL 是「按住蹲」填 hold（Apex 默认），是「切换蹲」填 toggle。被打后血量低于 40% 且没打中，转身冲刺脱离；移动两次画面都几乎不变，判为卡墙，转身后退。默认不用：要启用，把 in-match-live 的 action 改成 inMatchActive，minIntervalMs / maxIntervalMs 改成 100 / 250。"
+    },
     "detachScanCode": 29,
     "launchScanCode": 18,
     "knownStateRecovery": {

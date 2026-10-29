@@ -592,6 +592,50 @@ class ReporterTest(unittest.TestCase):
                 },
             )
 
+    def test_active_play_counts_ride_on_lobby_returned(self) -> None:
+        activity = {"style": "runner", "reactions": 2, "bursts": 3, "punches": 1}
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            run_dir = write_run(
+                root,
+                "run_match_activity",
+                account_id="acct_current",
+                events=[
+                    (
+                        "STATE_DETECTED",
+                        {"state": "IN_MATCH_ALIVE", "previousState": "FREEFALL", "confidence": 0.98},
+                    ),
+                    (
+                        "STATE_DETECTED",
+                        {
+                            "state": "LOBBY_READY_TARGET",
+                            "previousState": "POST_MATCH_SUMMARY",
+                            "confidence": 0.97,
+                            "matchActivity": activity,
+                        },
+                    ),
+                ],
+            )
+            transport = FakeTransport()
+            reporter = RemoteReporter(
+                settings(),
+                root,
+                run_dir,
+                transport=transport,
+                heartbeat_interval_s=9999,
+            )
+
+            reporter.process_once()
+
+            phases = [
+                item["payload"]
+                for item in transport.requests[0]["events"]
+                if item["type"] == "MATCH_PHASE_CHANGED"
+            ]
+            self.assertEqual(phases[-1]["phase"], "LOBBY_RETURNED")
+            self.assertEqual(phases[-1]["activity"], activity)
+            self.assertNotIn("activity", phases[0])
+
     def test_a_retry_reuses_the_same_sequence_and_does_not_duplicate_outbox(
         self,
     ) -> None:

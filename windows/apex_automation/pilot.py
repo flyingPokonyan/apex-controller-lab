@@ -13,6 +13,15 @@ import numpy as np
 
 from .capabilities import Capability, CapabilityDispatcher, Decision
 from .match_behavior import FORBIDDEN_SCAN_CODES, REQUIRED_SCAN_CODES, MatchBehavior
+from .match_brain import (
+    ACTIVE_SCAN_CODES,
+    MENU_SCAN_CODES,
+    OPTIONAL_SCAN_CODES,
+    BlindHud,
+    HudReader,
+    MatchBrain,
+    MouseCalibration,
+)
 from .mode_panel import BOT_TITLE_WORD, CONFIRM_WORD, matching_text_token
 from .playlists import FILL_OFF_STATE, PANEL_HEADERS
 from .frame_normalization import CaptureResolutionMismatch
@@ -147,6 +156,7 @@ class PilotSender(Protocol):
     def tap_scan_code(self, scan_code: int, duration_ms: int) -> None: ...
     def hold_scan_codes(self, scan_codes: Iterable[int], duration_ms: int) -> None: ...
     def move_mouse(self, dx: int, dy: int) -> None: ...
+    def hold_mouse_button(self, button: str, duration_ms: int) -> None: ...
     def release_all(self) -> None: ...
 
 
@@ -213,6 +223,7 @@ class CapabilityPilot:
         metrics: PerformanceMetrics | None = None,
         pack_probe=None,
         target_title: str = BOT_TITLE_WORD,
+        hud_reader: HudReader | None = None,
     ) -> None:
         self.config = config
         # The word naming the target card on the mode panel: 机器人 for Bot
@@ -227,6 +238,10 @@ class CapabilityPilot:
         self.dispatcher = dispatcher
         self.actions = actions
         self.match_behavior = MatchBehavior()
+        # Reads nothing until the HUD regions are calibrated from a recording.
+        self.hud_reader: HudReader = hud_reader or BlindHud()
+        self.match_brain: MatchBrain | None = None
+        self._brain_used_this_round = False
         self.sleep = sleep
         self.monotonic = monotonic
         self.notify = notify
@@ -451,6 +466,7 @@ class CapabilityPilot:
             raise ValueError("覆盖层 OCR 的重试间隔必须大于 0")
 
         self._validate_actions()
+        self.match_brain = self._build_match_brain()
 
         self.started = self.monotonic()
         self.observed_state: str | None = None
@@ -636,26 +652,63 @@ class CapabilityPilot:
             self._validate_sequence_step(action_name, index, raw_step)
 
     def _validate_generated_sequence(self, action_name: str, spec: dict[str, Any]) -> None:
-        if spec.get("generate") != "inMatchLive":
+        generator = spec.get("generate")
+        if generator not in {"inMatchLive", "inMatchActive"}:
             raise ValueError(f"动作序列 {action_name} 的生成器未知")
         scan_codes = spec.get("scanCodes")
         if not isinstance(scan_codes, dict):
             raise ValueError(f"动作序列 {action_name} 没有声明扫描码")
-        for name in REQUIRED_SCAN_CODES:
+        required = REQUIRED_SCAN_CODES if generator == "inMatchLive" else ACTIVE_SCAN_CODES
+        for name in required:
             if not isinstance(scan_codes.get(name), int):
                 raise ValueError(f"动作序列 {action_name} 缺少扫描码 {name}")
-        values = [int(scan_codes[name]) for name in REQUIRED_SCAN_CODES]
+        names = list(required)
+        if generator == "inMatchActive":
+            for name in OPTIONAL_SCAN_CODES:
+                if name in scan_codes:
+                    if not isinstance(scan_codes[name], int):
+                        raise ValueError(f"动作序列 {action_name} 的扫描码 {name} 不是整数")
+                    names.append(name)
+        values = [int(scan_codes[name]) for name in names]
         if len(set(values)) != len(values):
             raise ValueError(f"动作序列 {action_name} 的扫描码重复")
-        if FORBIDDEN_SCAN_CODES.intersection(values):
-            raise ValueError(f"动作序列 {action_name} 使用了会打开菜单或脱离小队的键")
+        if generator == "inMatchLive":
+            if FORBIDDEN_SCAN_CODES.intersection(values):
+                raise ValueError(f"动作序列 {action_name} 使用了会打开菜单或脱离小队的键")
+            return
+        # Shift and Ctrl are allowed here: the brain holds them back until
+        # the player has been on the ground long enough to rule out the dropship.
+        if MENU_SCAN_CODES.intersection(values):
+            raise ValueError(f"动作序列 {action_name} 使用了会打开菜单的键")
+        if spec.get("crouchMode", "hold") not in {"hold", "toggle"}:
+            raise ValueError(f"动作序列 {action_name} 的 crouchMode 只能是 hold 或 toggle")
+        MouseCalibration.from_spec(spec.get("mouse"))
+
+    def _build_match_brain(self) -> MatchBrain | None:
+        """The active profile's brain, when some capability uses it."""
+        for capability in self.dispatcher.capabilities.capabilities:
+            spec = self.actions.get(capability.action)
+            if capability.kind == "sequence" and isinstance(spec, dict) and spec.get("generate") == "inMatchActive":
+                scan_codes = {
+                    name: int(value)
+                    for name, value in spec["scanCodes"].items()
+                    if name in ACTIVE_SCAN_CODES or name in OPTIONAL_SCAN_CODES
+                }
+                return MatchBrain(
+                    scan_codes,
+                    MouseCalibration.from_spec(spec.get("mouse")),
+                    crouch_toggle=spec.get("crouchMode", "hold") == "toggle",
+                )
+        return None
 
     def _validate_sequence_step(self, action_name: str, index: int, raw_step: object) -> None:
         if not isinstance(raw_step, dict):
             raise ValueError(f"动作序列 {action_name} 第 {index} 步不是对象")
         step_type = str(raw_step.get("type", ""))
-        if step_type not in {"tapKey", "wait", "holdKeys", "moveMouse"}:
+        if step_type not in {"tapKey", "wait", "holdKeys", "moveMouse", "holdMouse"}:
             raise ValueError(f"动作序列 {action_name} 第 {index} 步类型未知：{step_type}")
+        if step_type == "holdMouse" and raw_step.get("button") not in {"left", "right", "middle"}:
+            raise ValueError(f"动作序列 {action_name} 第 {index} 步鼠标键无效")
         if step_type == "moveMouse":
             dx = raw_step.get("dx", 0)
             dy = raw_step.get("dy", 0)
@@ -904,7 +957,9 @@ class CapabilityPilot:
             }
 
         gesture: str | None = None
-        if isinstance(spec, dict):
+        if isinstance(spec, dict) and spec.get("generate") == "inMatchActive":
+            gesture, spec = self._active_steps(frame)
+        elif isinstance(spec, dict):
             scan_codes = {name: int(spec["scanCodes"][name]) for name in REQUIRED_SCAN_CODES}
             gesture, spec = self.match_behavior.sample(scan_codes)
         executed: list[dict[str, object]] = []
@@ -920,8 +975,27 @@ class CapabilityPilot:
             result["gesture"] = gesture
         return result
 
+    def _active_steps(self, frame: np.ndarray) -> tuple[str, list[dict[str, object]]]:
+        if self.match_brain is None:
+            raise ValueError("主动打法没有可用的行为配置")
+        now = self.monotonic()
+        alive_ms = (
+            round((now - getattr(self, "_state_started_at", self.started)) * 1000)
+            if self.observed_state == "IN_MATCH_ALIVE"
+            else 0
+        )
+        with self.metrics.measure("hudRead"):
+            reading = self.hud_reader.read(frame)
+        self._brain_used_this_round = True
+        return self.match_brain.step(reading, alive_ms=alive_ms, now_ms=round(now * 1000))
+
     def _run_sequence_step(self, raw_step: dict[str, Any]) -> dict[str, object]:
         step_type = str(raw_step["type"])
+        if step_type == "holdMouse":
+            button = str(raw_step["button"])
+            duration_ms = int(raw_step["durationMs"])
+            self.sender.hold_mouse_button(button, duration_ms)
+            return {"type": step_type, "button": button, "durationMs": duration_ms}
         if step_type == "wait":
             duration_ms = int(raw_step["durationMs"])
             self.sleep(duration_ms / 1000)
@@ -1332,6 +1406,17 @@ class CapabilityPilot:
                 previousStateDurationMs=previous_duration,
             )
         else:
+            activity: dict[str, object] = {}
+            if (
+                self._brain_used_this_round
+                and self.match_brain is not None
+                and self._round_active
+                and state in LOBBY_CONTEXT_STATES
+            ):
+                # Back in the lobby: this round's activity rides on the state
+                # change, and the reporter hangs it on LOBBY_RETURNED.
+                activity["matchActivity"] = self.match_brain.summary()
+                self._brain_used_this_round = False
             self.recorder.log(
                 "STATE_DETECTED",
                 state=state,
@@ -1341,6 +1426,7 @@ class CapabilityPilot:
                 confidence=round(observation.confidence, 4),
                 observationVersion=self.state_version,
                 previousStateDurationMs=previous_duration,
+                **activity,
             )
             self.notify(f"[状态] {state}")
             self._snapshot(state, frame)
@@ -1385,10 +1471,16 @@ class CapabilityPilot:
                 self._round_active = True
                 self.rounds_started += 1
                 self.match_behavior.begin_life()
+                self._brain_used_this_round = False
+                style: dict[str, object] = {}
+                if self.match_brain is not None:
+                    self.match_brain.begin_life()
+                    style["style"] = self.match_brain.style
                 self.recorder.log(
                     "MATCH_BEHAVIOR",
                     mood=self.match_behavior.mood,
                     roundNumber=self.rounds_started,
+                    **style,
                 )
 
     @staticmethod

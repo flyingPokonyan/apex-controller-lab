@@ -17,6 +17,7 @@ from apex_automation.config import load_config
 from apex_automation.ocr_obstacles import OcrToken
 from apex_automation.ocr_states import OcrStateDetector
 from apex_automation.intro_unlock import IntroUnlock
+from apex_automation.match_brain import GROUND_KEYS_AFTER_MS, HudReading
 from apex_automation.pilot import CapabilityPilot
 from apex_automation.progression import LobbyProgressionReader
 from apex_automation.progression_policy import TargetLevelAndRingPolicy, TargetLevelPolicy
@@ -71,8 +72,21 @@ class FakeSender:
     def move_mouse(self, dx: int, dy: int) -> None:
         self.calls.append(("move", dx, dy))
 
+    def hold_mouse_button(self, button: str, duration_ms: int) -> None:
+        self.calls.append(("mouse", button, duration_ms))
+
     def release_all(self) -> None:
         self.calls.append(("releaseAll",))
+
+
+class ScriptedHud:
+    """Hands the brain whatever the test says the HUD shows."""
+
+    def __init__(self) -> None:
+        self.reading = HudReading()
+
+    def read(self, frame: np.ndarray) -> HudReading:
+        return self.reading
 
 
 class FakeGuard:
@@ -1408,6 +1422,114 @@ class PilotTest(unittest.TestCase):
             else:
                 self.assertLessEqual(abs(call[1]), 320)
                 self.assertLessEqual(abs(call[2]), 80)
+
+    def enable_active_play(self) -> ScriptedHud:
+        payload = json.loads(CAPABILITIES.read_text(encoding="utf-8"))
+        live = next(item for item in payload["capabilities"] if item["id"] == "in-match-live")
+        live.update(action="inMatchActive", minIntervalMs=100, maxIntervalMs=250)
+        hud = ScriptedHud()
+        self.pilot = CapabilityPilot(
+            load_config(PLAY_CONFIG),
+            FakeSource(),
+            self.sender,
+            self.guard,
+            self.recorder,
+            state_detector=OcrStateDetector.from_path(self.provider, STATES),
+            dispatcher=CapabilityDispatcher(CapabilitySet.from_payload(payload)),
+            actions=dict(payload["actions"]),
+            sleep=self.sleeps.append,
+            monotonic=lambda: self.now,
+            hud_reader=hud,
+        )
+        return hud
+
+    def test_the_blind_profile_stays_the_default(self) -> None:
+        live = next(item for item in self.payload["capabilities"] if item["id"] == "in-match-live")
+        self.assertEqual(live["action"], "inMatchLive")
+        self.assertIsNone(self.pilot.match_brain)
+
+    def test_active_play_keeps_shift_and_ctrl_off_until_settled_then_answers_a_hit(self) -> None:
+        hud = self.enable_active_play()
+        self.assertIsNotNone(self.pilot.match_brain)
+        ground_only = {42, 29}
+        self.screen(squadCountAlive=("20 剩余小队数量", 0.98))
+        self.now = 0.0
+        self.pilot.step()
+        early_calls = len(self.sender.calls)
+        for index in range(1, 40):
+            self.now = index * 0.25
+            self.pilot.step()
+            early_calls = len(self.sender.calls)
+        for call in self.sender.calls[:early_calls]:
+            if call[0] == "tap":
+                self.assertNotIn(call[1], ground_only)
+            elif call[0] == "hold":
+                self.assertFalse(ground_only.intersection(call[1]))
+        self.assertTrue(self.sender.calls)
+
+        hud.reading = HudReading(has_weapon=True, vitality=1.0)
+        self.now = GROUND_KEYS_AFTER_MS / 1000 + 1
+        self.pilot.step()
+        hud.reading = HudReading(has_weapon=True, vitality=0.7)
+        fired = False
+        for index in range(1, 10):
+            self.now = GROUND_KEYS_AFTER_MS / 1000 + 1 + index * 0.3
+            self.pilot.step()
+            fired = fired or any(call[0] == "mouse" for call in self.sender.calls)
+        self.assertTrue(fired)
+        for call in self.sender.calls:
+            if call[0] == "mouse":
+                self.assertEqual(call[1], "left")
+                self.assertLessEqual(call[2], 400)
+
+        self.screen(lobbyPrimaryButton=("准备", 1.0), lobbyModeName=("进化版机器人大逃杀", 1.0))
+        self.now += 5
+        self.pilot.step()
+        detected = [
+            payload
+            for event, payload in self.recorder.events
+            if event == "STATE_DETECTED" and "matchActivity" in payload
+        ]
+        self.assertEqual(len(detected), 1)
+        activity = detected[0]["matchActivity"]
+        self.assertGreaterEqual(activity["reactions"], 1)
+        self.assertGreaterEqual(activity["bursts"], 1)
+
+    def test_a_hold_mouse_step_with_an_unknown_button_is_rejected_at_startup(self) -> None:
+        payload = json.loads(CAPABILITIES.read_text(encoding="utf-8"))
+        payload["actions"]["inMatchLive"] = [{"type": "holdMouse", "button": "side", "durationMs": 100}]
+        live = next(item for item in payload["capabilities"] if item["id"] == "in-match-live")
+        with self.assertRaises(ValueError):
+            CapabilityPilot(
+                load_config(PLAY_CONFIG),
+                FakeSource(),
+                self.sender,
+                self.guard,
+                self.recorder,
+                state_detector=OcrStateDetector.from_path(self.provider, STATES),
+                dispatcher=CapabilityDispatcher(CapabilitySet.from_payload(payload)),
+                actions=dict(payload["actions"]),
+                monotonic=lambda: self.now,
+            )
+        self.assertEqual(live["action"], "inMatchLive")
+
+    def test_the_active_profile_refuses_menu_keys(self) -> None:
+        payload = json.loads(CAPABILITIES.read_text(encoding="utf-8"))
+        payload["actions"]["inMatchActive"]["scanCodes"]["crouch"] = 15
+        live = next(item for item in payload["capabilities"] if item["id"] == "in-match-live")
+        live["action"] = "inMatchActive"
+        with self.assertRaises(ValueError):
+            CapabilityPilot(
+                load_config(PLAY_CONFIG),
+                FakeSource(),
+                self.sender,
+                self.guard,
+                self.recorder,
+                state_detector=OcrStateDetector.from_path(self.provider, STATES),
+                dispatcher=CapabilityDispatcher(CapabilitySet.from_payload(payload)),
+                actions=dict(payload["actions"]),
+                monotonic=lambda: self.now,
+            )
 
     # ------------------------------------------------------------ 停滞看门狗
 

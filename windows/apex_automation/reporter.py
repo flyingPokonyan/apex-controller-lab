@@ -503,6 +503,13 @@ class ReportSession:
                 )
             )
             phase_event = self._phase_event(state)
+            activity = payload.get("matchActivity")
+            if isinstance(activity, dict):
+                # The active profile's counts for the round that just ended.
+                # They belong on LOBBY_RETURNED; keep them on the state change
+                # when no phase event comes out of this one.
+                target = result[-1][1] if phase_event is None else phase_event[1]
+                target["activity" if phase_event is not None else "matchActivity"] = dict(activity)
             if phase_event is not None:
                 result.append(phase_event)
         elif name == "STATE_UNKNOWN":
