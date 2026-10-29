@@ -222,6 +222,52 @@ def _moves(dx: int, dy: int, picker: random.Random, pieces: int = 1) -> list[Ste
     return steps
 
 
+def _ease(t: float) -> float:
+    """Minimum-jerk position: slow start, fast middle, slow stop."""
+    return t * t * t * (10 - 15 * t + 6 * t * t)
+
+
+def _path(dx: int, dy: int, ticks: int, picker: random.Random, wobble: float = 0.0) -> list[tuple[int, int]]:
+    """Per-tick increments that sum exactly to (dx, dy) along an eased curve.
+
+    ``wobble`` bends the path sideways by that share of its length, as a hand
+    does; the bend returns to zero at both ends.
+    """
+    ticks = max(1, ticks)
+    bend = wobble * picker.uniform(-1, 1) * (abs(dx) + abs(dy))
+    length = math.hypot(dx, dy) or 1.0
+    # Perpendicular unit vector for the bend.
+    px, py = -dy / length, dx / length
+    points = []
+    for index in range(ticks + 1):
+        t = index / ticks
+        along = _ease(t)
+        side = bend * math.sin(math.pi * t)
+        points.append((dx * along + px * side, dy * along + py * side))
+    out: list[tuple[int, int]] = []
+    sent_x = sent_y = 0
+    for x, y in points[1:]:
+        step_x, step_y = round(x) - sent_x, round(y) - sent_y
+        sent_x += step_x
+        sent_y += step_y
+        out.append((step_x, step_y))
+    # Rounding of the bend can leave a remainder; the end point is exact.
+    out[-1] = (out[-1][0] + dx - sent_x, out[-1][1] + dy - sent_y)
+    return out
+
+
+def _smooth(dx: int, dy: int, picker: random.Random, duration_ms: int) -> list[Step]:
+    """A continuous mouse motion: many small moves about 12 ms apart."""
+    ticks = max(4, min(60, duration_ms // 12))
+    steps: list[Step] = []
+    for index, (step_x, step_y) in enumerate(_path(dx, dy, ticks, picker, wobble=0.06)):
+        if step_x or step_y:
+            steps.append({"type": "moveMouse", "dx": step_x, "dy": step_y})
+        if index + 1 < ticks:
+            steps.append({"type": "wait", "durationMs": picker.randint(9, 15)})
+    return steps
+
+
 def _signed(degrees: float) -> float:
     """The same direction as the shortest turn, in (-180, 180]."""
     value = math.fmod(degrees, 360.0)
@@ -297,7 +343,7 @@ class MatchBrain:
         counts = self._calibration_counts * picker.choice((-1, 1))
         self._calibration_pending = (reading.heading, counts)
         self.counters["calibrationTurns"] += 1
-        return [*_moves(counts, 0, picker), _wait(picker, 150, 250)]
+        return [*_smooth(counts, 0, picker, picker.randint(220, 380)), _wait(picker, 150, 250)]
 
     def _note_calibration(self, before: int, after: int, counts: int) -> None:
         turned = abs(_signed(after - before))
@@ -395,7 +441,7 @@ class MatchBrain:
         if self.mouse.can_turn:
             steps = self._turn(sign * picker.uniform(90, 180), picker)
         else:
-            steps = _moves(sign * picker.randint(400, 900), 0, picker)
+            steps = _smooth(sign * picker.randint(400, 900), 0, picker, picker.randint(250, 400))
         steps.append(_hold([self.scan_codes["back"]], picker.randint(400, 700)))
         return steps
 
@@ -455,9 +501,9 @@ class MatchBrain:
             steps.extend(self._turn(self._turn_plan.pop(0), picker))
             self._last_turn_ms = now_ms
             self.counters["turns"] += 1
-        if reading.has_weapon:
-            steps.extend(self._burst(picker))
-        else:
+        # Fire whenever hit: with a weapon it shoots, with fists it punches.
+        steps.extend(self._burst(picker))
+        if reading.has_weapon is False and picker.random() < 0.5:
             steps.extend(self._close_in_and_punch(picker, ground))
         return steps
 
@@ -482,26 +528,27 @@ class MatchBrain:
         return steps
 
     def _turn(self, degrees: float, picker: random.Random) -> list[Step]:
-        """Turn a little past the target, then settle back onto it."""
+        """One eased swing a little past the target, then a short settle back."""
         per_degree = float(self.mouse.counts_per_degree or 0)
         net = round(degrees * per_degree)
         main = round(degrees * (1 + picker.uniform(0.04, 0.12)) * per_degree)
-        steps = _moves(main, 0, picker, pieces=picker.randint(2, 3))
-        steps.append(_wait(picker, 40, 120))
-        steps.extend(_moves(net - main, 0, picker))
+        swing_ms = int(min(480, 150 + abs(degrees) * 1.4) * picker.uniform(0.85, 1.15))
+        steps = _smooth(main, picker.randint(-12, 12), picker, swing_ms)
+        steps.append(_wait(picker, 40, 110))
+        steps.extend(_smooth(net - main, 0, picker, picker.randint(60, 120)))
         return steps
 
     def _burst(self, picker: random.Random) -> list[Step]:
         steps: list[Step] = []
-        bursts = picker.randint(1, 2)
+        bursts = picker.randint(2, 4)
         for index in range(bursts):
             duration = picker.randint(150, 400)
             steps.append({"type": "holdMouse", "button": "left", "durationMs": duration})
             self.counters["bursts"] += 1
             self.counters["burstMs"] += duration
             if index + 1 < bursts:
-                steps.extend(_moves(self._small_yaw(picker, 2, 6), 0, picker))
-                steps.append(_wait(picker, 60, 160))
+                steps.extend(_smooth(self._small_yaw(picker, 2, 6), picker.randint(-6, 6), picker, picker.randint(60, 140)))
+                steps.append(_wait(picker, 50, 140))
         return steps
 
     def _close_in_and_punch(self, picker: random.Random, ground: bool) -> list[Step]:
@@ -536,9 +583,9 @@ class MatchBrain:
         floor = int(self.mouse.pitch_floor_counts or 0)
         up = int(self.mouse.level_from_floor_counts or 0)
         below = round(self.mouse.search_pitch_degrees * float(self.mouse.counts_per_degree or 0))
-        steps = _moves(0, floor, picker)
-        steps.append(_wait(picker, 60, 140))
-        steps.extend(_moves(0, below - up, picker))
+        steps = _smooth(0, floor, picker, picker.randint(280, 420))
+        steps.append(_wait(picker, 80, 160))
+        steps.extend(_smooth(0, below - up, picker, picker.randint(320, 480)))
         self._pitch = 0
         self.counters["levelViews"] += 1
         return steps
@@ -581,15 +628,28 @@ class MatchBrain:
             keys.append(self.scan_codes["left"] if picker.random() < 0.5 else self.scan_codes["right"])
         return keys
 
+    def _drift(self, picker: random.Random, duration_ms: int, max_degrees: float) -> list[list[int]]:
+        """The view while moving: an eased curve of up to ``max_degrees``, or near still."""
+        degrees = picker.uniform(-max_degrees, max_degrees) if picker.random() < 0.7 else picker.uniform(-3, 3)
+        yaw = round(degrees * float(self.mouse.counts_per_degree)) if self.mouse.can_turn else round(degrees * 6)
+        pitch = self._pitch_step(picker)
+        ticks = max(4, min(120, duration_ms // 16))
+        return [[dx, dy] for dx, dy in _path(yaw, pitch, ticks, picker, wobble=0.04)]
+
+    def _moving(self, keys: list[int], duration_ms: int, picker: random.Random, max_degrees: float) -> Step:
+        step = _hold(keys, duration_ms)
+        step["look"] = self._drift(picker, duration_ms, max_degrees)
+        return step
+
     def _sprint(self, picker: random.Random) -> list[Step]:
         keys = self._diagonal([self.scan_codes["forward"], self.scan_codes["sprint"]], picker, 0.3)
         duration = picker.randint(*LEG_HOLD_MS)
         self.counters["sprintMs"] += duration
-        return [_hold(keys, duration)]
+        return [self._moving(keys, duration, picker, 35)]
 
     def _walk(self, picker: random.Random) -> list[Step]:
         keys = self._diagonal([self.scan_codes["forward"]], picker, 0.35)
-        return [_hold(keys, picker.randint(*LEG_HOLD_MS))]
+        return [self._moving(keys, picker.randint(*LEG_HOLD_MS), picker, 45)]
 
     def _crouch(self, picker: random.Random) -> list[Step]:
         duration = picker.randint(600, 1100)
@@ -597,8 +657,8 @@ class MatchBrain:
         forward, crouch = self.scan_codes["forward"], self.scan_codes["crouch"]
         if self.crouch_toggle:
             # Tap in, walk, tap out: never left crouching.
-            return [_tap(crouch, picker), _hold([forward], duration), _tap(crouch, picker)]
-        return [_hold([forward, crouch], duration)]
+            return [_tap(crouch, picker), self._moving([forward], duration, picker, 40), _tap(crouch, picker)]
+        return [self._moving([forward, crouch], duration, picker, 40)]
 
     def _slide(self, picker: random.Random) -> list[Step]:
         run = [self.scan_codes["forward"], self.scan_codes["sprint"]]
@@ -633,12 +693,14 @@ class MatchBrain:
         """Look around below the horizon, then maybe try E on whatever is there."""
         steps: list[Step] = []
         sign = picker.choice((-1, 1))
-        looks = picker.randint(2, 4)
-        for index in range(looks):
-            yaw = abs(self._small_yaw(picker, 15, 45))
-            steps.extend(_moves(sign * yaw, self._pitch_step(picker), picker))
-            if index + 1 < looks:
-                steps.append(_wait(picker, 80, 220))
+        sweeps = picker.randint(1, 2)
+        for index in range(sweeps):
+            yaw = abs(self._small_yaw(picker, 20, 70))
+            steps.extend(_smooth(sign * yaw, self._pitch_step(picker), picker, picker.randint(280, 650)))
+            if index + 1 < sweeps:
+                steps.append(_wait(picker, 150, 450))
+                if picker.random() < 0.4:
+                    sign = -sign
         if picker.random() < 0.4:
             steps.append(_wait(picker, 80, 160))
             steps.append(_tap(self.scan_codes["interact"], picker))

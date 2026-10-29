@@ -72,6 +72,9 @@ class FakeSender:
     def move_mouse(self, dx: int, dy: int) -> None:
         self.calls.append(("move", dx, dy))
 
+    def hold_scan_codes_looking(self, scan_codes, duration_ms: int, moves) -> None:
+        self.calls.append(("holdLook", tuple(scan_codes), duration_ms, tuple(moves)))
+
     def hold_mouse_button(self, button: str, duration_ms: int) -> None:
         self.calls.append(("mouse", button, duration_ms))
 
@@ -1463,9 +1466,11 @@ class PilotTest(unittest.TestCase):
         for call in self.sender.calls[:early_calls]:
             if call[0] == "tap":
                 self.assertNotIn(call[1], ground_only)
-            elif call[0] == "hold":
+            elif call[0] in ("hold", "holdLook"):
                 self.assertFalse(ground_only.intersection(call[1]))
         self.assertTrue(self.sender.calls)
+        # Walking turns the view on the way instead of stopping to turn.
+        self.assertTrue(any(call[0] == "holdLook" and call[3] for call in self.sender.calls))
 
         hud.reading = HudReading(has_weapon=True, vitality=1.0)
         self.now = GROUND_KEYS_AFTER_MS / 1000 + 1
@@ -1555,6 +1560,24 @@ class PilotTest(unittest.TestCase):
         centers = {tile.center: tile.name for tile in TILES}
         self.assertIn(centers[(clicks[0][1], clicks[0][2])], FREE_ROSTER)
         self.assertIn("LEGEND_PICK_CLICK", self.recorder.names())
+
+    def test_a_look_path_with_a_huge_move_is_rejected_at_startup(self) -> None:
+        payload = json.loads(CAPABILITIES.read_text(encoding="utf-8"))
+        payload["actions"]["inMatchLive"] = [
+            {"type": "holdKeys", "scanCodes": [17], "durationMs": 500, "look": [[5, 0], [900, 0]]}
+        ]
+        with self.assertRaises(ValueError):
+            CapabilityPilot(
+                load_config(PLAY_CONFIG),
+                FakeSource(),
+                self.sender,
+                self.guard,
+                self.recorder,
+                state_detector=OcrStateDetector.from_path(self.provider, STATES),
+                dispatcher=CapabilityDispatcher(CapabilitySet.from_payload(payload)),
+                actions=dict(payload["actions"]),
+                monotonic=lambda: self.now,
+            )
 
     def test_the_active_profile_refuses_menu_keys(self) -> None:
         payload = json.loads(CAPABILITIES.read_text(encoding="utf-8"))

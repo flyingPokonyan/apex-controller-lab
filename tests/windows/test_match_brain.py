@@ -122,15 +122,21 @@ class MatchBrainTests(unittest.TestCase):
         self.assertEqual(summary["reactions"], 1)
         self.assertGreaterEqual(summary["bursts"], 1)
 
-    def test_without_a_weapon_it_runs_at_the_hit_and_punches(self) -> None:
-        brain = self.brain()
-        brain.step(HudReading(has_weapon=False, vitality=0.9), alive_ms=20_000, now_ms=0, rng=self.rng)
-        mode, steps = brain.step(HudReading(has_weapon=False, vitality=0.5), alive_ms=20_300, now_ms=300, rng=self.rng)
-        self.assertEqual(mode, "react")
-        self.assertFalse([step for step in steps if step["type"] == "holdMouse"])
-        self.assertIn(SCAN_CODES["melee"], keys_in(steps))
-        self.assertIn(SCAN_CODES["sprint"], keys_in(steps))
-        self.assertGreaterEqual(brain.summary()["punches"], 1)
+    def test_without_a_weapon_it_still_fires_and_sometimes_runs_in_to_punch(self) -> None:
+        ran_in = 0
+        for seed in range(20):
+            rng = random.Random(seed)
+            brain = MatchBrain(dict(SCAN_CODES))
+            brain.begin_life(rng)
+            brain.step(HudReading(has_weapon=False, vitality=0.9), alive_ms=20_000, now_ms=0, rng=rng)
+            mode, steps = brain.step(HudReading(has_weapon=False, vitality=0.5), alive_ms=20_300, now_ms=300, rng=rng)
+            self.assertEqual(mode, "react")
+            # Fire with fists out punches, so a hit is always answered on the trigger.
+            self.assertTrue([step for step in steps if step["type"] == "holdMouse"])
+            if SCAN_CODES["melee"] in keys_in(steps):
+                ran_in += 1
+                self.assertIn(SCAN_CODES["sprint"], keys_in(steps))
+        self.assertTrue(0 < ran_in < 20)
 
     def test_the_reaction_lasts_a_few_seconds_then_search_resumes(self) -> None:
         brain = self.brain()
@@ -151,9 +157,10 @@ class MatchBrainTests(unittest.TestCase):
         self.assertEqual(turn, 900)
         self.assertGreater(max(moves), 0)
         self.assertLess(min(moves), 0)  # the settle-back after the overshoot
-        # The arc that caused the turn is still on screen next frame: no second turn.
+        # The arrow that caused the turn is still on screen next frame: no second turn,
+        # only the small sweeps between bursts (2–6° each at 10 counts per degree).
         _, steps = brain.step(HudReading(hit_bearing=90.0, hurt=True, has_weapon=True), alive_ms=20_300, now_ms=300, rng=self.rng)
-        self.assertLessEqual(abs(net_dx(steps)), 60)
+        self.assertLessEqual(abs(net_dx(steps)), 180)
 
     def test_an_arrow_alone_is_not_a_hit(self) -> None:
         brain = self.brain(CALIBRATED)
@@ -167,8 +174,8 @@ class MatchBrainTests(unittest.TestCase):
         brain.step(HudReading(vitality=1.0, shield=1.0, hit_bearing=-90.0, has_weapon=False), alive_ms=20_250, now_ms=250, rng=self.rng)
         mode, steps = brain.step(HudReading(vitality=1.0, shield=0.6, has_weapon=False), alive_ms=20_500, now_ms=500, rng=self.rng)
         self.assertEqual(mode, "react")
-        hold_index = next(i for i, step in enumerate(steps) if step["type"] == "holdKeys")
-        self.assertEqual(sum(int(step["dx"]) for step in steps[:hold_index] if step["type"] == "moveMouse"), -900)
+        fire_index = next(i for i, step in enumerate(steps) if step["type"] == "holdMouse")
+        self.assertEqual(sum(int(step["dx"]) for step in steps[:fire_index] if step["type"] == "moveMouse"), -900)
 
     def test_a_hit_without_an_arrow_looks_one_way_then_back_until_a_hit_is_confirmed(self) -> None:
         brain = self.brain(CALIBRATED)
@@ -183,6 +190,30 @@ class MatchBrainTests(unittest.TestCase):
         self.assertFalse(brain._turn_plan)
         self.assertLessEqual(abs(net_dx(steps)), 60)
         self.assertEqual(brain.summary()["hitConfirmed"], 1)
+
+    def test_turns_are_many_small_eased_moves_not_jumps(self) -> None:
+        brain = self.brain(CALIBRATED)
+        _, steps = brain.step(HudReading(hit_bearing=120.0, hurt=True, has_weapon=True), alive_ms=20_000, now_ms=0, rng=self.rng)
+        fire_index = next(i for i, step in enumerate(steps) if step["type"] == "holdMouse")
+        moves = [int(step["dx"]) for step in steps[:fire_index] if step["type"] == "moveMouse"]
+        self.assertGreaterEqual(len(moves), 15)
+        self.assertLess(max(abs(move) for move in moves), 0.2 * 1200)
+        # Slow start, fast middle: the first move is smaller than the largest.
+        self.assertLess(abs(moves[0]), max(abs(move) for move in moves))
+
+    def test_running_turns_the_view_along_the_way(self) -> None:
+        brain = self.brain(CALIBRATED)
+        brain._choose_leg = lambda picker: "sprint"
+        brain._next_level_ms = 10**9
+        looks = []
+        for index in range(20):
+            _, steps = brain.step(HudReading(), alive_ms=20_000 + index * 1000, now_ms=index * 1000, rng=self.rng)
+            step = steps[0]
+            self.assertEqual(step["type"], "holdKeys")
+            self.assertLessEqual(len(step["look"]), 240)
+            self.assertTrue(all(abs(dx) <= 300 and abs(dy) <= 300 for dx, dy in step["look"]))
+            looks.append(sum(dx for dx, _ in step["look"]))
+        self.assertGreater(max(abs(total) for total in looks), 100)  # some legs curve visibly
 
     def test_low_health_without_landing_hits_breaks_off_and_runs(self) -> None:
         brain = self.brain(CALIBRATED)

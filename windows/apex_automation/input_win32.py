@@ -209,6 +209,38 @@ class Win32InputSender:
                     self._key(scan_code, True)
                     self._pressed_scan_codes.discard(scan_code)
 
+    def hold_scan_codes_looking(
+        self,
+        scan_codes: Iterable[int],
+        duration_ms: int,
+        moves: Iterable[tuple[int, int]],
+    ) -> None:
+        """Hold keys while the mouse follows ``moves``, one relative move per tick.
+
+        The ticks split the hold evenly, so a run can curve instead of
+        stopping to turn. Keys are released however the loop ends.
+        """
+        self.guard.ensure_target_foreground()
+        codes = tuple(dict.fromkeys(int(value) for value in scan_codes))
+        path = [(int(dx), int(dy)) for dx, dy in moves]
+        tick = duration_ms / 1000 / max(1, len(path))
+        try:
+            for scan_code in codes:
+                self._key(scan_code, False)
+                self._pressed_scan_codes.add(scan_code)
+            if not path:
+                time.sleep(duration_ms / 1000)
+            for dx, dy in path:
+                time.sleep(tick)
+                self.guard.ensure_target_foreground()
+                if dx or dy:
+                    self._send([INPUT(type=INPUT_MOUSE, mi=MOUSEINPUT(dx, dy, 0, MOUSEEVENTF_MOVE, 0, 0))])
+        finally:
+            for scan_code in reversed(codes):
+                if scan_code in self._pressed_scan_codes:
+                    self._key(scan_code, True)
+                    self._pressed_scan_codes.discard(scan_code)
+
     def move_mouse(self, dx: int, dy: int) -> None:
         self.guard.ensure_target_foreground()
         self._send(
