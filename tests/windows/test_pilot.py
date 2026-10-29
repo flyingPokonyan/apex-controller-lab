@@ -1513,6 +1513,49 @@ class PilotTest(unittest.TestCase):
             )
         self.assertEqual(live["action"], "inMatchLive")
 
+    def test_random_legend_mode_clicks_an_unlocked_portrait_on_our_turn(self) -> None:
+        sys.path.insert(0, str(REPOSITORY_ROOT / "tests" / "windows"))
+        from test_legend_pick import FREE_ROSTER, roster_frame
+        from apex_automation.legend_pick import TILES
+
+        config = load_config(PLAY_CONFIG)
+        config.legend_select["mode"] = "random"
+        roster = roster_frame("trios_our_turn")
+
+        class RosterSource:
+            def grab(self) -> np.ndarray:
+                return roster
+
+        self.pilot = CapabilityPilot(
+            config,
+            RosterSource(),
+            self.sender,
+            self.guard,
+            self.recorder,
+            state_detector=OcrStateDetector.from_path(self.provider, STATES),
+            dispatcher=CapabilityDispatcher(CapabilitySet.from_payload(self.payload)),
+            actions=dict(self.payload["actions"]),
+            sleep=self.sleeps.append,
+            monotonic=lambda: self.now,
+        )
+        self.screen(lobbyPrimaryButton=("取消", 1.0))
+        self.now = 0.0
+        self.pilot.step()
+        self.assertEqual(self.pilot.observed_state, "LOBBY_QUEUEING")
+        self.screen(legendTurnHint=("选择传奇", 0.99))
+        for second in range(1, 20):
+            self.now = float(second)
+            self.pilot.step()
+            if any(call[0] == "click" for call in self.sender.calls):
+                # The game took the pick: the hint now offers to cancel it.
+                self.screen(legendTurnHint=("ESC取消选择", 0.99))
+        clicks = [call for call in self.sender.calls if call[0] == "click"]
+        self.assertEqual(len(clicks), 1)
+        self.assertIn("LEGEND_PICK_DONE", self.recorder.names())
+        centers = {tile.center: tile.name for tile in TILES}
+        self.assertIn(centers[(clicks[0][1], clicks[0][2])], FREE_ROSTER)
+        self.assertIn("LEGEND_PICK_CLICK", self.recorder.names())
+
     def test_the_active_profile_refuses_menu_keys(self) -> None:
         payload = json.loads(CAPABILITIES.read_text(encoding="utf-8"))
         payload["actions"]["inMatchActive"]["scanCodes"]["crouch"] = 15

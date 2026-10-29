@@ -13,6 +13,7 @@ import numpy as np
 
 from .capabilities import Capability, CapabilityDispatcher, Decision
 from .match_behavior import FORBIDDEN_SCAN_CODES, REQUIRED_SCAN_CODES, MatchBehavior
+from .legend_pick import LegendPicker
 from .match_brain import (
     ACTIVE_SCAN_CODES,
     MENU_SCAN_CODES,
@@ -362,9 +363,11 @@ class CapabilityPilot:
         # need confirming — and one probing run answers both without asking
         # anyone to reproduce a screen.
         self.legend_mode = str(legend.get("mode", "probe"))
-        if self.legend_mode not in {"off", "probe"}:
+        if self.legend_mode not in {"off", "probe", "random"}:
             raise ValueError(f"传奇选择模式暂不支持：{self.legend_mode}")
         self.legend_preferred = str(legend.get("preferredLegend", "")).strip()
+        # random: click an unlocked portrait on our turn (legend_pick).
+        self.legend_picker = LegendPicker() if self.legend_mode == "random" else None
         self.legend_probe_s = int(legend.get("probeIntervalMs", 6000)) / 1000
         self.legend_probe_max = int(legend.get("probeMaxPerRound", 5))
         if self.legend_probe_s <= 0:
@@ -2052,6 +2055,8 @@ class CapabilityPilot:
                 self._legend_text_logged = False
                 self._legend_next_sample = now
                 self._legend_next_probe = now
+                if self.legend_picker is not None:
+                    self.legend_picker.reset()
             return
         if not self._legend_armed:
             return
@@ -2063,12 +2068,35 @@ class CapabilityPilot:
                 self._legend_rounds_captured += 1
             return
         self._probe_legend_screen(frame, now)
+        self._pick_legend(frame, now)
         if self._legend_kept >= self.legend_max_frames or now < self._legend_next_sample:
             return
         self._legend_kept += 1
         self._legend_next_sample = now + self.legend_sample_s
         self.counters["legendSelectFrames"] += 1
         self._snapshot("legend-select", frame)
+
+    def _pick_legend(self, frame: np.ndarray, now: float) -> None:
+        picker = self.legend_picker
+        if picker is None or picker.done:
+            return
+        try:
+            tile = picker.step(frame, now, self.state_detector.provider)
+        except Exception as error:
+            picker.done = True
+            self.recorder.log("LEGEND_PICK_ERROR", error=str(error))
+            return
+        if picker.done and picker.tries:
+            self.recorder.log("LEGEND_PICK_DONE", tries=picker.tries)
+            return
+        if tile is None or not self._check_lease(self.monotonic()):
+            return
+        self.guard.ensure_target_foreground()
+        self.guard.ensure_not_aborted()
+        x, y = tile.center
+        self.sender.click(x, y)
+        self.counters["legendPickClicks"] += 1
+        self.recorder.log("LEGEND_PICK_CLICK", tile=tile.name, x=x, y=y, attempt=picker.tries)
 
     def _probe_legend_screen(self, frame: np.ndarray, now: float) -> None:
         """Read the blackout and write down what is on it. Sends nothing.
