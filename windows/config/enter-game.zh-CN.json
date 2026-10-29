@@ -642,12 +642,12 @@
       "id": "in-match-live",
       "priority": 10,
       "states": ["IN_MATCH_ALIVE"],
-      "action": "inMatchLive",
+      "action": "inMatchActive",
       "kind": "sequence",
       "actionClass": "idempotent",
       "trigger": "periodic",
-      "minIntervalMs": 400,
-      "maxIntervalMs": 1200,
+      "minIntervalMs": 100,
+      "maxIntervalMs": 250,
       "_note": "活着时的对局行为。看、停、前进和侧移穿插。移动按住 1 到 5 秒，不冲刺，不连着做同一个动作。跳跃、E、近战和 Q 仍然穿插在里面。观战和结算不挂这条。"
     },
     {
