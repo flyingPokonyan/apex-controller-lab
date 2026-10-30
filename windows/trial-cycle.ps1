@@ -4,7 +4,9 @@
 # forward only), it asks the worker to stop at the next safe point: between
 # accounts, or in the lobby between matches. The worker saves the run and
 # releases its lease, exits with 75, and this loop fast-forwards and starts it
-# again. Any other exit code ends the loop. Close the window or Ctrl+C to stop.
+# again. Exit codes follow the managed launcher: 74 = recoverable EA trouble,
+# start again after a growing wait; 0 = stopped by the operator (F8, Ctrl+C);
+# anything else = a failure, started again at most three times in a row.
 #
 #   powershell -NoProfile -ExecutionPolicy Bypass -File windows\trial-cycle.ps1
 [CmdletBinding()]
@@ -20,8 +22,11 @@ $Root = Join-Path $env:LOCALAPPDATA "ApexController\trial"
 New-Item -ItemType Directory -Force -Path $Root | Out-Null
 
 $Current = (& $GitExe -C $RepoDir rev-parse --abbrev-ref HEAD).Trim()
-if ($Current -ne $Branch) { throw "当前分支是 $Current，不是 $Branch。先切到试验分支再运行。" }
+if ($Current -ne $Branch) { throw "This checkout is on $Current, not $Branch. Switch to the trial branch first." }
 
+$Resume = $true
+$Failures = 0
+$Retries = 0
 while ($true) {
     $Session = [guid]::NewGuid().ToString()
     Remove-Item -LiteralPath (Join-Path $Root "request.json") -ErrorAction SilentlyContinue
@@ -44,20 +49,44 @@ while ($true) {
             break
         }
     }
-    Write-Host "[试验] 启动 $((& $GitExe -C $RepoDir log --oneline -1))"
-    & (Join-Path $WindowsDir "run.ps1") account-cycle --resume --runner-config (Join-Path $WindowsDir "account-cycle.private.json")
+    Write-Host "[trial] starting $((& $GitExe -C $RepoDir log --oneline -1))"
+    $Arguments = @("account-cycle", "--runner-config", (Join-Path $WindowsDir "account-cycle.private.json"))
+    # Only the first start clears a local pause: later restarts must not wave
+    # through a pause that is waiting for a person.
+    if ($Resume) { $Arguments += "--resume" }
+    $Resume = $false
+    & (Join-Path $WindowsDir "run.ps1") @Arguments
     $Exit = $LASTEXITCODE
     Stop-Job -Job $Watcher -ErrorAction SilentlyContinue
     Remove-Job -Job $Watcher -Force -ErrorAction SilentlyContinue
-    if ($Exit -ne 75) {
-        Write-Host "[试验] account-cycle 退出码 $Exit，循环结束。"
+    if ($Exit -eq 0) {
+        Write-Host "[trial] stopped (F8, Ctrl+C or a normal end)."
+        exit 0
+    }
+    if ($Exit -eq 75) {
+        & $GitExe -C $RepoDir fetch --quiet origin $Branch
+        & $GitExe -C $RepoDir merge --ff-only "origin/$Branch"
+        if ($LASTEXITCODE -ne 0) {
+            Write-Host "[trial] cannot fast-forward to origin/$Branch; stopping for a person to look."
+            exit 1
+        }
+        Write-Host "[trial] updated, starting again."
+        $Failures = 0
+        $Retries = 0
+        continue
+    }
+    if ($Exit -eq 74) {
+        $Retries += 1
+        $Delay = [Math]::Min(300, 30 * [Math]::Pow(2, [Math]::Min($Retries - 1, 4)))
+        Write-Host "[trial] EA not ready (74); starting again in $Delay s."
+        Start-Sleep -Seconds $Delay
+        continue
+    }
+    $Failures += 1
+    if ($Failures -ge 3) {
+        Write-Host "[trial] account-cycle failed $Failures times in a row (exit $Exit); stopping for a person to look."
         exit $Exit
     }
-    & $GitExe -C $RepoDir fetch --quiet origin $Branch
-    & $GitExe -C $RepoDir merge --ff-only "origin/$Branch"
-    if ($LASTEXITCODE -ne 0) {
-        Write-Host "[试验] 不能快进到 origin/$Branch，停止，等人处理。"
-        exit 1
-    }
-    Write-Host "[试验] 已更新，重新启动。"
+    Write-Host "[trial] account-cycle exit $Exit; starting again in 60 s (failure $Failures)."
+    Start-Sleep -Seconds 60
 }
