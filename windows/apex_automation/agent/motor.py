@@ -45,6 +45,9 @@ TURN_DPS = (170.0, 300.0)
 FINE_DPS = (60.0, 120.0)
 # Pitch is clamped by the game near straight down/up.
 PITCH_LIMIT = 89.0
+# Apex's default mouse sensitivity (5.0) at 0.022° per count: what the view
+# turns by until the compass has measured this machine.
+DEFAULT_COUNTS_PER_DEGREE = 1 / (0.022 * 5.0)
 
 
 class Motor:
@@ -53,7 +56,12 @@ class Motor:
         self.keys = keys
         self.rng = rng
         self.crouch_toggle = crouch_toggle
-        self.counts_per_degree: float | None = None
+        self.counts_per_degree: float = DEFAULT_COUNTS_PER_DEGREE
+        # True once measured on this machine or given in the config.
+        self.calibrated = False
+        self.fire_s = 0.0
+        self.aim_since: float | None = None
+        self.aim_s = 0.0
         # Degrees below (negative) or above the horizon, valid after level().
         self.pitch: float | None = None
         self._crouched = False
@@ -91,10 +99,10 @@ class Motor:
             self._crouched = crouch
         self.controller.set_keys(held)
 
-    def stop(self) -> None:
+    def stop(self, now: float | None = None) -> None:
         self.controller.set_keys([])
         self.controller.set_rate(0.0, 0.0)
-        self.controller.set_buttons([])
+        self.aim(False, now)
         if self.crouch_toggle and self._crouched:
             self.tap("crouch")
             self._crouched = False
@@ -103,7 +111,7 @@ class Motor:
 
     @property
     def can_turn(self) -> bool:
-        return self.counts_per_degree is not None
+        return bool(self.counts_per_degree)
 
     def counts(self, degrees: float) -> float:
         return degrees * float(self.counts_per_degree or 0.0)
@@ -169,6 +177,14 @@ class Motor:
 
     def fire(self, hold_s: float) -> None:
         self.controller.click("left", hold_s)
+        self.fire_s += hold_s
 
-    def aim(self, on: bool) -> None:
+    def aim(self, on: bool, now: float | None = None) -> None:
         self.controller.set_buttons(["right"] if on else [])
+        if now is None:
+            return
+        if on and self.aim_since is None:
+            self.aim_since = now
+        elif not on and self.aim_since is not None:
+            self.aim_s += now - self.aim_since
+            self.aim_since = None

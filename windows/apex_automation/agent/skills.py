@@ -65,7 +65,7 @@ class Skill:
         raise NotImplementedError
 
     def stop(self, ctx: Context) -> None:
-        ctx.motor.stop()
+        ctx.motor.stop(ctx.now)
 
 
 # ---------------------------------------------------------------------- movement
@@ -218,6 +218,7 @@ class Calibrate(Skill):
                 self.go("start", ctx)
                 if len(self.samples) >= 3:
                     motor.counts_per_degree = sorted(self.samples)[1]
+                    motor.calibrated = True
                     ctx.counters["calibrated"] += 1
                     return Status.SUCCESS
             return Status.RUNNING
@@ -319,14 +320,14 @@ class ReturnFire(Skill):
         # engage
         if belief.is_armed():
             if belief.mag.value == 0 and belief.mag.fresh(ctx.now, 1.0):
-                motor.aim(False)
+                motor.aim(False, ctx.now)
                 if not motor.controller.busy_tapping:
                     motor.tap("reload")
                     ctx.counters["fire:reload"] += 1
                 if belief.out_of_ammo(ctx.now):
                     return self.fail("NO_AMMO")
                 return Status.RUNNING
-            motor.aim(True)
+            motor.aim(True, ctx.now)
             motor.move(left=self.strafe < 0, right=self.strafe > 0)
             if ctx.now >= self.next_burst and not motor.controller.busy_tapping:
                 motor.fire(ctx.rng.uniform(0.15, 0.4))
@@ -350,7 +351,7 @@ class ReturnFire(Skill):
         return self.fail("NO_WEAPON")
 
     def stop(self, ctx: Context) -> None:
-        ctx.motor.aim(False)
+        ctx.motor.aim(False, ctx.now)
         super().stop(ctx)
 
 
@@ -485,13 +486,19 @@ class Loot(Skill):
     Item cards follow the item, so an item card on screen means the crosshair
     is on it already. A bin's 「打开」 sits under the crosshair; after the lid
     opens the agent looks down into it and sweeps slowly, taking every useful
-    card that comes up. Success = the HUD shows something changed (armed,
-    magazine) or a taken card stopped showing; nothing new after opening =
-    a door or an empty bin, remembered so it is not tried again.
+    card that comes up.
+
+    A press only counts once the screen agrees: within CONFIRM_S the card is
+    gone or shows another item, or the weapon panel changed (a gun in hand, a
+    fuller magazine). The view holds still meanwhile, so a card that left the
+    crosshair because the view moved is not mistaken for one that was taken.
+    An 「打开」 counts as opened when the prompt leaves or item cards appear.
+    Nothing confirmed = failure, remembered so the spot is not tried again.
     """
 
     name = "loot"
     timeout_s = 15.0
+    CONFIRM_S = 1.2
 
     def __init__(self, ctx: Context) -> None:
         super().__init__(ctx)
@@ -501,37 +508,36 @@ class Loot(Skill):
         self.armed_before = ctx.belief.is_armed()
         self.sweep_dir = ctx.rng.choice((-1, 1))
         self.bin = False
+        self.opened = False
         # Cards pressed with no visible effect: a full bag, a locked item.
         self.pressed: dict[str, int] = {}
+        # The press waiting for the screen to confirm it: (kind, label, at, mag, armed).
+        self.pending: tuple[str, str, float, object, bool] | None = None
 
     def step(self, ctx: Context) -> Status:
         belief, motor = ctx.belief, ctx.motor
         prompt = belief.current_prompt(ctx.now)
         motor.move()
-        if belief.is_armed() and not self.armed_before:
-            ctx.counters["loot:armed"] += 1
-            self.armed_before = True
-            self.taken += 1
+        if self.pending is not None:
+            return self._confirm(ctx, prompt)
         if prompt is not None and ctx.now - self.last_press > 0.45:
             if prompt.word in ("打开",):
                 if self.bin:
-                    # Second 「打开」 after we opened one: a door or something else; move on.
+                    # Another 「打开」 after we opened one: a door or something else; move on.
                     return self._finish(ctx)
-                self._press(ctx, "open")
+                self._press(ctx, "open", "打开")
                 self.bin = True
-                self.go("look_in", ctx)
-                self.look_in = motor.turn(ctx.rng.uniform(-8, 8), -ctx.rng.uniform(12, 20), fine=True)
                 return Status.RUNNING
             if prompt.word in ("捡起", "装备") and wanted_item(prompt, belief):
                 label = prompt.name or prompt.text
                 if self.pressed.get(label, 0) < 2:
                     self.pressed[label] = self.pressed.get(label, 0) + 1
-                    self._press(ctx, prompt.kind)
+                    self._press(ctx, prompt.kind, label)
                     return Status.RUNNING
                 ctx.counters["loot:no_effect"] += 1
                 if not self.bin:
                     return self._finish(ctx)
-        if self.bin:
+        if self.bin and self.opened:
             if self.in_phase(ctx) < getattr(self, "look_in", 0.3) + 0.4:
                 return Status.RUNNING
             # Sweep across the open bin slowly so each card comes under the crosshair.
@@ -541,17 +547,51 @@ class Loot(Skill):
             if self.in_phase(ctx) > 5.0:
                 return self._finish(ctx)
             return Status.RUNNING
+        if self.bin and not self.opened:
+            return self._finish(ctx)
         if prompt is None and ctx.now - self.last_press > 1.0:
             return self._finish(ctx)
         return Status.RUNNING
 
-    def _press(self, ctx: Context, kind: str) -> None:
+    def _press(self, ctx: Context, kind: str, label: str) -> None:
         ctx.motor.tap("interact", (0.06, 0.11))
         self.presses += 1
         self.last_press = ctx.now
         ctx.counters[f"loot:press:{kind}"] += 1
-        if kind != "open":
-            self.taken += 1
+        self.pending = (kind, label, ctx.now, ctx.belief.mag.value, ctx.belief.is_armed())
+
+    def _confirm(self, ctx: Context, prompt) -> Status:
+        kind, label, at, mag_before, armed_before = self.pending
+        belief = ctx.belief
+        waited = ctx.now - at
+        if waited < 0.25:
+            return Status.RUNNING
+        if kind == "open":
+            gone = prompt is None or prompt.word != "打开"
+            if gone:
+                self.pending = None
+                self.opened = True
+                ctx.counters["loot:opened"] += 1
+                self.go("look_in", ctx)
+                self.look_in = ctx.motor.turn(ctx.rng.uniform(-8, 8), -ctx.rng.uniform(12, 20), fine=True)
+                return Status.RUNNING
+        else:
+            card_changed = prompt is None or (prompt.name or prompt.text) != label
+            mag = belief.mag.value
+            panel_changed = (belief.is_armed() and not armed_before) or (
+                isinstance(mag, int) and isinstance(mag_before, int) and mag > mag_before
+            )
+            if card_changed or panel_changed:
+                self.pending = None
+                self.taken += 1
+                ctx.counters[f"loot:taken:{kind}"] += 1
+                if belief.is_armed() and not armed_before:
+                    ctx.counters["loot:armed"] += 1
+                return Status.RUNNING
+        if waited >= self.CONFIRM_S:
+            self.pending = None
+            ctx.counters[f"loot:unconfirmed:{kind}"] += 1
+        return Status.RUNNING
 
     def _finish(self, ctx: Context) -> Status:
         heading = ctx.belief.heading.value
@@ -560,7 +600,9 @@ class Loot(Skill):
             ctx.counters["loot:ok"] += 1
             return Status.SUCCESS
         ctx.memory.note_attempt("bin" if self.bin else "item", heading, ctx.now, "nothing")
-        return self.fail("OPEN_NO_EFFECT" if self.bin else "NO_EFFECT")
+        if self.bin:
+            return self.fail("OPEN_NO_EFFECT" if not self.opened else "BIN_NOTHING_TAKEN")
+        return self.fail("NO_EFFECT")
 
 
 # ---------------------------------------------------------------------- travel
@@ -607,6 +649,9 @@ class Search(Skill):
 
     name = "search"
     timeout_s = 20.0
+    # Degrees below the horizon while walking, and whether to break into a run.
+    PITCH = (22, 32)
+    SPRINT_SHARE = 0.0
 
     def __init__(self, ctx: Context) -> None:
         super().__init__(ctx)
@@ -621,19 +666,38 @@ class Search(Skill):
         if self.heading_goal is None and belief.heading.value is not None:
             base = float(belief.heading.value)
             options = [(base + offset) % 360 for offset in (0, 45, -45, 90, -90, 135, -135, 180)]
-            fresh = [h for h in options if not ctx.memory.is_blocked(h, ctx.now) and not ctx.memory.tried_near("search", h, ctx.now, 40)]
+            mate = belief.nearest_mate(ctx.now)
+            if mate is not None:
+                # Stay around the team: head out on their side of us.
+                options.sort(key=lambda h: abs(_signed(h - mate.bearing)))
+            fresh = [h for h in options if not ctx.memory.is_blocked(h, ctx.now) and not ctx.memory.tried_near(self.name, h, ctx.now, 40)]
             self.heading_goal = fresh[0] if fresh else options[ctx.rng.randrange(len(options))]
-            ctx.memory.note_attempt("search", self.heading_goal, ctx.now, "started")
-        if motor.pitch is not None and motor.pitch > -18 and not motor.controller.turning:
-            motor.pitch_to(-ctx.rng.uniform(22, 32))
+            ctx.memory.note_attempt(self.name, self.heading_goal, ctx.now, "started")
+            self.sprinting = ctx.rng.random() < self.SPRINT_SHARE
+        low, high = self.PITCH
+        if motor.pitch is not None and abs(motor.pitch + (low + high) / 2) > 8 and not motor.controller.turning:
+            motor.pitch_to(-ctx.rng.uniform(low, high))
         error = None
         if self.heading_goal is not None and belief.heading.value is not None:
             error = _signed(self.heading_goal - float(belief.heading.value))
             # Look side to side while walking; the goal heading stays the same.
             error += 25 * math.sin((ctx.now - self.started) * 1.3)
-        if self.nav.drive(ctx, error, sprint=False) == "gave_up":
+        if self.nav.drive(ctx, error, sprint=getattr(self, "sprinting", False)) == "gave_up":
             return self.fail("BLOCKED")
         return Status.RUNNING
+
+
+class Roam(Search):
+    """Armed and nothing urgent: move around near the team, eyes up, picking up what shows.
+
+    A player with a gun keeps moving with the squad, tops up ammo and heals on
+    the way and looks around; standing in one spot is what a passenger does.
+    """
+
+    name = "roam"
+    timeout_s = 25.0
+    PITCH = (2, 10)
+    SPRINT_SHARE = 0.35
 
 
 class Wait(Skill):
@@ -643,7 +707,7 @@ class Wait(Skill):
 
     def __init__(self, ctx: Context) -> None:
         super().__init__(ctx)
-        self.timeout_s = ctx.rng.uniform(3.0, 8.0)
+        self.timeout_s = ctx.rng.uniform(2.0, 4.0)
         self.next_look = ctx.now
 
     def step(self, ctx: Context) -> Status:

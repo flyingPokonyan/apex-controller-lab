@@ -752,6 +752,7 @@ class CapabilityPilot:
                 per_degree = MouseCalibration.from_spec(spec.get("mouse")).counts_per_degree
                 if per_degree is not None:
                     agent.motor.counts_per_degree = per_degree
+                    agent.motor.calibrated = True
                 return agent
         return None
 
