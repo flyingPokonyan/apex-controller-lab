@@ -171,6 +171,16 @@ class InputControllerTest(unittest.TestCase):
         self.assertEqual(sender.down, set())
         self.assertEqual(sender.moved, moved)
 
+    def test_an_interrupted_turn_hands_what_it_had_left_to_the_next(self) -> None:
+        controller, sender, _guard, clock = make()
+        controller.turn(0, 900, 0.5)
+        run(controller, clock, 0.2)
+        controller.turn(300, 0, 0.3)
+        run(controller, clock, 0.6)
+        # Nothing of the first turn is lost: the view ends 900 down and 300 right.
+        self.assertAlmostEqual(sender.moved[1], 900, delta=8)
+        self.assertAlmostEqual(sender.moved[0], 300, delta=8)
+
     def test_turn_profile_covers_the_whole_path(self) -> None:
         turn = _Turn(100, 0, 0.0, 1.0)
         points = [turn.progress(t / 100) for t in range(101)]

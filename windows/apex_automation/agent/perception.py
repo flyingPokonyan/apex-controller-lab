@@ -183,8 +183,12 @@ def _digits(text: str) -> int | None:
 
 
 def storm_edge(frame: np.ndarray) -> float:
-    """Share of the left, right and top border that carries the storm's red."""
-    small = cv2.resize(frame[..., :3], THUMB, interpolation=cv2.INTER_AREA).astype(np.int16)
+    """Share of the left, right and top border that carries the storm's red.
+
+    Every 16th pixel of a 2560x1440 frame is a 160x90 grid: no resize needed.
+    """
+    step = max(1, frame.shape[1] // THUMB[0])
+    small = frame[::step, ::step, :3].astype(np.int16)
     strips = np.concatenate([
         small[:, :EDGE].reshape(-1, 3),
         small[:, -EDGE:].reshape(-1, 3),
@@ -193,6 +197,34 @@ def storm_edge(frame: np.ndarray) -> float:
     b, g, r = strips[:, 0], strips[:, 1], strips[:, 2]
     red = (r > 90) & (r - np.maximum(g, b) > 35)
     return float(red.mean())
+
+
+def scene_thumbnail(frame: np.ndarray) -> np.ndarray:
+    """``hud.scene_thumbnail`` from a quarter of the pixels: same 64x36 grey."""
+    x1, y1, x2, y2 = hud.SCENE_BOX
+    small = cv2.resize(frame[y1:y2:4, x1:x2:4, :3], hud.SCENE_THUMB, interpolation=cv2.INTER_AREA)
+    return cv2.cvtColor(small, cv2.COLOR_BGR2GRAY).astype(np.float32)
+
+
+def keycaps(frame: np.ndarray) -> list[hud.Blob]:
+    """``hud.keycaps`` on every other pixel: the white 「E」 boxes are 26–48 px wide."""
+    x1, y1, x2, y2 = hud.PROMPT_SEARCH
+    crop = frame[y1:y2:2, x1:x2:2, :3]
+    mask = (crop.min(axis=2) > 215).astype(np.uint8)
+    if int(mask.sum()) < (hud.KEYCAP_SIDE[0] // 2) ** 2 // 2:
+        return []
+    low, high = hud.KEYCAP_SIDE[0] // 2, hud.KEYCAP_SIDE[1] // 2 + 1
+    found = []
+    count, _labels, stats, centroids = cv2.connectedComponentsWithStats(mask, 8)
+    for index in range(1, count):
+        x, y, w, h, area = (int(value) for value in stats[index])
+        if not (low <= w <= high and low <= h <= high) or abs(w - h) > 3:
+            continue
+        if area / max(1, w * h) < hud.KEYCAP_FILL:
+            continue
+        cx, cy = centroids[index]
+        found.append(hud.Blob(x1 + 2 * x, y1 + 2 * y, 2 * w, 2 * h, 4 * area, x1 + 2 * float(cx), y1 + 2 * float(cy)))
+    return sorted(found, key=lambda blob: blob.radius)[:hud.MAX_KEYCAPS]
 
 
 def ground_flow(previous: np.ndarray | None, frame: np.ndarray) -> tuple[float | None, float | None, np.ndarray]:
@@ -219,6 +251,7 @@ class Perceiver:
         self._last_ground: np.ndarray | None = None
         self._last_mag_pixels: np.ndarray | None = None
         self._mag: int | None = None
+        self._last_bars: tuple[float, float] | None = None
         # The last card read, keyed by a thumbnail of the card: a card that has
         # not changed is not OCR'd again on every decision.
         self._card_key: np.ndarray | None = None
@@ -235,7 +268,7 @@ class Perceiver:
     def prompt(self, frame: np.ndarray) -> Prompt | None:
         if self.ocr is None:
             return None
-        caps = hud.keycaps(frame)
+        caps = keycaps(frame)
         if not caps:
             self._card_key = self._card = None
             return None
@@ -326,6 +359,7 @@ class Perceiver:
         want_center: bool = False,
         want_heading: bool = False,
         want_minimap: bool = False,
+        want_combat: bool = False,
     ) -> Observation:
         if frame.shape[1] != FRAME_SIZE[0] or frame.shape[0] != FRAME_SIZE[1]:
             return Observation(at=now, hud=False)
@@ -338,10 +372,10 @@ class Perceiver:
             timings[name] = round((later - tick) * 1000 / cv2.getTickFrequency(), 2)
             tick = later
 
-        scene = hud.scene_thumbnail(frame)
+        scene = scene_thumbnail(frame)
         change = None if self._last_scene is None else float(np.abs(scene - self._last_scene).mean())
         self._last_scene = scene
-        flow_v, flow_h, self._last_ground = ground_flow(self._last_ground, frame)
+        flow_v = flow_h = None
         edge = storm_edge(frame)
         lap("motion")
         knocked = None
@@ -358,10 +392,23 @@ class Perceiver:
             return Observation(at=now, hud=False, knocked=knocked, ring_banner=ring, storm_edge=edge,
                                center_text=center, flow_forward=flow_v, flow_side=flow_h,
                                scene_change=change, timings_ms=timings)
-        red = hud._red_mask(hud._bgr(frame))
-        arrows = hud.damage_arrows(frame, red)
         share, trail = hud.health(frame)
+        shield_share = hud.shield(frame)
         weapon = hud.has_weapon(frame)
+        # The red mask is the costly read. Arrows only matter for a hit and the
+        # target bar only in a fight, so look for them when the own bars just
+        # dropped (or show the red trail), or when the decision side asks.
+        dropped = trail or (
+            self._last_bars is not None
+            and (self._last_bars[0] - share >= 0.02 or self._last_bars[1] - shield_share >= 0.04)
+        )
+        self._last_bars = (share, shield_share)
+        arrows: list[hud.Blob] = []
+        confirmed = False
+        if dropped or want_combat:
+            red = hud._red_mask(hud._bgr(frame))
+            arrows = hud.damage_arrows(frame, red)
+            confirmed = want_combat and hud.target_bar_near_crosshair(frame, red)
         lap("hud")
         mag = reserve_left = guns = None
         if weapon:
@@ -390,10 +437,10 @@ class Perceiver:
             reserve_left=reserve_left,
             guns=guns,
             vitality=share,
-            shield=hud.shield(frame),
+            shield=shield_share,
             hurt_trail=trail,
             arrow_bearing=arrows[0].bearing if arrows else None,
-            hit_confirmed=hud.target_bar_near_crosshair(frame, red),
+            hit_confirmed=confirmed,
             knocked=knocked,
             ring_banner=ring,
             storm_edge=edge,
