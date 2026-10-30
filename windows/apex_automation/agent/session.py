@@ -33,6 +33,9 @@ FRAME_PROMPT_EVERY_S = 1.0
 HUD_LOST_S = 1.5
 # How often the optional reads run when no skill asks for them.
 EVERY = {"knocked": 0.5, "ring": 1.0, "center": 2.0, "heading": 0.25, "minimap": 0.3, "detect": 0.5}
+# Read only while a skill asks, and no more often than this (the depth model is the
+# slowest read: a few hundred ms on a Runner CPU).
+ON_DEMAND = {"space": 0.8}
 
 
 class AgentSession:
@@ -135,8 +138,8 @@ class AgentSession:
         want = self._schedule(now)
         current = self.goals.current.name if self.goals.current else None
         combat = current in ("return_fire", "retreat") or self.belief.under_fire(now)
-        obs = self.perceiver.read(frame, now, **{f"want_{name}": name in want for name in EVERY},
-                                  want_prompt=True, want_combat=combat)
+        obs = self.perceiver.read(frame, now, **{f"want_{name}": name in want for name in (*EVERY, *ON_DEMAND)},
+                                  want_prompt=True, want_combat=combat, pitch=self.motor.pitch)
         for name in want:
             self._last_read[name] = now
         self._note_timings(obs)
@@ -191,7 +194,9 @@ class AgentSession:
 
     def _schedule(self, now: float) -> set[str]:
         due = {name for name, every in EVERY.items() if now - self._last_read.get(name, -1e9) >= every}
-        return due | (self._wants & set(EVERY))
+        asked = {name for name, every in ON_DEMAND.items()
+                 if name in self._wants and now - self._last_read.get(name, -1e9) >= every}
+        return due | (self._wants & set(EVERY)) | asked
 
     def _carry_heading(self) -> None:
         """Turn the counts the input thread sent since last time into degrees."""

@@ -86,9 +86,19 @@ class Navigator:
     for BLOCKED_AFTER_S. The ladder: jump (Apex mantles low walls and sills),
     sidestep along the wall, climb (hold forward and jump against it), turn
     60–90° away; each rung is given a moment and checked before the next.
+
+    With free-space readings (agent.space) it also looks before it walks:
+    something within DETOUR_NEAR_M straight toward the goal while another
+    direction within 70° of it is open for DETOUR_OPEN_M is a detour, held for
+    DETOUR_HOLD_S so it does not dither; the sidestep goes to the more open
+    side, and the last rung turns to an open direction in view when there is
+    one.
     """
 
     RUNGS = ("jump", "sidestep", "climb", "turn")
+    DETOUR_NEAR_M = 2.5
+    DETOUR_OPEN_M = 5.0
+    DETOUR_HOLD_S = 1.5
 
     def __init__(self) -> None:
         self._changes: deque[tuple[float, float]] = deque(maxlen=20)
@@ -96,6 +106,8 @@ class Navigator:
         self.rung_at = 0.0
         self.side = 1
         self.ladders = 0
+        # (compass heading of the detour, until)
+        self.detour: tuple[float, float] | None = None
 
     def note(self, ctx: Context, moving: bool) -> None:
         change = ctx.belief.scene_change.value
@@ -113,6 +125,7 @@ class Navigator:
     def drive(self, ctx: Context, heading_error: float | None, *, sprint: bool, look_pitch: float | None = None) -> str:
         """One tick of travel. Returns "moving", "unsticking" or "gave_up"."""
         motor = ctx.motor
+        ctx.wants.add("space")
         if self.rung is not None:
             return self._unstick(ctx)
         self.note(ctx, moving=True)
@@ -120,14 +133,40 @@ class Navigator:
             self._changes.clear()
             self.rung = 0
             self.rung_at = ctx.now
-            self.side = ctx.rng.choice((-1, 1))
+            side = ctx.belief.more_open_side(ctx.now)
+            self.side = side if side is not None else ctx.rng.choice((-1, 1))
             ctx.counters["unstick:start"] += 1
+            if side is not None:
+                ctx.counters["unstick:side_from_space"] += 1
             return self._unstick(ctx)
+        heading_error = self._around(ctx, heading_error)
         if heading_error is not None:
             motor.steer(heading_error)
             sprint = sprint and abs(heading_error) < 35
         motor.move(forward=True, sprint=sprint)
         return "moving"
+
+    def _around(self, ctx: Context, heading_error: float | None) -> float | None:
+        """The heading error to steer by: the goal's, or a detour around what stands in its way."""
+        heading = ctx.belief.heading.value
+        if self.detour is not None:
+            bearing, until = self.detour
+            if ctx.now < until and heading is not None:
+                return _signed(bearing - float(heading))
+            self.detour = None
+        # No goal direction (roaming): still walk around what is right ahead.
+        want = 0.0 if heading_error is None else heading_error
+        if heading is None or abs(want) > 45:
+            return heading_error
+        ahead = ctx.belief.free_towards(ctx.now, want)
+        if ahead is None or ahead >= self.DETOUR_NEAR_M:
+            return heading_error
+        way = ctx.belief.open_direction(ctx.now, want, self.DETOUR_OPEN_M)
+        if way is None:
+            return heading_error
+        self.detour = ((float(heading) + way) % 360, ctx.now + self.DETOUR_HOLD_S)
+        ctx.counters["nav:detour"] += 1
+        return way
 
     def _unstick(self, ctx: Context) -> str:
         motor = ctx.motor
@@ -158,7 +197,12 @@ class Navigator:
                 heading = ctx.belief.heading.value
                 ctx.memory.block(heading, ctx.now)
                 motor.move()
-                motor.turn(self.side * ctx.rng.uniform(60, 95))
+                way = ctx.belief.open_direction(ctx.now, self.side * 45.0, self.DETOUR_OPEN_M, max_dev=50.0)
+                if way is not None and abs(way) >= 20:
+                    ctx.counters["unstick:turn_to_open"] += 1
+                    motor.turn(way)
+                else:
+                    motor.turn(self.side * ctx.rng.uniform(60, 95))
             elif elapsed > 0.6:
                 motor.move(forward=True)
             if elapsed > 1.8:
@@ -175,6 +219,7 @@ class Navigator:
 
     def _finish(self) -> None:
         self.rung = None
+        self.detour = None
         self._changes.clear()
 
 

@@ -17,6 +17,7 @@ from dataclasses import dataclass, field
 import math
 
 from .perception import Mate, Observation, Prompt
+from .space import SpaceView
 from .tracking import Tracker
 
 
@@ -37,6 +38,8 @@ MATE_STALE_S = 10.0
 # arrow missed for a frame does not make "nearest" jump to the other.
 MATE_COLOURS = ((15, 24), (84, 94), (34, 41))
 NO_AMMO_HOLD_S = 6.0
+# A free-space reading older than this no longer describes where we are.
+SPACE_STALE_S = 1.5
 # Frames needed to change the weapon belief either way.
 WEAPON_FRAMES = 3
 
@@ -82,6 +85,7 @@ class Belief:
         self.scene_change = Fact(None)
         self.detections = Fact(())
         self.tracker = Tracker()
+        self.space = Fact(None)  # SpaceView
         self.frames = 0
 
     # ------------------------------------------------------------------ update
@@ -109,6 +113,9 @@ class Belief:
             self.detections.set(tuple(obs.detections), now)
             heading = self.heading.value if self.heading.fresh(now, 6.0) else None
             self.tracker.update(tuple(obs.detections), None if heading is None else float(heading), now)
+        if obs.space is not None:
+            heading = self.heading.value if self.heading.fresh(now, 6.0) else None
+            self.space.set(SpaceView(None if heading is None else float(heading), tuple(obs.space)), now)
         if obs.mates is not None and (obs.mates or obs.minimap_self):
             # An empty list only counts when the minimap itself read fine.
             for mate in obs.mates:
@@ -236,6 +243,36 @@ class Belief:
     def current_prompt(self, now: float) -> Prompt | None:
         value = self.prompt.value
         return value if isinstance(value, Prompt) and self.prompt.fresh(now, PROMPT_HOLD_S) else None
+
+    def _space_now(self, now: float) -> list[tuple[float, float]]:
+        """Measured sectors as (degrees to turn from the current view, metres), known ones only."""
+        view = self.space.value
+        if view is None or not self.space.fresh(now, SPACE_STALE_S):
+            return []
+        shift = 0.0
+        if view.heading is not None and self.heading.value is not None:
+            shift = _signed(view.heading - float(self.heading.value))
+        return [(yaw + shift, metres) for yaw, metres in view.sectors if metres is not None]
+
+    def free_towards(self, now: float, turn: float, spread: float = 6.0) -> float | None:
+        """Metres free in the direction ``turn`` degrees from the view, if measured."""
+        near = [metres for yaw, metres in self._space_now(now) if abs(yaw - turn) <= spread]
+        return min(near) if near else None
+
+    def open_direction(self, now: float, prefer: float, need_m: float, max_dev: float = 70.0) -> float | None:
+        """The measured direction closest to ``prefer`` with at least ``need_m`` metres free."""
+        options = [yaw for yaw, metres in self._space_now(now) if metres >= need_m and abs(yaw - prefer) <= max_dev]
+        return min(options, key=lambda yaw: abs(yaw - prefer), default=None)
+
+    def more_open_side(self, now: float) -> int | None:
+        """-1 left / 1 right: the half of the view with more room, when it clearly has more."""
+        sectors = self._space_now(now)
+        left = [min(metres, 10.0) for yaw, metres in sectors if yaw < -5]
+        right = [min(metres, 10.0) for yaw, metres in sectors if yaw > 5]
+        if not left or not right:
+            return None
+        difference = sum(right) / len(right) - sum(left) / len(left)
+        return None if abs(difference) < 1.0 else (1 if difference > 0 else -1)
 
     def tracks(self, now: float, kinds: tuple[str, ...], within: float = 0.8) -> list:
         """Confirmed tracks (seen on two reads) of these kinds, nearest the crosshair first."""

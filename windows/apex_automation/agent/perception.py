@@ -176,6 +176,8 @@ class Observation:
     minimap_self: bool | None = None
     # Loot, doors and bots the detector found; None when it did not run.
     detections: tuple | None = None
+    # Metres free per direction in view (agent.space); None when not measured.
+    space: tuple | None = None
     timings_ms: dict[str, float] = field(default_factory=dict)
 
 
@@ -247,9 +249,10 @@ def ground_flow(previous: np.ndarray | None, frame: np.ndarray) -> tuple[float |
 class Perceiver:
     """Reads frames into Observations. Keeps what consecutive frames need."""
 
-    def __init__(self, ocr: OcrProvider | None, detector=None) -> None:
+    def __init__(self, ocr: OcrProvider | None, detector=None, space=None) -> None:
         self.ocr = ocr
         self.detector = detector
+        self.space = space
         self._last_scene: np.ndarray | None = None
         self._last_ground: np.ndarray | None = None
         self._last_mag_pixels: np.ndarray | None = None
@@ -364,6 +367,8 @@ class Perceiver:
         want_minimap: bool = False,
         want_combat: bool = False,
         want_detect: bool = False,
+        want_space: bool = False,
+        pitch: float | None = None,
     ) -> Observation:
         if frame.shape[1] != FRAME_SIZE[0] or frame.shape[0] != FRAME_SIZE[1]:
             return Observation(at=now, hud=False)
@@ -437,6 +442,11 @@ class Perceiver:
         if want_detect and self.detector is not None:
             detections = tuple(self.detector.detect(frame))
             lap("detect")
+        space = None
+        if want_space and self.space is not None:
+            # Unknown pitch: the agent walks looking a little down.
+            space = self.space.measure(frame, -3.0 if pitch is None else pitch, None).sectors
+            lap("space")
         return Observation(
             at=now,
             hud=True,
@@ -462,5 +472,6 @@ class Perceiver:
             mates=mates,
             minimap_self=minimap_self,
             detections=detections,
+            space=space,
             timings_ms=timings,
         )

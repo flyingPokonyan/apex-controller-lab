@@ -411,3 +411,72 @@ class TrackerTest(unittest.TestCase):
             world.see(detections=(seen("bin_closed", -20.0, height=0.1), seen("bin_closed", 25.0, height=0.25)))
             self.assertEqual(skill.step(world.ctx()), Status.RUNNING)
         self.assertEqual(skill.track_id, target)
+
+
+import math
+
+import numpy as np
+
+from windows.apex_automation.agent.space import SpaceView, free_from_disparity
+
+
+def scene(wall_rows: dict[range, int], h=266, w=476, hfov=106.26, pitch=0.0):
+    """Inverse depth of flat floor seen from eye height, with walls standing in some columns from a row up."""
+    focal = (w / 2) / math.tan(math.radians(hfov) / 2)
+    rows = np.arange(h)
+    alpha = np.radians(-pitch) + np.arctan((rows - h / 2) / focal)
+    floor = np.where(alpha > 0.005, np.tan(np.clip(alpha, 0.005, None)) / 1.6, 0.003)
+    disp = np.repeat(floor[:, None], w, axis=1).astype(np.float32)
+    for columns, foot in wall_rows.items():
+        for x in columns:
+            disp[:foot, x] = disp[foot, x]  # standing surface: same depth all the way up
+    return disp
+
+
+class FreeSpaceTest(unittest.TestCase):
+    def test_open_floor_is_free_and_a_wall_ahead_is_close(self):
+        open_ = free_from_disparity(scene({}), 0.0, 106.26)
+        self.assertTrue(all(metres == 25.0 for _, metres in open_ if metres is not None))
+        # A wall whose foot is at row 200 straight ahead: about 1.6 / tan(angle of row 200).
+        focal = 238 / math.tan(math.radians(53.13))
+        expected = 1.6 / math.tan(math.atan((200 - 133) / focal))
+        sectors = free_from_disparity(scene({range(200, 276): 200}), 0.0, 106.26)
+        ahead = [metres for yaw, metres in sectors if abs(yaw) < 3]
+        self.assertTrue(ahead)
+        self.assertAlmostEqual(min(ahead), expected, delta=0.6)
+        left = [metres for yaw, metres in sectors if yaw < -30]
+        self.assertTrue(all(metres == 25.0 for metres in left))
+
+    def test_no_floor_at_the_bottom_of_the_view_is_right_in_front(self):
+        sectors = free_from_disparity(scene({range(0, 476): 230}), 0.0, 106.26)
+        self.assertTrue(all(metres == 0.0 for _, metres in sectors if metres is not None))
+
+    def test_navigator_detours_around_something_close_ahead(self):
+        from windows.apex_automation.agent.skills import Navigator
+
+        world = World()
+        sectors = tuple((float(yaw), 1.5 if -10 <= yaw <= 10 else 12.0) for yaw in range(-50, 51, 4))
+        world.see(space=sectors)
+        nav = Navigator()
+        ctx = world.ctx()
+        self.assertEqual(nav.drive(ctx, 0.0, sprint=False), "moving")
+        self.assertEqual(ctx.counters["nav:detour"], 1)
+        bearing, _until = nav.detour
+        self.assertGreaterEqual(abs((bearing - 90 + 180) % 360 - 180), 10)
+        # Held for a moment even when the next reading shows nothing.
+        world.advance(0.3)
+        ctx = world.ctx()
+        nav.drive(ctx, 0.0, sprint=False)
+        self.assertEqual(ctx.counters["nav:detour"], 0)
+        self.assertIsNotNone(nav.detour)
+
+    def test_open_ground_ahead_needs_no_detour(self):
+        from windows.apex_automation.agent.skills import Navigator
+
+        world = World()
+        world.see(space=tuple((float(yaw), 12.0) for yaw in range(-50, 51, 4)))
+        nav = Navigator()
+        ctx = world.ctx()
+        nav.drive(ctx, 5.0, sprint=False)
+        self.assertIsNone(nav.detour)
+        self.assertIsInstance(SpaceView(90.0, ()).sectors, tuple)
