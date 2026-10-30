@@ -45,7 +45,7 @@ from .progression_policy import (
     ProgressionStatus,
     TargetLevelPolicy,
 )
-from .safety import ForegroundLost
+from .safety import EmergencyStop, ForegroundLost
 
 
 # A capability set that reached this module has already been validated for
@@ -228,6 +228,7 @@ class CapabilityPilot:
         pack_probe=None,
         target_title: str = BOT_TITLE_WORD,
         hud_reader: HudReader | None = None,
+        agent_ocr=None,
     ) -> None:
         self.config = config
         # The word naming the target card on the mode panel: 机器人 for Bot
@@ -245,6 +246,9 @@ class CapabilityPilot:
         # Reads nothing until the HUD regions are calibrated from a recording.
         self.hud_reader: HudReader = hud_reader or BlindHud()
         self.match_brain: MatchBrain | None = None
+        # The goal-driven in-match agent (``inMatchAgent``), when configured.
+        self.agent = None
+        self.agent_ocr = agent_ocr
         self._brain_used_this_round = False
         self.sleep = sleep
         self.monotonic = monotonic
@@ -473,6 +477,7 @@ class CapabilityPilot:
 
         self._validate_actions()
         self.match_brain = self._build_match_brain()
+        self.agent = self._build_agent()
 
         self.started = self.monotonic()
         self.observed_state: str | None = None
@@ -659,8 +664,11 @@ class CapabilityPilot:
 
     def _validate_generated_sequence(self, action_name: str, spec: dict[str, Any]) -> None:
         generator = spec.get("generate")
-        if generator not in {"inMatchLive", "inMatchActive"}:
+        if generator not in {"inMatchLive", "inMatchActive", "inMatchAgent"}:
             raise ValueError(f"动作序列 {action_name} 的生成器未知")
+        if generator == "inMatchAgent":
+            self._validate_agent_spec(action_name, spec)
+            return
         scan_codes = spec.get("scanCodes")
         if not isinstance(scan_codes, dict):
             raise ValueError(f"动作序列 {action_name} 没有声明扫描码")
@@ -689,6 +697,58 @@ class CapabilityPilot:
         if spec.get("crouchMode", "hold") not in {"hold", "toggle"}:
             raise ValueError(f"动作序列 {action_name} 的 crouchMode 只能是 hold 或 toggle")
         MouseCalibration.from_spec(spec.get("mouse"))
+
+    def _validate_agent_spec(self, action_name: str, spec: dict[str, Any]) -> None:
+        from .agent.motor import Keys
+
+        scan_codes = spec.get("scanCodes")
+        if not isinstance(scan_codes, dict):
+            raise ValueError(f"动作序列 {action_name} 没有声明扫描码")
+        required = ("forward", "left", "back", "right", "jump", "crouch", "sprint", "interact", "reload", "melee", "heal")
+        for name in required:
+            if not isinstance(scan_codes.get(name), int):
+                raise ValueError(f"动作序列 {action_name} 缺少扫描码 {name}")
+        unknown = set(scan_codes) - set(Keys.__dataclass_fields__)
+        if unknown:
+            raise ValueError(f"动作序列 {action_name} 有未知按键 {sorted(unknown)}")
+        values = [int(value) for value in scan_codes.values()]
+        if len(set(values)) != len(values):
+            raise ValueError(f"动作序列 {action_name} 的扫描码重复")
+        if MENU_SCAN_CODES.intersection(values):
+            raise ValueError(f"动作序列 {action_name} 使用了会打开菜单的键")
+        if spec.get("crouchMode", "hold") not in {"hold", "toggle"}:
+            raise ValueError(f"动作序列 {action_name} 的 crouchMode 只能是 hold 或 toggle")
+        slice_ms = spec.get("sliceMs", 2000)
+        if not isinstance(slice_ms, int) or not 300 <= slice_ms <= 5000:
+            raise ValueError(f"动作序列 {action_name} 的 sliceMs 无效")
+        MouseCalibration.from_spec(spec.get("mouse"))
+
+    def _build_agent(self):
+        """The goal-driven agent, when some capability uses ``inMatchAgent``."""
+        for capability in self.dispatcher.capabilities.capabilities:
+            spec = self.actions.get(capability.action)
+            if capability.kind == "sequence" and isinstance(spec, dict) and spec.get("generate") == "inMatchAgent":
+                from .agent.controller import InputController
+                from .agent.motor import Keys
+                from .agent.perception import Perceiver
+                from .agent.session import AgentSession
+
+                agent = AgentSession(
+                    InputController(self.sender, self.guard),
+                    Perceiver(self.agent_ocr),
+                    keys=Keys.from_config(spec["scanCodes"]),
+                    crouch_toggle=spec.get("crouchMode", "hold") == "toggle",
+                )
+                per_degree = MouseCalibration.from_spec(spec.get("mouse")).counts_per_degree
+                if per_degree is not None:
+                    agent.motor.counts_per_degree = per_degree
+                return agent
+        return None
+
+    def _suspend_agent(self, reason: str) -> None:
+        if self.agent is not None and self.agent.controller.active:
+            self.agent.suspend(reason)
+            self.recorder.log("AGENT_SUSPENDED", reason=reason)
 
     def _build_match_brain(self) -> MatchBrain | None:
         """The active profile's brain, when some capability uses it."""
@@ -752,6 +812,7 @@ class CapabilityPilot:
     # ------------------------------------------------------------------ input
 
     def _release_all(self, reason: str) -> None:
+        self._suspend_agent(reason)
         if self._released:
             return
         self._released = True
@@ -974,6 +1035,8 @@ class CapabilityPilot:
                 "fallback": "NO_BUTTON_TEXT",
             }
 
+        if isinstance(spec, dict) and spec.get("generate") == "inMatchAgent":
+            return self._run_agent(spec)
         gesture: str | None = None
         if isinstance(spec, dict) and spec.get("generate") == "inMatchActive":
             gesture, spec = self._active_steps(frame)
@@ -992,6 +1055,22 @@ class CapabilityPilot:
         if gesture is not None:
             result["gesture"] = gesture
         return result
+
+    def _run_agent(self, spec: dict[str, Any]) -> dict[str, object]:
+        if self.agent is None:
+            raise ValueError("对局 agent 没有可用的行为配置")
+        self._brain_used_this_round = True
+        self._released = False
+        try:
+            outcome = self.agent.run_slice(self.source.grab, budget_s=int(spec.get("sliceMs", 2000)) / 1000)
+        except BaseException:
+            # Whatever went wrong (capture, a bug), nothing may stay held.
+            self.agent.suspend("SLICE_ERROR")
+            raise
+        if outcome == "EMERGENCY_STOP":
+            raise EmergencyStop("检测到 F8，已紧急停止")
+        current = self.agent.goals.current
+        return {"agent": outcome, "goal": None if current is None else current.name}
 
     def _active_steps(self, frame: np.ndarray) -> tuple[str, list[dict[str, object]]]:
         if self.match_brain is None:
@@ -1435,13 +1514,14 @@ class CapabilityPilot:
             activity: dict[str, object] = {}
             if (
                 self._brain_used_this_round
-                and self.match_brain is not None
+                and (self.match_brain is not None or self.agent is not None)
                 and self._round_active
                 and state in LOBBY_CONTEXT_STATES
             ):
                 # Back in the lobby: this round's activity rides on the state
                 # change, and the reporter hangs it on LOBBY_RETURNED.
-                activity["matchActivity"] = self.match_brain.summary()
+                brain = self.agent if self.agent is not None else self.match_brain
+                activity["matchActivity"] = brain.summary()
                 self._brain_used_this_round = False
             self.recorder.log(
                 "STATE_DETECTED",
@@ -1502,6 +1582,9 @@ class CapabilityPilot:
                 if self.match_brain is not None:
                     self.match_brain.begin_life()
                     style["style"] = self.match_brain.style
+                if self.agent is not None:
+                    self.agent.begin_life()
+                    style["style"] = "agent"
                 self.recorder.log(
                     "MATCH_BEHAVIOR",
                     mood=self.match_behavior.mood,
@@ -2716,6 +2799,9 @@ class CapabilityPilot:
 
         with self.metrics.measure("stateObservation"):
             state, base_state = self._observe(frame, now)
+        if state != "IN_MATCH_ALIVE":
+            # Dead, spectating, a menu, the dropship: the agent's held keys must go.
+            self._suspend_agent(f"STATE:{state}")
         # Overlay OCR can take seconds. Retry windows and periodic actions must
         # use the time after that work, not the stale timestamp from frame grab.
         now = self.monotonic()
@@ -2867,6 +2953,8 @@ class CapabilityPilot:
             # Whatever ends the run — the deadline, F8, Ctrl+C, an exception —
             # must not leave a key held down in a live match.
             self._release_all("RUN_ENDED")
+            if self.agent is not None:
+                self.agent.controller.stop()
             self.metrics.flush(force=True, observedState=self.observed_state,
                                frames=self.frames, actionsSent=self.actions_sent)
         return self.session_outcome or "COMPLETED"

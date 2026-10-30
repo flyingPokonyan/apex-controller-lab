@@ -408,6 +408,7 @@ class PlaySessionRunner:
                 maintenance=self.maintenance,
                 # Only read by the active in-match profile.
                 hud_reader=FrameHud(self.ocr_provider),
+                agent_ocr=self.ocr_provider,
             )
             outcome = pilot.run(duration_s=duration_s)
             if outcome == "TARGET_REACHED":
