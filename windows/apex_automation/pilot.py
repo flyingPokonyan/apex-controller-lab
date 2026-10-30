@@ -3,6 +3,7 @@ from __future__ import annotations
 from collections import defaultdict
 from dataclasses import dataclass
 import json
+import os
 from pathlib import Path
 import re
 import time
@@ -229,6 +230,7 @@ class CapabilityPilot:
         target_title: str = BOT_TITLE_WORD,
         hud_reader: HudReader | None = None,
         agent_ocr=None,
+        agent_frame_sink=None,
     ) -> None:
         self.config = config
         # The word naming the target card on the mode panel: 机器人 for Bot
@@ -249,6 +251,9 @@ class CapabilityPilot:
         # The goal-driven in-match agent (``inMatchAgent``), when configured.
         self.agent = None
         self.agent_ocr = agent_ocr
+        self.agent_frame_sink = agent_frame_sink
+        # Our column of the end-of-match squad summary, read once per round.
+        self._squad_summary: dict[str, object] | None = None
         self._brain_used_this_round = False
         self.sleep = sleep
         self.monotonic = monotonic
@@ -272,6 +277,10 @@ class CapabilityPilot:
         # captured too; one shot per episode is cheap and they are the reason
         # the grace is this long.
         self.maintenance = maintenance
+        # Trial runs only (trial-cycle.ps1): a lobby between matches is also a
+        # boundary where a pending update may stop the session.
+        self._match_boundary = os.environ.get("APEX_TRIAL_MATCH_BOUNDARY") == "1"
+        self._match_boundary_at = -1e9
         self.unknown_grace_s = unknown_grace_ms / 1000
         # One shot per episode turned out to be far too coarse. In
         # `20260730-232551` a single unknown stretch ran 142 seconds and
@@ -738,6 +747,7 @@ class CapabilityPilot:
                     Perceiver(self.agent_ocr),
                     keys=Keys.from_config(spec["scanCodes"]),
                     crouch_toggle=spec.get("crouchMode", "hold") == "toggle",
+                    frame_sink=self.agent_frame_sink if spec.get("keepFrames", True) else None,
                 )
                 per_degree = MouseCalibration.from_spec(spec.get("mouse")).counts_per_degree
                 if per_degree is not None:
@@ -1512,17 +1522,18 @@ class CapabilityPilot:
             )
         else:
             activity: dict[str, object] = {}
-            if (
-                self._brain_used_this_round
-                and (self.match_brain is not None or self.agent is not None)
-                and self._round_active
-                and state in LOBBY_CONTEXT_STATES
-            ):
+            if self._round_active and state in LOBBY_CONTEXT_STATES:
                 # Back in the lobby: this round's activity rides on the state
                 # change, and the reporter hangs it on LOBBY_RETURNED.
-                brain = self.agent if self.agent is not None else self.match_brain
-                activity["matchActivity"] = brain.summary()
-                self._brain_used_this_round = False
+                round_activity: dict[str, object] = {}
+                if self._brain_used_this_round and (self.match_brain is not None or self.agent is not None):
+                    brain = self.agent if self.agent is not None else self.match_brain
+                    round_activity.update(brain.summary())
+                    self._brain_used_this_round = False
+                if self._squad_summary is not None:
+                    round_activity["squadSummary"] = self._squad_summary
+                if round_activity:
+                    activity["matchActivity"] = round_activity
             self.recorder.log(
                 "STATE_DETECTED",
                 state=state,
@@ -1578,6 +1589,7 @@ class CapabilityPilot:
                 self.rounds_started += 1
                 self.match_behavior.begin_life()
                 self._brain_used_this_round = False
+                self._squad_summary = None
                 style: dict[str, object] = {}
                 if self.match_brain is not None:
                     self.match_brain.begin_life()
@@ -2802,6 +2814,28 @@ class CapabilityPilot:
         if state != "IN_MATCH_ALIVE":
             # Dead, spectating, a menu, the dropship: the agent's held keys must go.
             self._suspend_agent(f"STATE:{state}")
+        if (
+            state == "POST_MATCH_SUMMARY"
+            and self._round_active
+            and self._squad_summary is None
+            and self.agent_ocr is not None
+        ):
+            from .match_summary import read_squad_summary
+
+            try:
+                self._squad_summary = read_squad_summary(self.agent_ocr, frame)
+            except Exception as error:  # noqa: BLE001 - a statistic, never a reason to stop
+                self.recorder.log("SQUAD_SUMMARY_FAILED", error=str(error))
+            if self._squad_summary is not None:
+                self.recorder.log("SQUAD_SUMMARY", **self._squad_summary)
+        if (
+            self._match_boundary
+            and self.maintenance is not None
+            and base_state in LOBBY_CONTEXT_STATES
+            and now - self._match_boundary_at >= 10
+        ):
+            self._match_boundary_at = now
+            self.maintenance.pulse("LOBBY_BETWEEN_MATCHES", blocked=False, boundary=True)
         # Overlay OCR can take seconds. Retry windows and periodic actions must
         # use the time after that work, not the stale timestamp from frame grab.
         now = self.monotonic()

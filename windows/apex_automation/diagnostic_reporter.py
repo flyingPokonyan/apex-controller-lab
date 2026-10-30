@@ -221,6 +221,14 @@ class DiagnosticReporter:
                 self._pack_screenshots.process_once(should_stop=self._stop.is_set)
             except Exception:
                 self._notice("PACK_SCREENSHOT_IO")
+            from .agent_frames import AgentFrameUploader
+            if not hasattr(self, "_agent_frames"):
+                self._agent_frames = AgentFrameUploader(
+                    self.settings, self.root, self.transport, timeout_s=self.screenshot_timeout_s)
+            try:
+                self._agent_frames.process_once(should_stop=self._stop.is_set)
+            except Exception:
+                self._notice("AGENT_FRAMES_IO")
         pending = self.state["pending"]
         if not send or self._stop.is_set() or not pending or time.monotonic() < self._next_send_at:
             return len(pending)

@@ -25,6 +25,10 @@ from .skills import Context
 
 
 DECISION_S = 0.1
+# Training frames for the loot detector: one every few seconds on the ground,
+# more while a pickup or bin prompt shows (those are the useful ones).
+FRAME_EVERY_S = 4.0
+FRAME_PROMPT_EVERY_S = 1.0
 # The bottom HUD gone for this long without a knock means dead or spectating.
 HUD_LOST_S = 1.5
 # How often the optional reads run when no skill asks for them.
@@ -42,7 +46,10 @@ class AgentSession:
         clock: Callable[[], float] = time.monotonic,
         sleep: Callable[[float], None] = time.sleep,
         crouch_toggle: bool = False,
+        frame_sink: Callable[[np.ndarray, str], object] | None = None,
     ) -> None:
+        self.frame_sink = frame_sink
+        self._last_frame_saved = -1e9
         self.controller = controller
         self.perceiver = perceiver
         self.rng = rng or random.Random()
@@ -143,7 +150,24 @@ class AgentSession:
         self._wants = set(ctx.wants)
         self.controller.heartbeat()
         self.counters["ticks"] += 1
+        self._keep_frame(frame, now)
         return None
+
+    def _keep_frame(self, frame: np.ndarray, now: float) -> None:
+        if self.frame_sink is None:
+            return
+        prompt = self.belief.current_prompt(now)
+        every = FRAME_PROMPT_EVERY_S if prompt is not None else FRAME_EVERY_S
+        if now - self._last_frame_saved < every:
+            return
+        self._last_frame_saved = now
+        goal = self.goals.current.name if self.goals.current else "none"
+        label = f"{goal}-{prompt.kind}" if prompt is not None else goal
+        try:
+            self.frame_sink(frame, label)
+            self.counters["framesKept"] += 1
+        except Exception:  # noqa: BLE001 - training material must never stop play
+            self.counters["framesFailed"] += 1
 
     # ------------------------------------------------------------------ helpers
 
