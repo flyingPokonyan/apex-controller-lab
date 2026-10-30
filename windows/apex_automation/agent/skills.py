@@ -650,7 +650,8 @@ class Search(Skill):
     name = "search"
     timeout_s = 20.0
     # Degrees below the horizon while walking, and whether to break into a run.
-    PITCH = (22, 32)
+    # Steeper than ~20° shows nothing but the ground right ahead.
+    PITCH = (12, 18)
     SPRINT_SHARE = 0.0
 
     def __init__(self, ctx: Context) -> None:

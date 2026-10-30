@@ -69,6 +69,7 @@ class AgentSession:
         self._armed_time = 0.0
         self._storm_time = 0.0
         self._knocked_time = 0.0
+        self._alive_time = 0.0
         self._first_armed: float | None = None
         self._last_tick: float | None = None
 
@@ -85,6 +86,7 @@ class AgentSession:
         self._hud_lost_since = None
         self._life_started = None
         self._armed_time = self._storm_time = self._knocked_time = 0.0
+        self._alive_time = 0.0
         self._first_armed: float | None = None
         self._last_tick = None
         self.motor.pitch = None
@@ -110,7 +112,9 @@ class AgentSession:
         ends = self.clock() + budget_s
         while True:
             started = self.clock()
+            grab_started = time.perf_counter()
             frame = grab()
+            self._time("grab", (time.perf_counter() - grab_started) * 1000)
             outcome = self.tick(frame, started)
             if outcome is not None:
                 return outcome
@@ -126,7 +130,10 @@ class AgentSession:
         if self._life_started is None:
             self._life_started = now
         want = self._schedule(now)
-        obs = self.perceiver.read(frame, now, **{f"want_{name}": name in want for name in EVERY}, want_prompt=True)
+        current = self.goals.current.name if self.goals.current else None
+        combat = current in ("return_fire", "retreat") or self.belief.under_fire(now)
+        obs = self.perceiver.read(frame, now, **{f"want_{name}": name in want for name in EVERY},
+                                  want_prompt=True, want_combat=combat)
         for name in want:
             self._last_read[name] = now
         self._note_timings(obs)
@@ -193,6 +200,7 @@ class AgentSession:
     def _account(self, now: float) -> None:
         if self._last_tick is not None:
             dt = min(1.0, now - self._last_tick)
+            self._alive_time += dt
             if self.belief.is_armed():
                 self._armed_time += dt
                 if self._first_armed is None and self._life_started is not None:
@@ -217,7 +225,7 @@ class AgentSession:
             ordered = sorted(values)
             return round(ordered[min(len(ordered) - 1, int(share * len(ordered)))], 1) if ordered else 0.0
 
-        alive = 0.0 if self._life_started is None or self._last_tick is None else self._last_tick - self._life_started
+        alive = self._alive_time
         return {
             "agent": 1,
             "aliveS": round(alive, 1),

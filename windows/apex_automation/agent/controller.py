@@ -189,10 +189,21 @@ class InputController:
             self._heartbeat = self.clock()
 
     def turn(self, dx: float, dy: float, duration_s: float) -> None:
-        """Turn by ``dx``/``dy`` counts over ``duration_s``. Replaces a turn in progress."""
+        """Turn by ``dx``/``dy`` counts over ``duration_s``.
+
+        A turn still in progress is not dropped: what it had left to send is
+        added to the new one, so the view ends where the two together aim.
+        (Dropping it let the pitch drift: every interrupted look-down was
+        counted as done and the view sank toward the floor.)
+        """
         with self._lock:
-            self._turn = _Turn(float(dx), float(dy), self.clock(), max(0.05, float(duration_s)))
-            self._heartbeat = self.clock()
+            now = self.clock()
+            if self._turn is not None:
+                left = 1.0 - self._turn.sent
+                dx += self._turn.dx * left
+                dy += self._turn.dy * left
+            self._turn = _Turn(float(dx), float(dy), now, max(0.05, float(duration_s)))
+            self._heartbeat = now
 
     def tap(self, scan_code: int, hold_s: float) -> None:
         with self._lock:

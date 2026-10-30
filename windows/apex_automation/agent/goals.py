@@ -68,6 +68,11 @@ def _loot_hard(ctx: Context) -> bool:
     return prompt is not None and prompt.kind == "weapon" and not ctx.belief.is_armed()
 
 
+def _losing(ctx: Context) -> bool:
+    health = ctx.belief.health_share()
+    return health is not None and health < 0.3 and not ctx.belief.hit_confirmed.fresh(ctx.now, 3.0)
+
+
 def _needs_gear(ctx: Context) -> bool:
     belief = ctx.belief
     return not belief.is_armed() or belief.out_of_ammo(ctx.now)
@@ -85,11 +90,14 @@ def default_goals() -> tuple[Goal, ...]:
     return (
         Goal("crawl", 100, lambda c: c.belief.is_knocked(), sk.Crawl, hard=lambda c: c.belief.is_knocked(),
              timeout_s=120, cooldown_s=0),
-        Goal("return_fire", 90, lambda c: c.belief.under_fire(c.now) and not _recent_fail(c, "return_fire", 4.0),
+        # Low on health and landing nothing, answering fire only gets us killed:
+        # that is retreat's job until the bars recover.
+        Goal("return_fire", 90, lambda c: c.belief.under_fire(c.now) and not _recent_fail(c, "return_fire", 4.0)
+             and not _losing(c),
              sk.ReturnFire, hard=lambda c: c.belief.under_fire(c.now), timeout_s=20, cooldown_s=4,
              reason_cooldown=(("NO_WEAPON", 6.0), ("LOSING", 6.0))),
-        Goal("retreat", 85, lambda c: c.belief.under_fire(c.now) and _recent_fail(c, "return_fire", 3.0),
-             sk.Retreat, hard=lambda c: c.belief.under_fire(c.now) and _recent_fail(c, "return_fire", 3.0),
+        Goal("retreat", 85, lambda c: c.belief.under_fire(c.now) and (_recent_fail(c, "return_fire", 3.0) or _losing(c)),
+             sk.Retreat, hard=lambda c: c.belief.under_fire(c.now) and (_recent_fail(c, "return_fire", 3.0) or _losing(c)),
              timeout_s=12, cooldown_s=3),
         Goal("escape_storm", 80, lambda c: c.belief.in_storm(), sk.EscapeStorm, hard=lambda c: c.belief.in_storm(),
              timeout_s=40, cooldown_s=2),
