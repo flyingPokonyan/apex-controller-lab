@@ -74,7 +74,7 @@ def _engage_wanted(ctx: Context) -> bool:
         return False
     if belief.mag.value == 0 and belief.out_of_ammo(ctx.now):
         return False
-    return bool(belief.seen(ctx.now, ("enemy",), within=0.6))
+    return bool(belief.tracks(ctx.now, ("enemy",), within=0.6))
 
 
 def _losing(ctx: Context) -> bool:

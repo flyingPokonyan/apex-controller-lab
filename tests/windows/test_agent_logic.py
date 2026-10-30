@@ -298,10 +298,14 @@ class DetectionGoalTest(unittest.TestCase):
         world = World()
         manager = GoalManager()
         world.see(detections=(seen("bin_closed", 20.0),))
-        self.assertEqual(manager.tick(world.ctx()), "approach")
+        self.assertNotEqual(manager.tick(world.ctx()), "approach")  # one read could be a stray box
+        world.now += 0.5
+        world.see(detections=(seen("bin_closed", 20.0),))
+        self.assertEqual(GoalManager().tick(world.ctx()), "approach")
 
     def test_a_prompt_ends_the_approach_and_loot_takes_over(self):
         world = World()
+        world.see(detections=(seen("bin_closed", 5.0, height=0.3),))
         world.see(detections=(seen("bin_closed", 5.0, height=0.3),))
         skill = Approach(world.ctx())
         self.assertEqual(skill.step(world.ctx()), Status.RUNNING)
@@ -311,6 +315,7 @@ class DetectionGoalTest(unittest.TestCase):
 
     def test_a_target_out_of_sight_is_given_up_and_remembered(self):
         world = World()
+        world.see(detections=(seen("item", -10.0),))
         world.see(detections=(seen("item", -10.0),))
         skill = Approach(world.ctx())
         status = Status.RUNNING
@@ -365,3 +370,44 @@ class DecodeTest(unittest.TestCase):
         self.assertEqual(found[0].kind, "bin_closed")
         self.assertAlmostEqual(found[0].yaw, 0.0, delta=0.5)
         self.assertAlmostEqual(found[0].pitch, 0.0, delta=0.5)
+
+
+from windows.apex_automation.agent.tracking import Tracker
+
+
+class TrackerTest(unittest.TestCase):
+    def test_the_same_bin_keeps_its_identity_while_we_turn(self):
+        tracker = Tracker()
+        tracker.update((seen("bin_closed", 20.0),), 90.0, 1.0)
+        first = tracker.tracks[0].id
+        # Turned 20 degrees right: the bin is now straight ahead, same bearing.
+        tracker.update((seen("bin_closed", 0.0),), 110.0, 1.5)
+        self.assertEqual([t.id for t in tracker.tracks], [first])
+        self.assertTrue(tracker.tracks[0].confirmed)
+        self.assertAlmostEqual(tracker.tracks[0].bearing, 110.0)
+
+    def test_two_bins_are_two_tracks_and_old_ones_are_forgotten(self):
+        tracker = Tracker()
+        tracker.update((seen("bin_closed", -30.0), seen("bin_closed", 30.0)), 0.0, 1.0)
+        self.assertEqual(len(tracker.tracks), 2)
+        tracker.update((seen("bin_closed", 30.0),), 0.0, 4.0)
+        self.assertEqual(len(tracker.tracks), 1)
+        self.assertEqual(tracker.tracks[0].hits, 1)  # the old pair was forgotten
+
+    def test_a_much_bigger_box_is_not_the_same_thing(self):
+        tracker = Tracker()
+        tracker.update((seen("bin_closed", 0.0, height=0.05),), 0.0, 1.0)
+        tracker.update((seen("bin_closed", 0.0, height=0.3),), 0.0, 1.5)
+        self.assertEqual(len(tracker.tracks), 2)
+
+    def test_approach_stays_on_its_bin_when_a_closer_one_appears(self):
+        world = World()
+        for _ in range(2):
+            world.see(detections=(seen("bin_closed", -20.0, height=0.1),))
+        skill = Approach(world.ctx())
+        target = skill.track_id
+        for _ in range(3):
+            world.advance(0.2)
+            world.see(detections=(seen("bin_closed", -20.0, height=0.1), seen("bin_closed", 25.0, height=0.25)))
+            self.assertEqual(skill.step(world.ctx()), Status.RUNNING)
+        self.assertEqual(skill.track_id, target)

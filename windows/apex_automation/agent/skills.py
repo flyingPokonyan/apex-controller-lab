@@ -619,23 +619,24 @@ def target_heading(ctx: Context, detection) -> float | None:
 
 
 def fresh_target(ctx: Context, kinds: tuple[str, ...], max_yaw: float = 75.0):
-    """The nearest-looking detection of these kinds not already tried."""
+    """The nearest-looking confirmed track of these kinds not already tried."""
     candidates = []
-    for detection in ctx.belief.seen(ctx.now, kinds):
-        if abs(detection.yaw) > max_yaw or detection.height_share < 0.025:
+    for track in ctx.belief.tracks(ctx.now, kinds):
+        if abs(track.detection.yaw) > max_yaw or track.height_share < 0.025:
             continue
-        if ctx.memory.tried_near("target", target_heading(ctx, detection), ctx.now, 60.0, spread=10.0):
+        if ctx.memory.tried_near("target", track.bearing, ctx.now, 60.0, spread=10.0):
             continue
-        candidates.append(detection)
+        candidates.append(track)
     # Bigger on screen = closer: go for the closest first.
-    return max(candidates, key=lambda d: d.height_share, default=None)
+    return max(candidates, key=lambda t: t.height_share, default=None)
 
 
 class Approach(Skill):
     """Walk to a bin, item or death box the detector sees, until its prompt shows.
 
-    The target is followed by compass heading, so the view can wander a
-    little while walking and the target is still found again. Loot takes
+    The target is one track: the same bin while the view sways and other bins
+    come into view. If its track is lost for a moment, a track of the same kind
+    at about the same compass bearing is taken as it again. Loot takes
     over once the prompt is up. Lost from view for 2 s, no closer for 6 s,
     or close with no prompt: failure, and that direction is remembered.
     """
@@ -648,21 +649,32 @@ class Approach(Skill):
         super().__init__(ctx)
         self.nav = Navigator()
         target = fresh_target(ctx, self.KINDS)
+        self.track_id = target.id if target else None
         self.kind = target.kind if target else None
-        self.heading = target_heading(ctx, target) if target else None
+        self.heading = target.bearing if target else None
         self.best_height = target.height_share if target else 0.0
         self.best_at = ctx.now
         self.seen_at = ctx.now
         self.close_since: float | None = None
 
     def _track(self, ctx: Context):
+        track = ctx.belief.tracker.get(self.track_id)
+        if track is not None and ctx.now - track.last_seen <= 0.8:
+            return track.detection
+        # Lost its identity (hidden for a moment): the same kind at about the same bearing.
         best, best_error = None, 18.0
-        for detection in ctx.belief.seen(ctx.now, (self.kind,)):
-            heading = target_heading(ctx, detection)
-            error = abs(_signed(heading - self.heading)) if heading is not None and self.heading is not None else abs(detection.yaw)
+        for candidate in ctx.belief.tracks(ctx.now, (self.kind,)):
+            if candidate.bearing is not None and self.heading is not None:
+                error = abs(_signed(candidate.bearing - self.heading))
+            else:
+                error = abs(candidate.detection.yaw)
             if error < best_error:
-                best, best_error = detection, error
-        return best
+                best, best_error = candidate, error
+        if best is None:
+            return None
+        self.track_id = best.id
+        ctx.counters["approach:reacquired"] += 1
+        return best.detection
 
     def step(self, ctx: Context) -> Status:
         belief, motor = ctx.belief, ctx.motor
@@ -671,6 +683,8 @@ class Approach(Skill):
             return self.fail("NO_TARGET")
         if belief.current_prompt(ctx.now) is not None:
             ctx.counters[f"approach:arrived:{self.kind}"] += 1
+            # Not again for a minute: loot decides what is worth taking from it.
+            ctx.memory.note_attempt("target", self.heading, ctx.now, "ARRIVED")
             return Status.SUCCESS
         target = self._track(ctx)
         if target is not None:
@@ -735,12 +749,17 @@ class Engage(Skill):
         self.next_burst = self.react_at
         self.seen_at = ctx.now
         self.strafe = ctx.rng.choice((-1, 1))
+        self.target_id: int | None = None
 
     def step(self, ctx: Context) -> Status:
         belief, motor = ctx.belief, ctx.motor
         ctx.wants.update({"detect", "center"})
-        enemies = belief.seen(ctx.now, ("enemy",), within=0.6)
-        if enemies:
+        tracks = belief.tracks(ctx.now, ("enemy",), within=0.6)
+        # Stay on one bot while it is in view rather than flicking between them.
+        tracks.sort(key=lambda t: t.id != self.target_id)
+        enemies = [t.detection for t in tracks]
+        if tracks:
+            self.target_id = tracks[0].id
             self.seen_at = ctx.now
         elif ctx.now - self.seen_at > 1.5:
             return Status.SUCCESS
