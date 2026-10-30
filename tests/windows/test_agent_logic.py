@@ -50,6 +50,7 @@ class World:
         self.controller.resume()
         self.motor = Motor(self.controller, Keys(), random.Random(2))
         self.motor.counts_per_degree = 9.0
+        self.motor.calibrated = True
         self.motor.pitch = 0.0
         self.belief = Belief()
         self.memory = Memory()
@@ -127,6 +128,22 @@ class BeliefTest(unittest.TestCase):
 
 
 class GoalManagerTest(unittest.TestCase):
+    def test_armed_and_safe_it_roams_instead_of_standing(self):
+        world = World()
+        manager = GoalManager()
+        world.motor.calibrated = True
+        for _ in range(3):
+            world.see(weapon=True, mag=9, mates=(Mate(10, 15, 89),), minimap_self=True)
+        world.now += 4
+        world.see(weapon=True, mag=9, mates=(Mate(10, 15, 89),), minimap_self=True)
+        self.assertEqual(manager.tick(world.ctx()), "roam")
+
+    def test_turning_works_before_calibration(self):
+        world = World()
+        motor = Motor(world.controller, Keys(), random.Random(2))
+        self.assertFalse(motor.calibrated)
+        self.assertGreater(motor.turn(90.0), 0.0)
+
     def test_being_shot_preempts_and_wait_is_the_fallback(self):
         world = World()
         manager = GoalManager()
@@ -137,7 +154,8 @@ class GoalManagerTest(unittest.TestCase):
         manager = GoalManager()
         for _ in range(3):
             armed.see(weapon=True, mag=9)
-        self.assertEqual(manager.tick(armed.ctx()), "wait")
+        # Armed with nothing urgent: keep moving with the team.
+        self.assertEqual(manager.tick(armed.ctx()), "roam")
         armed.now += 0.1
         armed.see(weapon=True, mag=9, vitality=0.8, arrow_bearing=30.0)
         self.assertEqual(manager.tick(armed.ctx()), "return_fire")
@@ -172,20 +190,52 @@ class GoalManagerTest(unittest.TestCase):
 
 
 class SkillTest(unittest.TestCase):
-    def test_loot_presses_the_same_card_at_most_twice(self):
+    def test_a_card_that_stays_put_is_pressed_twice_and_never_counted(self):
         world = World()
         card = Prompt("捡起", "捡起", 1400, 600, "弹药", "轻型弹药 x40")
         world.see(prompt=card)
         skill = Loot(world.ctx())
         statuses = []
-        for _ in range(40):
+        for _ in range(60):
             world.advance(0.1)
             world.see(prompt=card)
             statuses.append(skill.step(world.ctx()))
             if statuses[-1] is not Status.RUNNING:
                 break
         self.assertEqual(skill.presses, 2)
-        self.assertEqual(statuses[-1], Status.SUCCESS)
+        self.assertEqual(skill.taken, 0)
+        self.assertEqual((statuses[-1], skill.reason), (Status.FAILED, "NO_EFFECT"))
+
+    def test_a_card_that_disappears_after_e_counts_as_taken(self):
+        world = World()
+        card = Prompt("捡起", "捡起", 1400, 600, "恢复 | 生命值", "医疗箱")
+        world.see(prompt=card)
+        skill = Loot(world.ctx())
+        skill.step(world.ctx())
+        status = Status.RUNNING
+        for _ in range(30):
+            world.advance(0.1)
+            world.see(prompt=None)
+            status = skill.step(world.ctx())
+            if status is not Status.RUNNING:
+                break
+        self.assertEqual((status, skill.taken), (Status.SUCCESS, 1))
+        self.assertEqual(world.ctx().counters, world.ctx().counters)
+
+    def test_a_bin_that_does_not_open_fails_quickly(self):
+        world = World()
+        lid = Prompt("打开", "打开", 1500, 800)
+        world.see(prompt=lid)
+        skill = Loot(world.ctx())
+        status = Status.RUNNING
+        for _ in range(40):
+            world.advance(0.1)
+            world.see(prompt=lid)
+            status = skill.step(world.ctx())
+            if status is not Status.RUNNING:
+                break
+        self.assertEqual((status, skill.reason), (Status.FAILED, "OPEN_NO_EFFECT"))
+        self.assertLess(world.now - 100.0, 3.0)
 
     def test_weapon_cards_are_skipped_with_both_slots_full(self):
         world = World()

@@ -69,6 +69,7 @@ class AgentSession:
         self._armed_time = 0.0
         self._storm_time = 0.0
         self._knocked_time = 0.0
+        self._first_armed: float | None = None
         self._last_tick: float | None = None
 
     # ------------------------------------------------------------------ lifecycle
@@ -84,8 +85,11 @@ class AgentSession:
         self._hud_lost_since = None
         self._life_started = None
         self._armed_time = self._storm_time = self._knocked_time = 0.0
+        self._first_armed: float | None = None
         self._last_tick = None
         self.motor.pitch = None
+        self.motor.fire_s = self.motor.aim_s = 0.0
+        self.motor.aim_since = None
 
     def suspend(self, reason: str) -> None:
         now = self.clock()
@@ -191,6 +195,8 @@ class AgentSession:
             dt = min(1.0, now - self._last_tick)
             if self.belief.is_armed():
                 self._armed_time += dt
+                if self._first_armed is None and self._life_started is not None:
+                    self._first_armed = now - self._life_started
             if self.belief.in_storm():
                 self._storm_time += dt
             if self.belief.is_knocked():
@@ -218,7 +224,11 @@ class AgentSession:
             "armedS": round(self._armed_time, 1),
             "stormS": round(self._storm_time, 1),
             "knockedS": round(self._knocked_time, 1),
-            "countsPerDegree": None if self.motor.counts_per_degree is None else round(self.motor.counts_per_degree, 3),
+            "countsPerDegree": round(self.motor.counts_per_degree, 3),
+            "calibrated": self.motor.calibrated,
+            "firstArmedS": None if self._first_armed is None else round(self._first_armed, 1),
+            "fireS": round(self.motor.fire_s, 1),
+            "aimS": round(self.motor.aim_s, 1),
             "counters": dict(sorted(self.counters.items())),
             "timingsMs": {name: {"p50": pct(values, 0.5), "p95": pct(values, 0.95)} for name, values in self.timings.items()},
             "switches": list(self.goals.switches)[-40:],

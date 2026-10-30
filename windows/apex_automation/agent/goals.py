@@ -8,7 +8,8 @@ Rules that keep the agent from dithering or getting stuck:
    been wanted for SOFT_SETTLE_S and outranks the current one by SOFT_MARGIN.
 3. Every goal has a time limit. Running out of it is a TIMEOUT, and every
    failure or timeout starts a cooldown during which that goal is not chosen.
-4. "wait" is always available, so there is always something to do.
+4. "wait" is always available, so there is always something to do; armed
+   and safe, "roam" keeps the player moving with the team instead.
 """
 
 from __future__ import annotations
@@ -92,8 +93,9 @@ def default_goals() -> tuple[Goal, ...]:
              timeout_s=12, cooldown_s=3),
         Goal("escape_storm", 80, lambda c: c.belief.in_storm(), sk.EscapeStorm, hard=lambda c: c.belief.in_storm(),
              timeout_s=40, cooldown_s=2),
-        Goal("calibrate", 72, lambda c: not c.motor.can_turn and c.belief.safe_for(c.now, 2.0), sk.Calibrate,
-             timeout_s=12, cooldown_s=15),
+        # Turning already works on Apex's default scale; this only checks this machine.
+        Goal("calibrate", 72, lambda c: not c.motor.calibrated and c.belief.safe_for(c.now, 2.0), sk.Calibrate,
+             timeout_s=12, cooldown_s=300),
         Goal("level", 70, lambda c: c.motor.can_turn and c.motor.pitch is None and c.belief.safe_for(c.now, 1.5),
              sk.Level, timeout_s=3, cooldown_s=5),
         Goal("heal", 60, lambda c: (c.belief.health_share() or 1.0) < 0.5 and c.belief.safe_for(c.now, 4.0), sk.Heal,
@@ -104,6 +106,8 @@ def default_goals() -> tuple[Goal, ...]:
         Goal("follow", 30, _mate_far, sk.Follow, timeout_s=45, cooldown_s=4, reason_cooldown=(("UNREACHABLE", 30.0),)),
         Goal("search", 20, lambda c: _needs_gear(c) and c.belief.safe_for(c.now, 3.0), sk.Search, timeout_s=20,
              cooldown_s=3),
+        Goal("roam", 15, lambda c: not _needs_gear(c) and c.belief.safe_for(c.now, 3.0), sk.Roam, timeout_s=25,
+             cooldown_s=2),
         Goal("wait", 0, lambda c: True, sk.Wait, timeout_s=10, cooldown_s=0),
     )
 

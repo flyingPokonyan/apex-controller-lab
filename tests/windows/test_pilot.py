@@ -1555,6 +1555,7 @@ class PilotTest(unittest.TestCase):
         self.assertIsNotNone(self.pilot.agent)
         self.assertIsNone(self.pilot.match_brain)
         self.pilot.agent.motor.counts_per_degree = 9.0
+        self.pilot.agent.motor.calibrated = True
         self.screen(squadCountAlive=("20 剩余小队数量", 0.98))
         self.now = 0.0
         for _ in range(4):

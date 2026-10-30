@@ -219,6 +219,10 @@ class Perceiver:
         self._last_ground: np.ndarray | None = None
         self._last_mag_pixels: np.ndarray | None = None
         self._mag: int | None = None
+        # The last card read, keyed by a thumbnail of the card: a card that has
+        # not changed is not OCR'd again on every decision.
+        self._card_key: np.ndarray | None = None
+        self._card: Prompt | None = None
 
     # ------------------------------------------------------------------ OCR helpers
 
@@ -231,7 +235,19 @@ class Perceiver:
     def prompt(self, frame: np.ndarray) -> Prompt | None:
         if self.ocr is None:
             return None
-        for cap in hud.keycaps(frame):
+        caps = hud.keycaps(frame)
+        if not caps:
+            self._card_key = self._card = None
+            return None
+        first = caps[0]
+        key = self._card_thumbnail(frame, first)
+        if self._card_key is not None and key.shape == self._card_key.shape and float(np.abs(key - self._card_key).mean()) < 4.0:
+            if self._card is not None:
+                return Prompt(self._card.word, self._card.text, first.cx, first.cy, self._card.category, self._card.name)
+            return None
+        self._card_key = key
+        self._card = None
+        for cap in caps:
             roi = (cap.x + cap.w + 2, cap.y - 4, min(FRAME_SIZE[0], cap.x + cap.w + 420), cap.y + cap.h + 4)
             raw = self._text(frame, "agentPrompt", roi, 0.5)
             text = normalize_ocr_text(raw)
@@ -240,8 +256,21 @@ class Perceiver:
                     category = name = ""
                     if word in ("捡起", "装备"):
                         category, name = self._item(frame, cap)
-                    return Prompt(word, raw.strip(), cap.cx, cap.cy, category, name)
+                    self._card = Prompt(word, raw.strip(), cap.cx, cap.cy, category, name)
+                    return self._card
         return None
+
+    @staticmethod
+    def _card_thumbnail(frame: np.ndarray, cap: hud.Blob) -> np.ndarray:
+        scale = cap.h / 33
+        x1, y1 = max(0, cap.x - 4), max(0, cap.y - 6)
+        x2 = min(FRAME_SIZE[0], int(cap.x + 620 * scale))
+        y2 = min(FRAME_SIZE[1], int(cap.y + 125 * scale))
+        crop = frame[y1:y2, x1:x2, :3]
+        if crop.size == 0:
+            return np.zeros((12, 48), dtype=np.float32)
+        grey = cv2.cvtColor(cv2.resize(crop, (48, 12), interpolation=cv2.INTER_AREA), cv2.COLOR_BGR2GRAY)
+        return grey.astype(np.float32)
 
     def _ammo(self, frame: np.ndarray) -> tuple[int | None, bool | None]:
         """Magazine count and whether any reserve shows.
