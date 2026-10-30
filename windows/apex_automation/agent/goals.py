@@ -68,6 +68,15 @@ def _loot_hard(ctx: Context) -> bool:
     return prompt is not None and prompt.kind == "weapon" and not ctx.belief.is_armed()
 
 
+def _engage_wanted(ctx: Context) -> bool:
+    belief = ctx.belief
+    if not ctx.allow_engage or not belief.is_armed() or belief.is_knocked() or _losing(ctx):
+        return False
+    if belief.mag.value == 0 and belief.out_of_ammo(ctx.now):
+        return False
+    return bool(belief.seen(ctx.now, ("enemy",), within=0.6))
+
+
 def _losing(ctx: Context) -> bool:
     health = ctx.belief.health_share()
     return health is not None and health < 0.3 and not ctx.belief.hit_confirmed.fresh(ctx.now, 3.0)
@@ -88,6 +97,8 @@ def _mate_far(ctx: Context) -> bool:
 
 def default_goals() -> tuple[Goal, ...]:
     return (
+        Goal("engage", 92, _engage_wanted, sk.Engage, hard=_engage_wanted, timeout_s=15, cooldown_s=3,
+             reason_cooldown=(("LOSING", 6.0), ("NO_WEAPON", 10.0))),
         Goal("crawl", 100, lambda c: c.belief.is_knocked(), sk.Crawl, hard=lambda c: c.belief.is_knocked(),
              timeout_s=120, cooldown_s=0),
         # Low on health and landing nothing, answering fire only gets us killed:
@@ -111,6 +122,10 @@ def default_goals() -> tuple[Goal, ...]:
         Goal("reload", 55, lambda c: c.belief.mag_low(c.now) and c.belief.safe_for(c.now, 2.0), sk.Reload,
              timeout_s=4, cooldown_s=5, reason_cooldown=(("NO_AMMO", 30.0),)),
         Goal("loot", 50, _loot_wanted, sk.Loot, hard=_loot_hard, timeout_s=15, cooldown_s=2),
+        Goal("approach", 40, lambda c: _needs_gear(c) and c.belief.safe_for(c.now, 2.0)
+             and sk.fresh_target(c, sk.GEAR_KINDS) is not None, sk.Approach, timeout_s=20, cooldown_s=2),
+        Goal("top_up", 25, lambda c: not _needs_gear(c) and c.belief.safe_for(c.now, 3.0)
+             and sk.fresh_target(c, sk.TOP_UP_KINDS) is not None, sk.TopUp, timeout_s=20, cooldown_s=5),
         Goal("follow", 30, _mate_far, sk.Follow, timeout_s=45, cooldown_s=4, reason_cooldown=(("UNREACHABLE", 30.0),)),
         Goal("search", 20, lambda c: _needs_gear(c) and c.belief.safe_for(c.now, 3.0), sk.Search, timeout_s=20,
              cooldown_s=3),

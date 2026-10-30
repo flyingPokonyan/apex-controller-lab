@@ -174,6 +174,8 @@ class Observation:
     # None when the minimap was not read this frame.
     mates: tuple[Mate, ...] | None = None
     minimap_self: bool | None = None
+    # Loot, doors and bots the detector found; None when it did not run.
+    detections: tuple | None = None
     timings_ms: dict[str, float] = field(default_factory=dict)
 
 
@@ -245,8 +247,9 @@ def ground_flow(previous: np.ndarray | None, frame: np.ndarray) -> tuple[float |
 class Perceiver:
     """Reads frames into Observations. Keeps what consecutive frames need."""
 
-    def __init__(self, ocr: OcrProvider | None) -> None:
+    def __init__(self, ocr: OcrProvider | None, detector=None) -> None:
         self.ocr = ocr
+        self.detector = detector
         self._last_scene: np.ndarray | None = None
         self._last_ground: np.ndarray | None = None
         self._last_mag_pixels: np.ndarray | None = None
@@ -360,6 +363,7 @@ class Perceiver:
         want_heading: bool = False,
         want_minimap: bool = False,
         want_combat: bool = False,
+        want_detect: bool = False,
     ) -> Observation:
         if frame.shape[1] != FRAME_SIZE[0] or frame.shape[0] != FRAME_SIZE[1]:
             return Observation(at=now, hud=False)
@@ -429,6 +433,10 @@ class Perceiver:
         if want_minimap:
             minimap_self, mates = minimap_mates(frame)
         lap("minimap")
+        detections = None
+        if want_detect and self.detector is not None:
+            detections = tuple(self.detector.detect(frame))
+            lap("detect")
         return Observation(
             at=now,
             hud=True,
@@ -453,5 +461,6 @@ class Perceiver:
             heading=heading,
             mates=mates,
             minimap_self=minimap_self,
+            detections=detections,
             timings_ms=timings,
         )

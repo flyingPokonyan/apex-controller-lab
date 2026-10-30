@@ -32,7 +32,7 @@ FRAME_PROMPT_EVERY_S = 1.0
 # The bottom HUD gone for this long without a knock means dead or spectating.
 HUD_LOST_S = 1.5
 # How often the optional reads run when no skill asks for them.
-EVERY = {"knocked": 0.5, "ring": 1.0, "center": 2.0, "heading": 0.25, "minimap": 0.3}
+EVERY = {"knocked": 0.5, "ring": 1.0, "center": 2.0, "heading": 0.25, "minimap": 0.3, "detect": 0.5}
 
 
 class AgentSession:
@@ -47,7 +47,10 @@ class AgentSession:
         sleep: Callable[[float], None] = time.sleep,
         crouch_toggle: bool = False,
         frame_sink: Callable[[np.ndarray, str], object] | None = None,
+        allow_engage: bool = False,
     ) -> None:
+        # Shooting at detected bots: only where every opponent is a bot.
+        self.allow_engage = allow_engage
         self.frame_sink = frame_sink
         self._last_frame_saved = -1e9
         self.controller = controller
@@ -184,7 +187,7 @@ class AgentSession:
 
     def _context(self, now: float) -> Context:
         return Context(now=now, belief=self.belief, memory=self.memory, motor=self.motor, rng=self.rng,
-                       counters=self.counters)
+                       counters=self.counters, allow_engage=self.allow_engage)
 
     def _schedule(self, now: float) -> set[str]:
         due = {name for name, every in EVERY.items() if now - self._last_read.get(name, -1e9) >= every}

@@ -742,12 +742,29 @@ class CapabilityPilot:
                 from .agent.perception import Perceiver
                 from .agent.session import AgentSession
 
+                detector = None
+                detector_spec = spec.get("detector") or {}
+                model = detector_spec.get("model")
+                if model:
+                    path = Path(__file__).resolve().parents[1] / model
+                    if path.exists():
+                        from .agent.detector import Detector
+
+                        detector = Detector(
+                            path,
+                            imgsz=int(detector_spec.get("imgsz", 416)),
+                            confidence=float(detector_spec.get("confidence", 0.4)),
+                            fov_slider=float(detector_spec.get("fovSlider", 90)),
+                        )
+                    self.recorder.log("AGENT_DETECTOR", model=str(model), loaded=detector is not None)
                 agent = AgentSession(
                     InputController(self.sender, self.guard),
-                    Perceiver(self.agent_ocr),
+                    Perceiver(self.agent_ocr, detector),
                     keys=Keys.from_config(spec["scanCodes"]),
                     crouch_toggle=spec.get("crouchMode", "hold") == "toggle",
                     frame_sink=self.agent_frame_sink if spec.get("keepFrames", True) else None,
+                    # Every opponent is a bot only in Bot Royale; never shoot at real players.
+                    allow_engage=bool(detector_spec.get("engageBots", False)) and self.target_title == BOT_TITLE_WORD,
                 )
                 per_degree = MouseCalibration.from_spec(spec.get("mouse")).counts_per_degree
                 if per_degree is not None:

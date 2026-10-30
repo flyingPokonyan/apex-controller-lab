@@ -282,3 +282,86 @@ class SkillTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+from windows.apex_automation.agent.detector import FRAME, Detection, decode
+from windows.apex_automation.agent.skills import Approach, Engage
+
+
+def seen(kind, yaw, pitch=0.0, height=0.1, x=1280.0):
+    half_h = height * FRAME[1] / 2
+    return Detection(kind, 0.9, x - 100, 720 - half_h, x + 100, 720 + half_h, yaw, pitch)
+
+
+class DetectionGoalTest(unittest.TestCase):
+    def test_unarmed_it_walks_to_a_bin_it_sees(self):
+        world = World()
+        manager = GoalManager()
+        world.see(detections=(seen("bin_closed", 20.0),))
+        self.assertEqual(manager.tick(world.ctx()), "approach")
+
+    def test_a_prompt_ends_the_approach_and_loot_takes_over(self):
+        world = World()
+        world.see(detections=(seen("bin_closed", 5.0, height=0.3),))
+        skill = Approach(world.ctx())
+        self.assertEqual(skill.step(world.ctx()), Status.RUNNING)
+        world.advance(0.2)
+        world.see(detections=(seen("bin_closed", 2.0, height=0.45),), prompt=Prompt("打开", "打开", 1500, 800))
+        self.assertEqual(skill.step(world.ctx()), Status.SUCCESS)
+
+    def test_a_target_out_of_sight_is_given_up_and_remembered(self):
+        world = World()
+        world.see(detections=(seen("item", -10.0),))
+        skill = Approach(world.ctx())
+        status = Status.RUNNING
+        for _ in range(40):
+            world.advance(0.1)
+            world.see(detections=())
+            status = skill.step(world.ctx())
+            if status is not Status.RUNNING:
+                break
+        self.assertEqual((status, skill.reason), (Status.FAILED, "LOST"))
+        self.assertTrue(world.memory.tried_near("target", 80.0, world.now, 60.0, spread=15.0))
+
+    def test_bots_are_engaged_only_when_allowed(self):
+        world = World()
+        for _ in range(3):
+            world.see(weapon=True, mag=12, detections=(seen("enemy", 8.0),))
+        manager = GoalManager()
+        self.assertNotEqual(manager.tick(world.ctx()), "engage")
+        ctx = world.ctx()
+        ctx.allow_engage = True
+        self.assertEqual(GoalManager().tick(ctx), "engage")
+
+    def test_no_shot_while_a_teammate_is_in_the_way(self):
+        world = World()
+        for _ in range(3):
+            world.see(weapon=True, mag=12, detections=(seen("enemy", 1.0), seen("teammate", 0.0, height=0.3)))
+        ctx = world.ctx()
+        ctx.allow_engage = True
+        skill = Engage(ctx)
+        for _ in range(20):
+            world.advance(0.1)
+            world.see(weapon=True, mag=12, detections=(seen("enemy", 1.0), seen("teammate", 0.0, height=0.3)))
+            ctx = world.ctx()
+            ctx.allow_engage = True
+            skill.step(ctx)
+        self.assertNotIn("left", world.sender.down)
+        self.assertGreater(ctx.counters["engage:hold_teammate"], 0)
+        self.assertEqual(ctx.counters["engage:burst"], 0)
+
+
+class DecodeTest(unittest.TestCase):
+    def test_head_output_becomes_boxes_with_bearings(self):
+        import numpy as np
+        output = np.zeros((11, 2), dtype=np.float32)
+        # One bin straight ahead at 416 scale (2560 -> 416 is 0.1625).
+        output[:4, 0] = [208, 117, 40, 30]
+        output[4, 0] = 0.9
+        output[:4, 1] = [10, 10, 5, 5]
+        output[9, 1] = 0.1
+        found = decode(output, 416 / 2560, 0.4, 960.0)
+        self.assertEqual(len(found), 1)
+        self.assertEqual(found[0].kind, "bin_closed")
+        self.assertAlmostEqual(found[0].yaw, 0.0, delta=0.5)
+        self.assertAlmostEqual(found[0].pitch, 0.0, delta=0.5)

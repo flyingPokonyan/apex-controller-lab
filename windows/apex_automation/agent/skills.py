@@ -38,6 +38,8 @@ class Context:
     counters: Counter = field(default_factory=Counter)
     # Perception extras the skills want on the next frames.
     wants: set[str] = field(default_factory=set)
+    # Shooting at what the detector sees: Bot Royale only, never real players.
+    allow_engage: bool = False
 
 
 class Skill:
@@ -603,6 +605,182 @@ class Loot(Skill):
         if self.bin:
             return self.fail("OPEN_NO_EFFECT" if not self.opened else "BIN_NOTHING_TAKEN")
         return self.fail("NO_EFFECT")
+
+
+# ---------------------------------------------------------------------- seen targets
+
+GEAR_KINDS = ("bin_closed", "item", "deathbox", "bin_open")
+TOP_UP_KINDS = ("bin_closed", "deathbox")
+
+
+def target_heading(ctx: Context, detection) -> float | None:
+    heading = ctx.belief.heading.value
+    return None if heading is None else (float(heading) + detection.yaw) % 360
+
+
+def fresh_target(ctx: Context, kinds: tuple[str, ...], max_yaw: float = 75.0):
+    """The nearest-looking detection of these kinds not already tried."""
+    candidates = []
+    for detection in ctx.belief.seen(ctx.now, kinds):
+        if abs(detection.yaw) > max_yaw or detection.height_share < 0.025:
+            continue
+        if ctx.memory.tried_near("target", target_heading(ctx, detection), ctx.now, 60.0, spread=10.0):
+            continue
+        candidates.append(detection)
+    # Bigger on screen = closer: go for the closest first.
+    return max(candidates, key=lambda d: d.height_share, default=None)
+
+
+class Approach(Skill):
+    """Walk to a bin, item or death box the detector sees, until its prompt shows.
+
+    The target is followed by compass heading, so the view can wander a
+    little while walking and the target is still found again. Loot takes
+    over once the prompt is up. Lost from view for 2 s, no closer for 6 s,
+    or close with no prompt: failure, and that direction is remembered.
+    """
+
+    name = "approach"
+    timeout_s = 20.0
+    KINDS = GEAR_KINDS
+
+    def __init__(self, ctx: Context) -> None:
+        super().__init__(ctx)
+        self.nav = Navigator()
+        target = fresh_target(ctx, self.KINDS)
+        self.kind = target.kind if target else None
+        self.heading = target_heading(ctx, target) if target else None
+        self.best_height = target.height_share if target else 0.0
+        self.best_at = ctx.now
+        self.seen_at = ctx.now
+        self.close_since: float | None = None
+
+    def _track(self, ctx: Context):
+        best, best_error = None, 18.0
+        for detection in ctx.belief.seen(ctx.now, (self.kind,)):
+            heading = target_heading(ctx, detection)
+            error = abs(_signed(heading - self.heading)) if heading is not None and self.heading is not None else abs(detection.yaw)
+            if error < best_error:
+                best, best_error = detection, error
+        return best
+
+    def step(self, ctx: Context) -> Status:
+        belief, motor = ctx.belief, ctx.motor
+        ctx.wants.add("detect")
+        if self.kind is None:
+            return self.fail("NO_TARGET")
+        if belief.current_prompt(ctx.now) is not None:
+            ctx.counters[f"approach:arrived:{self.kind}"] += 1
+            return Status.SUCCESS
+        target = self._track(ctx)
+        if target is not None:
+            self.seen_at = ctx.now
+            heading = target_heading(ctx, target)
+            if heading is not None:
+                self.heading = heading
+            if target.height_share > self.best_height * 1.1:
+                self.best_height, self.best_at = target.height_share, ctx.now
+            if target.height_share > 0.4:
+                self.close_since = self.close_since or ctx.now
+        if ctx.now - self.seen_at > 2.0:
+            return self._give_up(ctx, "LOST")
+        if ctx.now - self.best_at > 6.0:
+            return self._give_up(ctx, "NOT_CLOSING")
+        if self.close_since is not None and ctx.now - self.close_since > 3.0:
+            return self._give_up(ctx, "NO_PROMPT")
+        error = None
+        if self.heading is not None and belief.heading.value is not None:
+            error = _signed(self.heading - float(belief.heading.value))
+        elif target is not None:
+            error = target.yaw
+        if motor.pitch is not None and target is not None and not motor.controller.turning:
+            # Keep the target a little below the centre, where its prompt appears.
+            wanted = max(-35.0, min(5.0, motor.pitch + target.pitch - 3.0))
+            if abs(wanted - motor.pitch) > 6:
+                motor.pitch_to(wanted)
+        far = target is None or target.height_share < 0.12
+        if self.nav.drive(ctx, error, sprint=far) == "gave_up":
+            return self._give_up(ctx, "BLOCKED")
+        return Status.RUNNING
+
+    def _give_up(self, ctx: Context, reason: str) -> Status:
+        ctx.memory.note_attempt("target", self.heading, ctx.now, reason)
+        return self.fail(reason)
+
+
+class TopUp(Approach):
+    """Armed: still worth walking to a bin or a death box for ammo and heals."""
+
+    name = "top_up"
+    KINDS = TOP_UP_KINDS
+
+
+class Engage(Skill):
+    """Shoot at a bot the detector sees, the way a beginner would.
+
+    Only in Bot Royale (``ctx.allow_engage``). A short reaction delay first;
+    then turn toward it with an aiming error of a few degrees, aim down
+    sights, fire short bursts and re-aim every second or so, never tracking
+    it frame by frame. Holds fire while a teammate is in the way. Ends when
+    no bot has been seen for 1.5 s.
+    """
+
+    name = "engage"
+    timeout_s = 15.0
+
+    def __init__(self, ctx: Context) -> None:
+        super().__init__(ctx)
+        self.react_at = ctx.now + ctx.rng.uniform(0.3, 0.8)
+        self.next_aim = self.react_at
+        self.next_burst = self.react_at
+        self.seen_at = ctx.now
+        self.strafe = ctx.rng.choice((-1, 1))
+
+    def step(self, ctx: Context) -> Status:
+        belief, motor = ctx.belief, ctx.motor
+        ctx.wants.update({"detect", "center"})
+        enemies = belief.seen(ctx.now, ("enemy",), within=0.6)
+        if enemies:
+            self.seen_at = ctx.now
+        elif ctx.now - self.seen_at > 1.5:
+            return Status.SUCCESS
+        health = belief.health_share()
+        if health is not None and health < 0.3 and not belief.hit_confirmed.fresh(ctx.now, 3.0):
+            return self.fail("LOSING")
+        if ctx.now < self.react_at:
+            return Status.RUNNING
+        if not belief.is_armed():
+            return self.fail("NO_WEAPON")
+        if belief.mag.value == 0 and belief.mag.fresh(ctx.now, 1.0):
+            motor.aim(False, ctx.now)
+            if not motor.controller.busy_tapping:
+                motor.tap("reload")
+            return self.fail("NO_AMMO") if belief.out_of_ammo(ctx.now) else Status.RUNNING
+        motor.aim(True, ctx.now)
+        motor.move(left=self.strafe < 0, right=self.strafe > 0)
+        if enemies and ctx.now >= self.next_aim:
+            target = enemies[0]
+            width = abs(target.x2 - target.x1) / 2560 * 106.0
+            sigma = max(1.5, min(5.0, 0.3 * width + 1.0))
+            motor.turn(target.yaw + ctx.rng.gauss(0, sigma), 0.7 * target.pitch + ctx.rng.gauss(0, sigma * 0.6))
+            self.next_aim = ctx.now + ctx.rng.uniform(0.6, 1.2)
+            ctx.counters["engage:aim"] += 1
+        blocked = any(mate.covers_crosshair(margin=40) for mate in belief.seen(ctx.now, ("teammate",), within=0.6))
+        if blocked:
+            ctx.counters["engage:hold_teammate"] += 1
+        elif enemies and ctx.now >= self.next_burst and not motor.controller.busy_tapping:
+            motor.fire(ctx.rng.uniform(0.2, 0.5))
+            self.next_burst = ctx.now + ctx.rng.uniform(0.4, 0.9)
+            ctx.counters["engage:burst"] += 1
+            if ctx.rng.random() < 0.35:
+                self.strafe = -self.strafe
+        if belief.hit_confirmed.fresh(ctx.now, 0.5):
+            ctx.counters["engage:hit_confirmed_tick"] += 1
+        return Status.RUNNING
+
+    def stop(self, ctx: Context) -> None:
+        ctx.motor.aim(False, ctx.now)
+        super().stop(ctx)
 
 
 # ---------------------------------------------------------------------- travel

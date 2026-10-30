@@ -79,6 +79,7 @@ class Belief:
         self._tracked: dict[int, tuple[Mate, float]] = {}
         self.heading = Fact(None)  # compass degrees, from OCR plus turns since
         self.scene_change = Fact(None)
+        self.detections = Fact(())
         self.frames = 0
 
     # ------------------------------------------------------------------ update
@@ -102,6 +103,8 @@ class Belief:
             self.no_ammo_message.set(True, now)
         if obs.heading is not None:
             self.heading.set(float(obs.heading), now)
+        if obs.detections is not None:
+            self.detections.set(tuple(obs.detections), now)
         if obs.mates is not None and (obs.mates or obs.minimap_self):
             # An empty list only counts when the minimap itself read fine.
             for mate in obs.mates:
@@ -229,6 +232,13 @@ class Belief:
     def current_prompt(self, now: float) -> Prompt | None:
         value = self.prompt.value
         return value if isinstance(value, Prompt) and self.prompt.fresh(now, PROMPT_HOLD_S) else None
+
+    def seen(self, now: float, kinds: tuple[str, ...], within: float = 0.8) -> list:
+        """Fresh detections of these kinds, nearest the crosshair first."""
+        if not self.detections.fresh(now, within):
+            return []
+        found = [d for d in self.detections.value or () if d.kind in kinds]
+        return sorted(found, key=lambda d: abs(d.yaw) + abs(d.pitch))
 
     def nearest_mate(self, now: float) -> Mate | None:
         if not self.mates.fresh(now, MATE_STALE_S):
