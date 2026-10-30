@@ -78,6 +78,18 @@ class FakeSender:
     def hold_mouse_button(self, button: str, duration_ms: int) -> None:
         self.calls.append(("mouse", button, duration_ms))
 
+    def key_down(self, scan_code: int) -> None:
+        self.calls.append(("down", scan_code))
+
+    def key_up(self, scan_code: int) -> None:
+        self.calls.append(("up", scan_code))
+
+    def mouse_down(self, button: str = "left") -> None:
+        self.calls.append(("mdown", button))
+
+    def mouse_up(self, button: str = "left") -> None:
+        self.calls.append(("mup", button))
+
     def release_all(self) -> None:
         self.calls.append(("releaseAll",))
 
@@ -1499,6 +1511,72 @@ class PilotTest(unittest.TestCase):
         activity = detected[0]["matchActivity"]
         self.assertGreaterEqual(activity["reactions"], 1)
         self.assertGreaterEqual(activity["bursts"], 1)
+
+    def enable_agent(self, frame: np.ndarray) -> None:
+        payload = json.loads(CAPABILITIES.read_text(encoding="utf-8"))
+        live = next(item for item in payload["capabilities"] if item["id"] == "in-match-live")
+        live.update(action="inMatchAgent", minIntervalMs=100, maxIntervalMs=250)
+
+        class Source:
+            def grab(self) -> np.ndarray:
+                return frame
+
+        self.pilot = CapabilityPilot(
+            load_config(PLAY_CONFIG),
+            Source(),
+            self.sender,
+            self.guard,
+            self.recorder,
+            state_detector=OcrStateDetector.from_path(self.provider, STATES),
+            dispatcher=CapabilityDispatcher(CapabilitySet.from_payload(payload)),
+            actions=dict(payload["actions"]),
+            sleep=self.sleeps.append,
+            monotonic=lambda: self.now,
+            agent_ocr=self.provider,
+        )
+        agent = self.pilot.agent
+        controller = agent.controller
+
+        def sleep(seconds: float) -> None:
+            # The input thread, stepped by hand: 8 ms ticks on the test clock.
+            for _ in range(max(1, round(seconds / 0.008))):
+                self.now += 0.008
+                controller.tick()
+
+        agent.clock = controller.clock = lambda: self.now
+        agent.sleep = sleep
+        controller.start = lambda: None
+
+    def test_the_agent_acts_while_alive_and_lets_go_when_the_state_changes(self) -> None:
+        sys.path.insert(0, str(REPOSITORY_ROOT / "tests" / "windows"))
+        from test_hud import frame as hud_frame
+
+        self.enable_agent(hud_frame("empty_handed"))
+        self.assertIsNotNone(self.pilot.agent)
+        self.assertIsNone(self.pilot.match_brain)
+        self.pilot.agent.motor.counts_per_degree = 9.0
+        self.screen(squadCountAlive=("20 剩余小队数量", 0.98))
+        self.now = 0.0
+        for _ in range(4):
+            self.pilot.step()
+            self.now += 0.3
+        sent = [call for call in self.sender.calls if call[0] in ("down", "move", "mdown")]
+        self.assertTrue(sent)
+        # Unarmed with nothing in reach: it goes looking, never pressing a menu key.
+        self.assertFalse({1, 15, 28}.intersection(call[1] for call in self.sender.calls if call[0] == "down"))
+        self.screen(spectateTabs=("观战", 0.99))
+        self.now += 1
+        self.pilot.step()
+        self.assertIn("AGENT_SUSPENDED", self.recorder.names())
+        self.assertEqual(self.sender.calls[-1][0], "releaseAll")
+        self.assertFalse(self.pilot.agent.controller.active)
+        self.screen(lobbyPrimaryButton=("准备", 1.0), lobbyModeName=("进化版机器人大逃杀", 1.0))
+        self.now += 5
+        self.pilot.step()
+        detected = [payload for event, payload in self.recorder.events if event == "STATE_DETECTED" and "matchActivity" in payload]
+        self.assertEqual(len(detected), 1)
+        self.assertEqual(detected[0]["matchActivity"]["agent"], 1)
+        self.assertGreater(detected[0]["matchActivity"]["counters"]["ticks"], 5)
 
     def test_a_hold_mouse_step_with_an_unknown_button_is_rejected_at_startup(self) -> None:
         payload = json.loads(CAPABILITIES.read_text(encoding="utf-8"))

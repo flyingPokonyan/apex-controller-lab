@@ -87,6 +87,30 @@
       "crouchMode": "hold",
       "_note": "主动打法（docs：RUNNER_ACTIVE_BEHAVIOR_DESIGN_2026-10-29）。常态是搜东西：冲刺、走、蹲走、滑铲、低头扫视，每段最多按住 1.5 秒；屏幕上有拾取提示就按 E；被打了转向受击方向（没有方向就分几步转一圈），有枪点射、没枪冲过去挥拳。Shift、Ctrl 只在地面存活满 10 秒后才发，跳伞机上 LCTRL 是脱离小队。mouse 留空时 Runner 用顶部指南针自己量每度多少鼠标单位（countsPerDegree），量完才按角度转身、回正视角。crouchMode：游戏里 LCTRL 是「按住蹲」填 hold（Apex 默认），是「切换蹲」填 toggle。被打后血量低于 40% 且没打中，转身冲刺脱离；移动两次画面都几乎不变，判为卡墙，转身后退。默认不用：要启用，把 in-match-live 的 action 改成 inMatchActive，minIntervalMs / maxIntervalMs 改成 100 / 250。"
     },
+    "inMatchAgent": {
+      "generate": "inMatchAgent",
+      "scanCodes": {
+        "forward": 17,
+        "left": 30,
+        "back": 31,
+        "right": 32,
+        "jump": 57,
+        "crouch": 29,
+        "sprint": 42,
+        "interact": 18,
+        "reload": 19,
+        "melee": 47,
+        "tactical": 16,
+        "ultimate": 44,
+        "heal": 5,
+        "slot1": 2,
+        "slot2": 3
+      },
+      "mouse": {},
+      "crouchMode": "hold",
+      "sliceMs": 2000,
+      "_note": "目标驱动的对局 agent（docs：RUNNER_AGENT_DESIGN_2026-10-30）。独立输入线程连续按键和转向；按优先级在倒地爬行、还击、撤离、出毒圈、标定、回正视角、回血、装填、捡东西/开箱、跟队友、搜索、观察之间选择，每个目标有成功/失败/超时和冷却。每次占用 sliceMs 毫秒，之间由 pilot 照常识别状态，状态不是对局存活就立刻松开所有键。默认不用：要启用，把 in-match-live 的 action 改成 inMatchAgent，minIntervalMs / maxIntervalMs 改成 100 / 250。heal 5 是数字键 4（使用医疗物品）。"
+    },
     "detachScanCode": 29,
     "launchScanCode": 18,
     "knownStateRecovery": {

@@ -185,6 +185,17 @@ class Win32InputSender:
         flags = KEYEVENTF_SCANCODE | (KEYEVENTF_KEYUP if key_up else 0)
         self._send([INPUT(type=INPUT_KEYBOARD, ki=KEYBDINPUT(0, scan_code, flags, 0, 0))])
 
+    def key_down(self, scan_code: int) -> None:
+        """Press without releasing. The in-match input thread owns the release."""
+        self.guard.ensure_target_foreground()
+        self._key(int(scan_code), False)
+        self._pressed_scan_codes.add(int(scan_code))
+
+    def key_up(self, scan_code: int) -> None:
+        # Releasing never needs the foreground check: a key must always be let go.
+        self._key(int(scan_code), True)
+        self._pressed_scan_codes.discard(int(scan_code))
+
     def tap_scan_code(self, scan_code: int, duration_ms: int) -> None:
         self.guard.ensure_target_foreground()
         self._key(scan_code, False)

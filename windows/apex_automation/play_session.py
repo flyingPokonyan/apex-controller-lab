@@ -378,6 +378,7 @@ class PlaySessionRunner:
             rules = self.playlists.get(identity.playlist) if identity.playlist else None
             if identity.playlist:
                 recorder.log("PLAYLIST_SELECTED", playlist=identity.playlist)
+            from .agent_frames import store_frame as store_agent_frame
             from .hud import FrameHud
 
             pilot = CapabilityPilot(
@@ -408,6 +409,9 @@ class PlaySessionRunner:
                 maintenance=self.maintenance,
                 # Only read by the active in-match profile.
                 hud_reader=FrameHud(self.ocr_provider),
+                agent_ocr=self.ocr_provider,
+                agent_frame_sink=lambda frame, label: store_agent_frame(
+                    self.runs_root, frame, label, identity.lease_id),
             )
             outcome = pilot.run(duration_s=duration_s)
             if outcome == "TARGET_REACHED":
