@@ -730,6 +730,16 @@ class CapabilityPilot:
         slice_ms = spec.get("sliceMs", 2000)
         if not isinstance(slice_ms, int) or not 300 <= slice_ms <= 5000:
             raise ValueError(f"动作序列 {action_name} 的 sliceMs 无效")
+        for key in ("detector", "space"):
+            model_spec = spec.get(key)
+            if model_spec is None:
+                continue
+            model = model_spec.get("model") if isinstance(model_spec, dict) else None
+            if not isinstance(model, str) or model.startswith(("/", "\\")) or ".." in model or not model.endswith(".onnx"):
+                raise ValueError(f"动作序列 {action_name} 的 {key}.model 必须是 windows 目录下的 .onnx 相对路径")
+        size = (spec.get("space") or {}).get("size", (266, 476))
+        if len(size) != 2 or any(not isinstance(v, int) or v < 112 or v % 14 for v in size):
+            raise ValueError(f"动作序列 {action_name} 的 space.size 必须是两个 14 的倍数")
         MouseCalibration.from_spec(spec.get("mouse"))
 
     def _build_agent(self):
@@ -742,12 +752,40 @@ class CapabilityPilot:
                 from .agent.perception import Perceiver
                 from .agent.session import AgentSession
 
+                detector = None
+                detector_spec = spec.get("detector") or {}
+                model = detector_spec.get("model")
+                if model:
+                    path = Path(__file__).resolve().parents[1] / model
+                    if path.exists():
+                        from .agent.detector import Detector
+
+                        detector = Detector(
+                            path,
+                            imgsz=int(detector_spec.get("imgsz", 416)),
+                            confidence=float(detector_spec.get("confidence", 0.4)),
+                            fov_slider=float(detector_spec.get("fovSlider", 90)),
+                        )
+                    self.recorder.log("AGENT_DETECTOR", model=str(model), loaded=detector is not None)
+                space = None
+                space_spec = spec.get("space") or {}
+                if space_spec.get("model"):
+                    path = Path(__file__).resolve().parents[1] / space_spec["model"]
+                    if path.exists():
+                        from .agent.space import FreeSpace
+
+                        height, width = space_spec.get("size", (266, 476))
+                        space = FreeSpace(path, size=(int(height), int(width)),
+                                          fov_slider=float(space_spec.get("fovSlider", 90)))
+                    self.recorder.log("AGENT_SPACE", model=str(space_spec["model"]), loaded=space is not None)
                 agent = AgentSession(
                     InputController(self.sender, self.guard),
-                    Perceiver(self.agent_ocr),
+                    Perceiver(self.agent_ocr, detector, space),
                     keys=Keys.from_config(spec["scanCodes"]),
                     crouch_toggle=spec.get("crouchMode", "hold") == "toggle",
                     frame_sink=self.agent_frame_sink if spec.get("keepFrames", True) else None,
+                    # Every opponent is a bot only in Bot Royale; never shoot at real players.
+                    allow_engage=bool(detector_spec.get("engageBots", False)) and self.target_title == BOT_TITLE_WORD,
                 )
                 per_degree = MouseCalibration.from_spec(spec.get("mouse")).counts_per_degree
                 if per_degree is not None:

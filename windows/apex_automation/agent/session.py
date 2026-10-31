@@ -32,7 +32,10 @@ FRAME_PROMPT_EVERY_S = 1.0
 # The bottom HUD gone for this long without a knock means dead or spectating.
 HUD_LOST_S = 1.5
 # How often the optional reads run when no skill asks for them.
-EVERY = {"knocked": 0.5, "ring": 1.0, "center": 2.0, "heading": 0.25, "minimap": 0.3}
+EVERY = {"knocked": 0.5, "ring": 1.0, "center": 2.0, "heading": 0.25, "minimap": 0.3, "detect": 0.5}
+# Read only while a skill asks, and no more often than this (the depth model is the
+# slowest read: a few hundred ms on a Runner CPU).
+ON_DEMAND = {"space": 1.2}
 
 
 class AgentSession:
@@ -47,7 +50,10 @@ class AgentSession:
         sleep: Callable[[float], None] = time.sleep,
         crouch_toggle: bool = False,
         frame_sink: Callable[[np.ndarray, str], object] | None = None,
+        allow_engage: bool = False,
     ) -> None:
+        # Shooting at detected bots: only where every opponent is a bot.
+        self.allow_engage = allow_engage
         self.frame_sink = frame_sink
         self._last_frame_saved = -1e9
         self.controller = controller
@@ -90,6 +96,7 @@ class AgentSession:
         self._first_armed: float | None = None
         self._last_tick = None
         self.motor.pitch = None
+        self.motor.levelled_at = None
         self.motor.fire_s = self.motor.aim_s = 0.0
         self.motor.aim_since = None
 
@@ -132,8 +139,8 @@ class AgentSession:
         want = self._schedule(now)
         current = self.goals.current.name if self.goals.current else None
         combat = current in ("return_fire", "retreat") or self.belief.under_fire(now)
-        obs = self.perceiver.read(frame, now, **{f"want_{name}": name in want for name in EVERY},
-                                  want_prompt=True, want_combat=combat)
+        obs = self.perceiver.read(frame, now, **{f"want_{name}": name in want for name in (*EVERY, *ON_DEMAND)},
+                                  want_prompt=True, want_combat=combat, pitch=self.motor.pitch)
         for name in want:
             self._last_read[name] = now
         self._note_timings(obs)
@@ -184,11 +191,13 @@ class AgentSession:
 
     def _context(self, now: float) -> Context:
         return Context(now=now, belief=self.belief, memory=self.memory, motor=self.motor, rng=self.rng,
-                       counters=self.counters)
+                       counters=self.counters, allow_engage=self.allow_engage)
 
     def _schedule(self, now: float) -> set[str]:
         due = {name for name, every in EVERY.items() if now - self._last_read.get(name, -1e9) >= every}
-        return due | (self._wants & set(EVERY))
+        asked = {name for name, every in ON_DEMAND.items()
+                 if name in self._wants and now - self._last_read.get(name, -1e9) >= every}
+        return due | (self._wants & set(EVERY)) | asked
 
     def _carry_heading(self) -> None:
         """Turn the counts the input thread sent since last time into degrees."""

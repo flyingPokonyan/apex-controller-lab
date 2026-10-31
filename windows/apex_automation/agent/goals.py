@@ -68,6 +68,31 @@ def _loot_hard(ctx: Context) -> bool:
     return prompt is not None and prompt.kind == "weapon" and not ctx.belief.is_armed()
 
 
+def _engage_wanted(ctx: Context) -> bool:
+    belief = ctx.belief
+    if not ctx.allow_engage or not belief.is_armed() or belief.is_knocked() or _losing(ctx):
+        return False
+    if belief.mag.value == 0 and belief.out_of_ammo(ctx.now):
+        return False
+    return bool(belief.tracks(ctx.now, ("enemy",), within=0.6))
+
+
+# The view's pitch is tracked from the counts we send; anything lost on the way
+# (a dropped frame, a sensitivity a little off) adds up and the view sinks. Every
+# so often, when nothing is happening, it is anchored against the clamp again.
+RELEVEL_EVERY_S = 150.0
+
+
+def _level_due(ctx: Context) -> bool:
+    motor = ctx.motor
+    if not motor.can_turn:
+        return False
+    if motor.pitch is None:
+        return ctx.belief.safe_for(ctx.now, 1.5)
+    stale = motor.levelled_at is None or ctx.now - motor.levelled_at >= RELEVEL_EVERY_S
+    return stale and ctx.belief.safe_for(ctx.now, 4.0) and not ctx.belief.is_knocked()
+
+
 def _losing(ctx: Context) -> bool:
     health = ctx.belief.health_share()
     return health is not None and health < 0.3 and not ctx.belief.hit_confirmed.fresh(ctx.now, 3.0)
@@ -88,6 +113,8 @@ def _mate_far(ctx: Context) -> bool:
 
 def default_goals() -> tuple[Goal, ...]:
     return (
+        Goal("engage", 92, _engage_wanted, sk.Engage, hard=_engage_wanted, timeout_s=15, cooldown_s=3,
+             reason_cooldown=(("LOSING", 6.0), ("NO_WEAPON", 10.0))),
         Goal("crawl", 100, lambda c: c.belief.is_knocked(), sk.Crawl, hard=lambda c: c.belief.is_knocked(),
              timeout_s=120, cooldown_s=0),
         # Low on health and landing nothing, answering fire only gets us killed:
@@ -104,13 +131,16 @@ def default_goals() -> tuple[Goal, ...]:
         # Turning already works on Apex's default scale; this only checks this machine.
         Goal("calibrate", 72, lambda c: not c.motor.calibrated and c.belief.safe_for(c.now, 2.0), sk.Calibrate,
              timeout_s=12, cooldown_s=300),
-        Goal("level", 70, lambda c: c.motor.can_turn and c.motor.pitch is None and c.belief.safe_for(c.now, 1.5),
-             sk.Level, timeout_s=3, cooldown_s=5),
+        Goal("level", 70, _level_due, sk.Level, timeout_s=3, cooldown_s=5),
         Goal("heal", 60, lambda c: (c.belief.health_share() or 1.0) < 0.5 and c.belief.safe_for(c.now, 4.0), sk.Heal,
              timeout_s=10, cooldown_s=8, reason_cooldown=(("NO_HEAL_ITEMS", 90.0),)),
         Goal("reload", 55, lambda c: c.belief.mag_low(c.now) and c.belief.safe_for(c.now, 2.0), sk.Reload,
              timeout_s=4, cooldown_s=5, reason_cooldown=(("NO_AMMO", 30.0),)),
         Goal("loot", 50, _loot_wanted, sk.Loot, hard=_loot_hard, timeout_s=15, cooldown_s=2),
+        Goal("approach", 40, lambda c: _needs_gear(c) and c.belief.safe_for(c.now, 2.0)
+             and sk.fresh_target(c, sk.GEAR_KINDS) is not None, sk.Approach, timeout_s=20, cooldown_s=2),
+        Goal("top_up", 25, lambda c: not _needs_gear(c) and c.belief.safe_for(c.now, 3.0)
+             and sk.fresh_target(c, sk.TOP_UP_KINDS) is not None, sk.TopUp, timeout_s=20, cooldown_s=5),
         Goal("follow", 30, _mate_far, sk.Follow, timeout_s=45, cooldown_s=4, reason_cooldown=(("UNREACHABLE", 30.0),)),
         Goal("search", 20, lambda c: _needs_gear(c) and c.belief.safe_for(c.now, 3.0), sk.Search, timeout_s=20,
              cooldown_s=3),

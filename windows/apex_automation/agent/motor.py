@@ -64,6 +64,8 @@ class Motor:
         self.aim_s = 0.0
         # Degrees below (negative) or above the horizon, valid after level().
         self.pitch: float | None = None
+        # When the view was last brought to the horizon against the pitch clamp.
+        self.levelled_at: float | None = None
         self._crouched = False
 
     # ------------------------------------------------------------------ movement

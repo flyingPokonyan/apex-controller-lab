@@ -38,6 +38,8 @@ class Context:
     counters: Counter = field(default_factory=Counter)
     # Perception extras the skills want on the next frames.
     wants: set[str] = field(default_factory=set)
+    # Shooting at what the detector sees: Bot Royale only, never real players.
+    allow_engage: bool = False
 
 
 class Skill:
@@ -82,18 +84,48 @@ class Navigator:
 
     Blocked = forward held, the view not turning, and the scene not changing
     for BLOCKED_AFTER_S. The ladder: jump (Apex mantles low walls and sills),
-    sidestep along the wall, climb (hold forward and jump against it), turn
-    60–90° away; each rung is given a moment and checked before the next.
+    look around (level the view, look left and right, walk the most open way
+    nearest the goal), sidestep along the wall, climb (hold forward and jump
+    against it), turn 60–90° away; each rung is given a moment and checked
+    before the next. Looking around needs free-space readings; without them
+    the rung is skipped.
+
+    With free-space readings (agent.space) it also looks before it walks:
+    something within DETOUR_NEAR_M straight toward the goal while another
+    direction within 70° of it is open for DETOUR_OPEN_M is a detour, held for
+    DETOUR_HOLD_S so it does not dither; the sidestep goes to the more open
+    side, and the last rung turns to an open direction in view when there is
+    one.
     """
 
-    RUNGS = ("jump", "sidestep", "climb", "turn")
+    RUNGS = ("jump", "look", "sidestep", "climb", "turn")
+    DETOUR_NEAR_M = 2.5
+    DETOUR_OPEN_M = 5.0
+    DETOUR_HOLD_S = 1.5
+    # Looking around: from the blocked view, left then across to the right, which
+    # with the ~106° view covers about 270°; a way needs this many metres free.
+    LOOK_TURNS = (-80.0, 160.0)
+    LOOK_OPEN_M = 4.0
+    LOOK_HOLD_S = 3.0
+    LOOK_TIMEOUT_S = 6.0
 
     def __init__(self) -> None:
         self._changes: deque[tuple[float, float]] = deque(maxlen=20)
         self.rung: int | None = None
         self.rung_at = 0.0
+        # Whether the current rung has run its first step: decisions come every
+        # ~0.1 s, so "the first 50 ms of a rung" may never be seen.
+        self._entered = False
         self.side = 1
         self.ladders = 0
+        # (compass heading of the detour, until)
+        self.detour: tuple[float, float] | None = None
+        # The goal's heading error when the ladder started, for choosing a way.
+        self.goal_error: float | None = None
+        self._look_seen: list[tuple[float, float]] = []
+        self._look_turns: list[float] = []
+        self._look_still_since: float | None = None
+        self._look_goal: float | None = None
 
     def note(self, ctx: Context, moving: bool) -> None:
         change = ctx.belief.scene_change.value
@@ -111,38 +143,71 @@ class Navigator:
     def drive(self, ctx: Context, heading_error: float | None, *, sprint: bool, look_pitch: float | None = None) -> str:
         """One tick of travel. Returns "moving", "unsticking" or "gave_up"."""
         motor = ctx.motor
+        ctx.wants.add("space")
         if self.rung is not None:
             return self._unstick(ctx)
         self.note(ctx, moving=True)
         if self.blocked(ctx):
             self._changes.clear()
+            self.goal_error = heading_error
             self.rung = 0
             self.rung_at = ctx.now
-            self.side = ctx.rng.choice((-1, 1))
+            self._entered = False
+            side = ctx.belief.more_open_side(ctx.now)
+            self.side = side if side is not None else ctx.rng.choice((-1, 1))
             ctx.counters["unstick:start"] += 1
+            if side is not None:
+                ctx.counters["unstick:side_from_space"] += 1
             return self._unstick(ctx)
+        heading_error = self._around(ctx, heading_error)
         if heading_error is not None:
             motor.steer(heading_error)
             sprint = sprint and abs(heading_error) < 35
         motor.move(forward=True, sprint=sprint)
         return "moving"
 
+    def _around(self, ctx: Context, heading_error: float | None) -> float | None:
+        """The heading error to steer by: the goal's, or a detour around what stands in its way."""
+        heading = ctx.belief.heading.value
+        if self.detour is not None:
+            bearing, until = self.detour
+            if ctx.now < until and heading is not None:
+                return _signed(bearing - float(heading))
+            self.detour = None
+        # No goal direction (roaming): still walk around what is right ahead.
+        want = 0.0 if heading_error is None else heading_error
+        if heading is None or abs(want) > 45:
+            return heading_error
+        ahead = ctx.belief.free_towards(ctx.now, want)
+        if ahead is None or ahead >= self.DETOUR_NEAR_M:
+            return heading_error
+        way = ctx.belief.open_direction(ctx.now, want, self.DETOUR_OPEN_M)
+        if way is None:
+            return heading_error
+        self.detour = ((float(heading) + way) % 360, ctx.now + self.DETOUR_HOLD_S)
+        ctx.counters["nav:detour"] += 1
+        return way
+
     def _unstick(self, ctx: Context) -> str:
         motor = ctx.motor
         rung = self.RUNGS[self.rung]
         elapsed = ctx.now - self.rung_at
+        first, self._entered = not self._entered, True
         change = ctx.belief.scene_change.value
         moving_again = isinstance(change, float) and change >= STILL_CHANGE * 2 and elapsed > 0.35
-        if elapsed > 0.35 and moving_again and rung != "turn":
+        # Turning the view changes the scene too: that is not moving again.
+        if elapsed > 0.35 and moving_again and rung not in ("turn", "look"):
             ctx.counters[f"unstick:{rung}:ok"] += 1
             self._finish()
             return "moving"
         if rung == "jump":
-            if elapsed < 0.05:
+            if first:
                 motor.move(forward=True)
                 motor.tap("jump", (0.12, 0.2))
             elif elapsed > 0.7:
                 self._next(ctx)
+        elif rung == "look":
+            return self._look(ctx, elapsed, first)
         elif rung == "sidestep":
             motor.move(forward=True, left=self.side < 0, right=self.side > 0)
             if elapsed > 0.9:
@@ -152,11 +217,16 @@ class Navigator:
             if elapsed > 1.2:
                 self._next(ctx)
         elif rung == "turn":
-            if elapsed < 0.05:
+            if first:
                 heading = ctx.belief.heading.value
                 ctx.memory.block(heading, ctx.now)
                 motor.move()
-                motor.turn(self.side * ctx.rng.uniform(60, 95))
+                way = ctx.belief.open_direction(ctx.now, self.side * 45.0, self.DETOUR_OPEN_M, max_dev=50.0)
+                if way is not None and abs(way) >= 20:
+                    ctx.counters["unstick:turn_to_open"] += 1
+                    motor.turn(way)
+                else:
+                    motor.turn(self.side * ctx.rng.uniform(60, 95))
             elif elapsed > 0.6:
                 motor.move(forward=True)
             if elapsed > 1.8:
@@ -166,13 +236,78 @@ class Navigator:
                 return "gave_up" if self.ladders >= 3 else "moving"
         return "unsticking"
 
+    def _look(self, ctx: Context, elapsed: float, first: bool) -> str:
+        """Stand still, level the view and look left and right; walk the best way seen."""
+        motor, belief = ctx.motor, ctx.belief
+        ctx.wants.add("space")
+        heading = belief.heading.value
+        if first:
+            if belief.space.value is None or heading is None:
+                # Nothing to look with (no depth model) or no compass to remember directions by.
+                self._next(ctx)
+                return "unsticking"
+            motor.move()
+            ctx.memory.block(heading, ctx.now)
+            if motor.pitch is not None and abs(motor.pitch) > 3:
+                motor.pitch_to(0.0)
+            self._look_turns = list(self.LOOK_TURNS)
+            self._look_still_since = None
+            self._look_goal = None if self.goal_error is None else (float(heading) + self.goal_error) % 360
+            return "unsticking"
+        if elapsed > self.LOOK_TIMEOUT_S:
+            self._end_look()
+            self._next(ctx)
+            return "unsticking"
+        if motor.controller.turning:
+            self._look_still_since = None
+            return "unsticking"
+        if self._look_still_since is None:
+            self._look_still_since = ctx.now
+            return "unsticking"
+        view = belief.space.value
+        if view is None or view.heading is None or belief.space.at < self._look_still_since:
+            return "unsticking"  # waiting for a reading of this view
+        self._look_seen += [((view.heading + yaw) % 360, metres) for yaw, metres in view.sectors if metres is not None]
+        self._look_still_since = None
+        if self._look_turns:
+            motor.turn(self._look_turns.pop(0))
+            return "unsticking"
+        options = [(bearing, metres) for bearing, metres in self._look_seen
+                   if metres >= self.LOOK_OPEN_M and not ctx.memory.is_blocked(bearing, ctx.now, spread=15.0)]
+        goal = self._look_goal
+        self._end_look()
+        if not options or heading is None:
+            self._next(ctx)
+            return "unsticking"
+
+        def score(option: tuple[float, float]) -> float:
+            bearing, metres = option
+            off = abs(_signed(bearing - goal)) if goal is not None else 0.0
+            return min(metres, 12.0) - 0.04 * off
+
+        best = max(options, key=score)[0]
+        motor.turn(_signed(best - float(heading)))
+        ctx.counters["unstick:look:ok"] += 1
+        self.rung = None
+        self._changes.clear()
+        self.detour = (best, ctx.now + self.LOOK_HOLD_S)
+        return "moving"
+
+    def _end_look(self) -> None:
+        self._look_seen, self._look_turns = [], []
+        self._look_still_since = None
+        self._look_goal = None
+
     def _next(self, ctx: Context) -> None:
         ctx.counters[f"unstick:{self.RUNGS[self.rung]}:no"] += 1
         self.rung += 1
         self.rung_at = ctx.now
+        self._entered = False
 
     def _finish(self) -> None:
         self.rung = None
+        self.detour = None
+        self._end_look()
         self._changes.clear()
 
 
@@ -244,6 +379,7 @@ class Level(Skill):
             return Status.RUNNING
         if self.in_phase(ctx) >= self.up and not motor.controller.turning:
             ctx.counters["levelled"] += 1
+            motor.levelled_at = ctx.now
             return Status.SUCCESS
         return Status.RUNNING
 
@@ -603,6 +739,201 @@ class Loot(Skill):
         if self.bin:
             return self.fail("OPEN_NO_EFFECT" if not self.opened else "BIN_NOTHING_TAKEN")
         return self.fail("NO_EFFECT")
+
+
+# ---------------------------------------------------------------------- seen targets
+
+GEAR_KINDS = ("bin_closed", "item", "deathbox", "bin_open")
+TOP_UP_KINDS = ("bin_closed", "deathbox")
+
+
+def target_heading(ctx: Context, detection) -> float | None:
+    heading = ctx.belief.heading.value
+    return None if heading is None else (float(heading) + detection.yaw) % 360
+
+
+def fresh_target(ctx: Context, kinds: tuple[str, ...], max_yaw: float = 75.0):
+    """The nearest-looking confirmed track of these kinds not already tried."""
+    candidates = []
+    for track in ctx.belief.tracks(ctx.now, kinds):
+        if abs(track.detection.yaw) > max_yaw or track.height_share < 0.025:
+            continue
+        if ctx.memory.tried_near("target", track.bearing, ctx.now, 60.0, spread=10.0):
+            continue
+        candidates.append(track)
+    # Bigger on screen = closer: go for the closest first.
+    return max(candidates, key=lambda t: t.height_share, default=None)
+
+
+class Approach(Skill):
+    """Walk to a bin, item or death box the detector sees, until its prompt shows.
+
+    The target is one track: the same bin while the view sways and other bins
+    come into view. If its track is lost for a moment, a track of the same kind
+    at about the same compass bearing is taken as it again. Loot takes
+    over once the prompt is up. Lost from view for 2 s, no closer for 6 s,
+    or close with no prompt: failure, and that direction is remembered.
+    """
+
+    name = "approach"
+    timeout_s = 20.0
+    KINDS = GEAR_KINDS
+
+    def __init__(self, ctx: Context) -> None:
+        super().__init__(ctx)
+        self.nav = Navigator()
+        target = fresh_target(ctx, self.KINDS)
+        self.track_id = target.id if target else None
+        self.kind = target.kind if target else None
+        self.heading = target.bearing if target else None
+        self.best_height = target.height_share if target else 0.0
+        self.best_at = ctx.now
+        self.seen_at = ctx.now
+        self.close_since: float | None = None
+
+    def _track(self, ctx: Context):
+        track = ctx.belief.tracker.get(self.track_id)
+        if track is not None and ctx.now - track.last_seen <= 0.8:
+            return track.detection
+        # Lost its identity (hidden for a moment): the same kind at about the same bearing.
+        best, best_error = None, 18.0
+        for candidate in ctx.belief.tracks(ctx.now, (self.kind,)):
+            if candidate.bearing is not None and self.heading is not None:
+                error = abs(_signed(candidate.bearing - self.heading))
+            else:
+                error = abs(candidate.detection.yaw)
+            if error < best_error:
+                best, best_error = candidate, error
+        if best is None:
+            return None
+        self.track_id = best.id
+        ctx.counters["approach:reacquired"] += 1
+        return best.detection
+
+    def step(self, ctx: Context) -> Status:
+        belief, motor = ctx.belief, ctx.motor
+        ctx.wants.add("detect")
+        if self.kind is None:
+            return self.fail("NO_TARGET")
+        if belief.current_prompt(ctx.now) is not None:
+            ctx.counters[f"approach:arrived:{self.kind}"] += 1
+            # Not again for a minute: loot decides what is worth taking from it.
+            ctx.memory.note_attempt("target", self.heading, ctx.now, "ARRIVED")
+            return Status.SUCCESS
+        target = self._track(ctx)
+        if target is not None:
+            self.seen_at = ctx.now
+            heading = target_heading(ctx, target)
+            if heading is not None:
+                self.heading = heading
+            if target.height_share > self.best_height * 1.1:
+                self.best_height, self.best_at = target.height_share, ctx.now
+            if target.height_share > 0.4:
+                self.close_since = self.close_since or ctx.now
+        if ctx.now - self.seen_at > 2.0:
+            return self._give_up(ctx, "LOST")
+        if ctx.now - self.best_at > 6.0:
+            return self._give_up(ctx, "NOT_CLOSING")
+        if self.close_since is not None and ctx.now - self.close_since > 3.0:
+            return self._give_up(ctx, "NO_PROMPT")
+        error = None
+        if self.heading is not None and belief.heading.value is not None:
+            error = _signed(self.heading - float(belief.heading.value))
+        elif target is not None:
+            error = target.yaw
+        if motor.pitch is not None and target is not None and not motor.controller.turning:
+            # Keep the target a little below the centre, where its prompt appears.
+            wanted = max(-35.0, min(5.0, motor.pitch + target.pitch - 3.0))
+            if abs(wanted - motor.pitch) > 6:
+                motor.pitch_to(wanted)
+        far = target is None or target.height_share < 0.12
+        if self.nav.drive(ctx, error, sprint=far) == "gave_up":
+            return self._give_up(ctx, "BLOCKED")
+        return Status.RUNNING
+
+    def _give_up(self, ctx: Context, reason: str) -> Status:
+        ctx.memory.note_attempt("target", self.heading, ctx.now, reason)
+        return self.fail(reason)
+
+
+class TopUp(Approach):
+    """Armed: still worth walking to a bin or a death box for ammo and heals."""
+
+    name = "top_up"
+    KINDS = TOP_UP_KINDS
+
+
+class Engage(Skill):
+    """Shoot at a bot the detector sees, the way a beginner would.
+
+    Only in Bot Royale (``ctx.allow_engage``). A short reaction delay first;
+    then turn toward it with an aiming error of a few degrees, aim down
+    sights, fire short bursts and re-aim every second or so, never tracking
+    it frame by frame. Holds fire while a teammate is in the way. Ends when
+    no bot has been seen for 1.5 s.
+    """
+
+    name = "engage"
+    timeout_s = 15.0
+
+    def __init__(self, ctx: Context) -> None:
+        super().__init__(ctx)
+        self.react_at = ctx.now + ctx.rng.uniform(0.3, 0.8)
+        self.next_aim = self.react_at
+        self.next_burst = self.react_at
+        self.seen_at = ctx.now
+        self.strafe = ctx.rng.choice((-1, 1))
+        self.target_id: int | None = None
+
+    def step(self, ctx: Context) -> Status:
+        belief, motor = ctx.belief, ctx.motor
+        ctx.wants.update({"detect", "center"})
+        tracks = belief.tracks(ctx.now, ("enemy",), within=0.6)
+        # Stay on one bot while it is in view rather than flicking between them.
+        tracks.sort(key=lambda t: t.id != self.target_id)
+        enemies = [t.detection for t in tracks]
+        if tracks:
+            self.target_id = tracks[0].id
+            self.seen_at = ctx.now
+        elif ctx.now - self.seen_at > 1.5:
+            return Status.SUCCESS
+        health = belief.health_share()
+        if health is not None and health < 0.3 and not belief.hit_confirmed.fresh(ctx.now, 3.0):
+            return self.fail("LOSING")
+        if ctx.now < self.react_at:
+            return Status.RUNNING
+        if not belief.is_armed():
+            return self.fail("NO_WEAPON")
+        if belief.mag.value == 0 and belief.mag.fresh(ctx.now, 1.0):
+            motor.aim(False, ctx.now)
+            if not motor.controller.busy_tapping:
+                motor.tap("reload")
+            return self.fail("NO_AMMO") if belief.out_of_ammo(ctx.now) else Status.RUNNING
+        motor.aim(True, ctx.now)
+        motor.move(left=self.strafe < 0, right=self.strafe > 0)
+        if enemies and ctx.now >= self.next_aim:
+            target = enemies[0]
+            width = abs(target.x2 - target.x1) / 2560 * 106.0
+            sigma = max(1.5, min(5.0, 0.3 * width + 1.0))
+            motor.turn(target.yaw + ctx.rng.gauss(0, sigma), 0.7 * target.pitch + ctx.rng.gauss(0, sigma * 0.6))
+            self.next_aim = ctx.now + ctx.rng.uniform(0.6, 1.2)
+            ctx.counters["engage:aim"] += 1
+        blocked = any(mate.covers_crosshair(margin=40) for mate in belief.seen(ctx.now, ("teammate",), within=0.6))
+        if blocked:
+            ctx.counters["engage:hold_teammate"] += 1
+        elif enemies and ctx.now >= self.next_burst and not motor.controller.busy_tapping:
+            motor.fire(ctx.rng.uniform(0.2, 0.5))
+            self.next_burst = ctx.now + ctx.rng.uniform(0.4, 0.9)
+            ctx.counters["engage:burst"] += 1
+            if ctx.rng.random() < 0.35:
+                self.strafe = -self.strafe
+        if belief.hit_confirmed.fresh(ctx.now, 0.5):
+            ctx.counters["engage:hit_confirmed_tick"] += 1
+        return Status.RUNNING
+
+    def stop(self, ctx: Context) -> None:
+        ctx.motor.aim(False, ctx.now)
+        super().stop(ctx)
 
 
 # ---------------------------------------------------------------------- travel

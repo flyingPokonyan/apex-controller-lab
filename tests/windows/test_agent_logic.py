@@ -52,6 +52,7 @@ class World:
         self.motor.counts_per_degree = 9.0
         self.motor.calibrated = True
         self.motor.pitch = 0.0
+        self.motor.levelled_at = self.now
         self.belief = Belief()
         self.memory = Memory()
 
@@ -282,3 +283,262 @@ class SkillTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+from windows.apex_automation.agent.detector import FRAME, Detection, decode
+from windows.apex_automation.agent.skills import Approach, Engage
+
+
+def seen(kind, yaw, pitch=0.0, height=0.1, x=1280.0):
+    half_h = height * FRAME[1] / 2
+    return Detection(kind, 0.9, x - 100, 720 - half_h, x + 100, 720 + half_h, yaw, pitch)
+
+
+class DetectionGoalTest(unittest.TestCase):
+    def test_unarmed_it_walks_to_a_bin_it_sees(self):
+        world = World()
+        manager = GoalManager()
+        world.see(detections=(seen("bin_closed", 20.0),))
+        self.assertNotEqual(manager.tick(world.ctx()), "approach")  # one read could be a stray box
+        world.now += 0.5
+        world.see(detections=(seen("bin_closed", 20.0),))
+        self.assertEqual(GoalManager().tick(world.ctx()), "approach")
+
+    def test_a_prompt_ends_the_approach_and_loot_takes_over(self):
+        world = World()
+        world.see(detections=(seen("bin_closed", 5.0, height=0.3),))
+        world.see(detections=(seen("bin_closed", 5.0, height=0.3),))
+        skill = Approach(world.ctx())
+        self.assertEqual(skill.step(world.ctx()), Status.RUNNING)
+        world.advance(0.2)
+        world.see(detections=(seen("bin_closed", 2.0, height=0.45),), prompt=Prompt("打开", "打开", 1500, 800))
+        self.assertEqual(skill.step(world.ctx()), Status.SUCCESS)
+
+    def test_a_target_out_of_sight_is_given_up_and_remembered(self):
+        world = World()
+        world.see(detections=(seen("item", -10.0),))
+        world.see(detections=(seen("item", -10.0),))
+        skill = Approach(world.ctx())
+        status = Status.RUNNING
+        for _ in range(40):
+            world.advance(0.1)
+            world.see(detections=())
+            status = skill.step(world.ctx())
+            if status is not Status.RUNNING:
+                break
+        self.assertEqual((status, skill.reason), (Status.FAILED, "LOST"))
+        self.assertTrue(world.memory.tried_near("target", 80.0, world.now, 60.0, spread=15.0))
+
+    def test_bots_are_engaged_only_when_allowed(self):
+        world = World()
+        for _ in range(3):
+            world.see(weapon=True, mag=12, detections=(seen("enemy", 8.0),))
+        manager = GoalManager()
+        self.assertNotEqual(manager.tick(world.ctx()), "engage")
+        ctx = world.ctx()
+        ctx.allow_engage = True
+        self.assertEqual(GoalManager().tick(ctx), "engage")
+
+    def test_no_shot_while_a_teammate_is_in_the_way(self):
+        world = World()
+        for _ in range(3):
+            world.see(weapon=True, mag=12, detections=(seen("enemy", 1.0), seen("teammate", 0.0, height=0.3)))
+        ctx = world.ctx()
+        ctx.allow_engage = True
+        skill = Engage(ctx)
+        for _ in range(20):
+            world.advance(0.1)
+            world.see(weapon=True, mag=12, detections=(seen("enemy", 1.0), seen("teammate", 0.0, height=0.3)))
+            ctx = world.ctx()
+            ctx.allow_engage = True
+            skill.step(ctx)
+        self.assertNotIn("left", world.sender.down)
+        self.assertGreater(ctx.counters["engage:hold_teammate"], 0)
+        self.assertEqual(ctx.counters["engage:burst"], 0)
+
+
+class DecodeTest(unittest.TestCase):
+    def test_head_output_becomes_boxes_with_bearings(self):
+        import numpy as np
+        output = np.zeros((11, 2), dtype=np.float32)
+        # One bin straight ahead at 416 scale (2560 -> 416 is 0.1625).
+        output[:4, 0] = [208, 117, 40, 30]
+        output[4, 0] = 0.9
+        output[:4, 1] = [10, 10, 5, 5]
+        output[9, 1] = 0.1
+        found = decode(output, 416 / 2560, 0.4, 960.0)
+        self.assertEqual(len(found), 1)
+        self.assertEqual(found[0].kind, "bin_closed")
+        self.assertAlmostEqual(found[0].yaw, 0.0, delta=0.5)
+        self.assertAlmostEqual(found[0].pitch, 0.0, delta=0.5)
+
+
+from windows.apex_automation.agent.tracking import Tracker
+
+
+class TrackerTest(unittest.TestCase):
+    def test_the_same_bin_keeps_its_identity_while_we_turn(self):
+        tracker = Tracker()
+        tracker.update((seen("bin_closed", 20.0),), 90.0, 1.0)
+        first = tracker.tracks[0].id
+        # Turned 20 degrees right: the bin is now straight ahead, same bearing.
+        tracker.update((seen("bin_closed", 0.0),), 110.0, 1.5)
+        self.assertEqual([t.id for t in tracker.tracks], [first])
+        self.assertTrue(tracker.tracks[0].confirmed)
+        self.assertAlmostEqual(tracker.tracks[0].bearing, 110.0)
+
+    def test_two_bins_are_two_tracks_and_old_ones_are_forgotten(self):
+        tracker = Tracker()
+        tracker.update((seen("bin_closed", -30.0), seen("bin_closed", 30.0)), 0.0, 1.0)
+        self.assertEqual(len(tracker.tracks), 2)
+        tracker.update((seen("bin_closed", 30.0),), 0.0, 4.0)
+        self.assertEqual(len(tracker.tracks), 1)
+        self.assertEqual(tracker.tracks[0].hits, 1)  # the old pair was forgotten
+
+    def test_a_much_bigger_box_is_not_the_same_thing(self):
+        tracker = Tracker()
+        tracker.update((seen("bin_closed", 0.0, height=0.05),), 0.0, 1.0)
+        tracker.update((seen("bin_closed", 0.0, height=0.3),), 0.0, 1.5)
+        self.assertEqual(len(tracker.tracks), 2)
+
+    def test_approach_stays_on_its_bin_when_a_closer_one_appears(self):
+        world = World()
+        for _ in range(2):
+            world.see(detections=(seen("bin_closed", -20.0, height=0.1),))
+        skill = Approach(world.ctx())
+        target = skill.track_id
+        for _ in range(3):
+            world.advance(0.2)
+            world.see(detections=(seen("bin_closed", -20.0, height=0.1), seen("bin_closed", 25.0, height=0.25)))
+            self.assertEqual(skill.step(world.ctx()), Status.RUNNING)
+        self.assertEqual(skill.track_id, target)
+
+
+import math
+
+import numpy as np
+
+from windows.apex_automation.agent.space import SpaceView, free_from_disparity
+
+
+def scene(wall_rows: dict[range, int], h=266, w=476, hfov=106.26, pitch=0.0):
+    """Inverse depth of flat floor seen from eye height, with walls standing in some columns from a row up."""
+    focal = (w / 2) / math.tan(math.radians(hfov) / 2)
+    rows = np.arange(h)
+    alpha = np.radians(-pitch) + np.arctan((rows - h / 2) / focal)
+    floor = np.where(alpha > 0.005, np.tan(np.clip(alpha, 0.005, None)) / 1.6, 0.003)
+    disp = np.repeat(floor[:, None], w, axis=1).astype(np.float32)
+    for columns, foot in wall_rows.items():
+        for x in columns:
+            disp[:foot, x] = disp[foot, x]  # standing surface: same depth all the way up
+    return disp
+
+
+class FreeSpaceTest(unittest.TestCase):
+    def test_open_floor_is_free_and_a_wall_ahead_is_close(self):
+        open_ = free_from_disparity(scene({}), 0.0, 106.26)
+        self.assertTrue(all(metres == 25.0 for _, metres in open_ if metres is not None))
+        # A wall whose foot is at row 200 straight ahead: about 1.6 / tan(angle of row 200).
+        focal = 238 / math.tan(math.radians(53.13))
+        expected = 1.6 / math.tan(math.atan((200 - 133) / focal))
+        sectors = free_from_disparity(scene({range(200, 276): 200}), 0.0, 106.26)
+        ahead = [metres for yaw, metres in sectors if abs(yaw) < 3]
+        self.assertTrue(ahead)
+        self.assertAlmostEqual(min(ahead), expected, delta=0.6)
+        left = [metres for yaw, metres in sectors if yaw < -30]
+        self.assertTrue(all(metres == 25.0 for metres in left))
+
+    def test_no_floor_at_the_bottom_of_the_view_is_right_in_front(self):
+        sectors = free_from_disparity(scene({range(0, 476): 230}), 0.0, 106.26)
+        self.assertTrue(all(metres == 0.0 for _, metres in sectors if metres is not None))
+
+    def test_navigator_detours_around_something_close_ahead(self):
+        from windows.apex_automation.agent.skills import Navigator
+
+        world = World()
+        sectors = tuple((float(yaw), 1.5 if -10 <= yaw <= 10 else 12.0) for yaw in range(-50, 51, 4))
+        world.see(space=sectors)
+        nav = Navigator()
+        ctx = world.ctx()
+        self.assertEqual(nav.drive(ctx, 0.0, sprint=False), "moving")
+        self.assertEqual(ctx.counters["nav:detour"], 1)
+        bearing, _until = nav.detour
+        self.assertGreaterEqual(abs((bearing - 90 + 180) % 360 - 180), 10)
+        # Held for a moment even when the next reading shows nothing.
+        world.advance(0.3)
+        ctx = world.ctx()
+        nav.drive(ctx, 0.0, sprint=False)
+        self.assertEqual(ctx.counters["nav:detour"], 0)
+        self.assertIsNotNone(nav.detour)
+
+    def test_open_ground_ahead_needs_no_detour(self):
+        from windows.apex_automation.agent.skills import Navigator
+
+        world = World()
+        world.see(space=tuple((float(yaw), 12.0) for yaw in range(-50, 51, 4)))
+        nav = Navigator()
+        ctx = world.ctx()
+        nav.drive(ctx, 5.0, sprint=False)
+        self.assertIsNone(nav.detour)
+        self.assertIsInstance(SpaceView(90.0, ()).sectors, tuple)
+
+
+class UnstickAndLevelTest(unittest.TestCase):
+    def nav_at(self, rung_name):
+        from windows.apex_automation.agent.skills import Navigator
+        nav = Navigator()
+        nav.rung = Navigator.RUNGS.index(rung_name)
+        nav.goal_error = 0.0
+        return nav
+
+    def test_the_turn_rung_turns_even_when_its_first_tick_comes_late(self):
+        world = World()
+        world.see()
+        nav = self.nav_at("turn")
+        nav.rung_at = world.now - 0.2  # decisions are ~0.1 s apart
+        nav.drive(world.ctx(), 0.0, sprint=False)
+        self.assertTrue(world.controller.turning)
+
+    def test_look_around_levels_looks_left_and_right_and_takes_the_open_way(self):
+        world = World()
+        walled = tuple((float(yaw), 0.0) for yaw in range(-48, 49, 8))
+        world.see(space=walled)
+        nav = self.nav_at("look")
+        nav.rung_at = world.now
+        views = {90: walled, 10: walled,
+                 # Facing 170: open ground a little right of the view centre.
+                 170: tuple((float(yaw), 12.0 if 0 <= yaw <= 16 else 1.0) for yaw in range(-48, 49, 8))}
+        heading, result = 90, "unsticking"
+        for _ in range(80):
+            result = nav.drive(world.ctx(), 0.0, sprint=False)
+            if result == "moving":
+                break
+            world.advance(0.1)
+            if not world.controller.turning:
+                # The compass reads where the turns left us; a depth reading comes each tick.
+                sent = world.controller.sent_counts[0] / world.motor.counts_per_degree
+                heading = round((90 + sent) % 360)
+                nearest = min(views, key=lambda key: abs((key - heading + 180) % 360 - 180))
+                world.see(heading=heading, space=views[nearest])
+        self.assertEqual(result, "moving")
+        bearing, _until = nav.detour
+        self.assertLess(abs((bearing - 178 + 180) % 360 - 180), 12)
+        self.assertEqual(world.motor.pitch, 0.0)
+
+    def test_without_depth_readings_look_is_skipped(self):
+        world = World()
+        world.see()
+        nav = self.nav_at("look")
+        nav.rung_at = world.now
+        nav.drive(world.ctx(), 0.0, sprint=False)
+        from windows.apex_automation.agent.skills import Navigator
+        self.assertEqual(Navigator.RUNGS[nav.rung], "sidestep")
+
+    def test_the_view_is_levelled_again_every_150_seconds_when_quiet(self):
+        world = World()
+        for _ in range(3):
+            world.see()
+        world.motor.levelled_at = world.now - 10
+        self.assertNotEqual(GoalManager().tick(world.ctx()), "level")
+        world.motor.levelled_at = world.now - 200
+        self.assertEqual(GoalManager().tick(world.ctx()), "level")
