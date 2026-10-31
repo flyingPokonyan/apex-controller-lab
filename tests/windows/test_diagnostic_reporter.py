@@ -65,6 +65,17 @@ class DiagnosticReporterTest(unittest.TestCase):
         self.assertTrue(all(e["leaseId"] == "lease_1" and e["runId"] is None for e in events))
         self.assertTrue(self.worker.url.endswith("/v1/runner/diagnostics"))
 
+    def test_launch_stall_facts_are_uploaded_as_one_allowlisted_event(self):
+        from apex_automation import launch_probe
+        evidence = EaLoginEvidence(self.root / "ea-login", save_screenshots=False)
+        facts = launch_probe.probe(run=Mock(return_value=Mock(returncode=0, stdout="")))
+        evidence.timing("APEX_LAUNCH_STALL", leaseId="lease_1", relaunched=True, waitedMs=180000, **facts)
+        self.assertEqual(self.worker.process_once(), 0)
+        event, = self.transport.requests[0]["events"]
+        self.assertEqual(event["type"], "APEX_LAUNCH_STALL")
+        self.assertEqual(event["leaseId"], "lease_1")
+        self.assertEqual(set(event["payload"]), {"relaunched", "waitedMs", "processes", "crashes", "probeOk"})
+
     def test_screenshot_io_failure_does_not_block_text_diagnostics(self):
         self.ea()
         self.worker._screenshots = Mock()

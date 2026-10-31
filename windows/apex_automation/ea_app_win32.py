@@ -47,6 +47,7 @@ from .ea_app import (
     EaWindowUnavailable,
     OtpChallenge,
 )
+from . import launch_probe
 from .ea_dialogs import (
     CLOUD_LAUNCH_INTERRUPTED,
     CLOUD_UPLOAD_ERROR_TERMS,
@@ -3062,6 +3063,25 @@ class WindowsEaHybridDriver(EaPasswordRecoveryMixin):
             + (f"：{last_error}" if last_error is not None else "")
         )
 
+    def _report_launch_stall(self, relaunched: bool, waited_s: float) -> None:
+        """Diagnostic only: what the desktop held when Play brought no game.
+
+        Never lets the probe delay or break the recovery that follows.
+        """
+        evidence = getattr(self, "evidence", None)
+        if evidence is None:
+            return
+        try:
+            facts = launch_probe.probe()
+            evidence.timing(
+                "APEX_LAUNCH_STALL",
+                relaunched=bool(relaunched),
+                waitedMs=round(max(0.0, waited_s) * 1000),
+                **facts,
+            )
+        except Exception:
+            pass
+
     @staticmethod
     def _process_running(executable: str) -> bool:
         try:
@@ -3124,6 +3144,7 @@ class WindowsEaHybridDriver(EaPasswordRecoveryMixin):
             if update_deadline is not None and now >= update_deadline:
                 raise EaApexStartFailed("EA App 中 Apex 更新等待超过 2 小时")
             if launch_deadline is not None and now >= launch_deadline:
+                self._report_launch_stall(relaunched, now - (launch_deadline - APEX_LAUNCH_TIMEOUT_S))
                 if unknown_dialog:
                     raise EaApexLaunchStalled(f"点击 EA Play 后未发现 Apex 进程，EA 弹窗未识别：{unknown_dialog[:80]}")
                 raise EaApexLaunchStalled("点击 EA Play 后未发现 Apex 进程")
