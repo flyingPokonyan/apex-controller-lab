@@ -109,6 +109,7 @@
       "mouse": {"countsPerDegree": 9.091},
       "crouchMode": "hold",
       "sliceMs": 4000,
+      "space": {"model": "models/depth_anything_v2_small_int8.onnx", "size": [182, 322]},
       "_note": "目标驱动的对局 agent（docs：RUNNER_AGENT_DESIGN_2026-10-30）。独立输入线程连续按键和转向；按优先级在倒地爬行、还击、撤离、出毒圈、标定、回正视角、回血、装填、捡东西/开箱、跟队友、搜索、观察之间选择，每个目标有成功/失败/超时和冷却。每次占用 sliceMs 毫秒，之间由 pilot 照常识别状态，状态不是对局存活就立刻松开所有键。默认不用：要启用，把 in-match-live 的 action 改成 inMatchAgent，minIntervalMs / maxIntervalMs 改成 100 / 250。heal 5 是数字键 4（使用医疗物品）。"
     },
     "detachScanCode": 29,
