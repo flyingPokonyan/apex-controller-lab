@@ -52,6 +52,7 @@ class World:
         self.motor.counts_per_degree = 9.0
         self.motor.calibrated = True
         self.motor.pitch = 0.0
+        self.motor.levelled_at = self.now
         self.belief = Belief()
         self.memory = Memory()
 
@@ -480,3 +481,64 @@ class FreeSpaceTest(unittest.TestCase):
         nav.drive(ctx, 5.0, sprint=False)
         self.assertIsNone(nav.detour)
         self.assertIsInstance(SpaceView(90.0, ()).sectors, tuple)
+
+
+class UnstickAndLevelTest(unittest.TestCase):
+    def nav_at(self, rung_name):
+        from windows.apex_automation.agent.skills import Navigator
+        nav = Navigator()
+        nav.rung = Navigator.RUNGS.index(rung_name)
+        nav.goal_error = 0.0
+        return nav
+
+    def test_the_turn_rung_turns_even_when_its_first_tick_comes_late(self):
+        world = World()
+        world.see()
+        nav = self.nav_at("turn")
+        nav.rung_at = world.now - 0.2  # decisions are ~0.1 s apart
+        nav.drive(world.ctx(), 0.0, sprint=False)
+        self.assertTrue(world.controller.turning)
+
+    def test_look_around_levels_looks_left_and_right_and_takes_the_open_way(self):
+        world = World()
+        walled = tuple((float(yaw), 0.0) for yaw in range(-48, 49, 8))
+        world.see(space=walled)
+        nav = self.nav_at("look")
+        nav.rung_at = world.now
+        views = {90: walled, 10: walled,
+                 # Facing 170: open ground a little right of the view centre.
+                 170: tuple((float(yaw), 12.0 if 0 <= yaw <= 16 else 1.0) for yaw in range(-48, 49, 8))}
+        heading, result = 90, "unsticking"
+        for _ in range(80):
+            result = nav.drive(world.ctx(), 0.0, sprint=False)
+            if result == "moving":
+                break
+            world.advance(0.1)
+            if not world.controller.turning:
+                # The compass reads where the turns left us; a depth reading comes each tick.
+                sent = world.controller.sent_counts[0] / world.motor.counts_per_degree
+                heading = round((90 + sent) % 360)
+                nearest = min(views, key=lambda key: abs((key - heading + 180) % 360 - 180))
+                world.see(heading=heading, space=views[nearest])
+        self.assertEqual(result, "moving")
+        bearing, _until = nav.detour
+        self.assertLess(abs((bearing - 178 + 180) % 360 - 180), 12)
+        self.assertEqual(world.motor.pitch, 0.0)
+
+    def test_without_depth_readings_look_is_skipped(self):
+        world = World()
+        world.see()
+        nav = self.nav_at("look")
+        nav.rung_at = world.now
+        nav.drive(world.ctx(), 0.0, sprint=False)
+        from windows.apex_automation.agent.skills import Navigator
+        self.assertEqual(Navigator.RUNGS[nav.rung], "sidestep")
+
+    def test_the_view_is_levelled_again_every_150_seconds_when_quiet(self):
+        world = World()
+        for _ in range(3):
+            world.see()
+        world.motor.levelled_at = world.now - 10
+        self.assertNotEqual(GoalManager().tick(world.ctx()), "level")
+        world.motor.levelled_at = world.now - 200
+        self.assertEqual(GoalManager().tick(world.ctx()), "level")

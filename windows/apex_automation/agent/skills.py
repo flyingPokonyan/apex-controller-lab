@@ -84,8 +84,11 @@ class Navigator:
 
     Blocked = forward held, the view not turning, and the scene not changing
     for BLOCKED_AFTER_S. The ladder: jump (Apex mantles low walls and sills),
-    sidestep along the wall, climb (hold forward and jump against it), turn
-    60–90° away; each rung is given a moment and checked before the next.
+    look around (level the view, look left and right, walk the most open way
+    nearest the goal), sidestep along the wall, climb (hold forward and jump
+    against it), turn 60–90° away; each rung is given a moment and checked
+    before the next. Looking around needs free-space readings; without them
+    the rung is skipped.
 
     With free-space readings (agent.space) it also looks before it walks:
     something within DETOUR_NEAR_M straight toward the goal while another
@@ -95,19 +98,34 @@ class Navigator:
     one.
     """
 
-    RUNGS = ("jump", "sidestep", "climb", "turn")
+    RUNGS = ("jump", "look", "sidestep", "climb", "turn")
     DETOUR_NEAR_M = 2.5
     DETOUR_OPEN_M = 5.0
     DETOUR_HOLD_S = 1.5
+    # Looking around: from the blocked view, left then across to the right, which
+    # with the ~106° view covers about 270°; a way needs this many metres free.
+    LOOK_TURNS = (-80.0, 160.0)
+    LOOK_OPEN_M = 4.0
+    LOOK_HOLD_S = 3.0
+    LOOK_TIMEOUT_S = 6.0
 
     def __init__(self) -> None:
         self._changes: deque[tuple[float, float]] = deque(maxlen=20)
         self.rung: int | None = None
         self.rung_at = 0.0
+        # Whether the current rung has run its first step: decisions come every
+        # ~0.1 s, so "the first 50 ms of a rung" may never be seen.
+        self._entered = False
         self.side = 1
         self.ladders = 0
         # (compass heading of the detour, until)
         self.detour: tuple[float, float] | None = None
+        # The goal's heading error when the ladder started, for choosing a way.
+        self.goal_error: float | None = None
+        self._look_seen: list[tuple[float, float]] = []
+        self._look_turns: list[float] = []
+        self._look_still_since: float | None = None
+        self._look_goal: float | None = None
 
     def note(self, ctx: Context, moving: bool) -> None:
         change = ctx.belief.scene_change.value
@@ -131,8 +149,10 @@ class Navigator:
         self.note(ctx, moving=True)
         if self.blocked(ctx):
             self._changes.clear()
+            self.goal_error = heading_error
             self.rung = 0
             self.rung_at = ctx.now
+            self._entered = False
             side = ctx.belief.more_open_side(ctx.now)
             self.side = side if side is not None else ctx.rng.choice((-1, 1))
             ctx.counters["unstick:start"] += 1
@@ -172,18 +192,22 @@ class Navigator:
         motor = ctx.motor
         rung = self.RUNGS[self.rung]
         elapsed = ctx.now - self.rung_at
+        first, self._entered = not self._entered, True
         change = ctx.belief.scene_change.value
         moving_again = isinstance(change, float) and change >= STILL_CHANGE * 2 and elapsed > 0.35
-        if elapsed > 0.35 and moving_again and rung != "turn":
+        # Turning the view changes the scene too: that is not moving again.
+        if elapsed > 0.35 and moving_again and rung not in ("turn", "look"):
             ctx.counters[f"unstick:{rung}:ok"] += 1
             self._finish()
             return "moving"
         if rung == "jump":
-            if elapsed < 0.05:
+            if first:
                 motor.move(forward=True)
                 motor.tap("jump", (0.12, 0.2))
             elif elapsed > 0.7:
                 self._next(ctx)
+        elif rung == "look":
+            return self._look(ctx, elapsed, first)
         elif rung == "sidestep":
             motor.move(forward=True, left=self.side < 0, right=self.side > 0)
             if elapsed > 0.9:
@@ -193,7 +217,7 @@ class Navigator:
             if elapsed > 1.2:
                 self._next(ctx)
         elif rung == "turn":
-            if elapsed < 0.05:
+            if first:
                 heading = ctx.belief.heading.value
                 ctx.memory.block(heading, ctx.now)
                 motor.move()
@@ -212,14 +236,78 @@ class Navigator:
                 return "gave_up" if self.ladders >= 3 else "moving"
         return "unsticking"
 
+    def _look(self, ctx: Context, elapsed: float, first: bool) -> str:
+        """Stand still, level the view and look left and right; walk the best way seen."""
+        motor, belief = ctx.motor, ctx.belief
+        ctx.wants.add("space")
+        heading = belief.heading.value
+        if first:
+            if belief.space.value is None or heading is None:
+                # Nothing to look with (no depth model) or no compass to remember directions by.
+                self._next(ctx)
+                return "unsticking"
+            motor.move()
+            ctx.memory.block(heading, ctx.now)
+            if motor.pitch is not None and abs(motor.pitch) > 3:
+                motor.pitch_to(0.0)
+            self._look_turns = list(self.LOOK_TURNS)
+            self._look_still_since = None
+            self._look_goal = None if self.goal_error is None else (float(heading) + self.goal_error) % 360
+            return "unsticking"
+        if elapsed > self.LOOK_TIMEOUT_S:
+            self._end_look()
+            self._next(ctx)
+            return "unsticking"
+        if motor.controller.turning:
+            self._look_still_since = None
+            return "unsticking"
+        if self._look_still_since is None:
+            self._look_still_since = ctx.now
+            return "unsticking"
+        view = belief.space.value
+        if view is None or view.heading is None or belief.space.at < self._look_still_since:
+            return "unsticking"  # waiting for a reading of this view
+        self._look_seen += [((view.heading + yaw) % 360, metres) for yaw, metres in view.sectors if metres is not None]
+        self._look_still_since = None
+        if self._look_turns:
+            motor.turn(self._look_turns.pop(0))
+            return "unsticking"
+        options = [(bearing, metres) for bearing, metres in self._look_seen
+                   if metres >= self.LOOK_OPEN_M and not ctx.memory.is_blocked(bearing, ctx.now, spread=15.0)]
+        goal = self._look_goal
+        self._end_look()
+        if not options or heading is None:
+            self._next(ctx)
+            return "unsticking"
+
+        def score(option: tuple[float, float]) -> float:
+            bearing, metres = option
+            off = abs(_signed(bearing - goal)) if goal is not None else 0.0
+            return min(metres, 12.0) - 0.04 * off
+
+        best = max(options, key=score)[0]
+        motor.turn(_signed(best - float(heading)))
+        ctx.counters["unstick:look:ok"] += 1
+        self.rung = None
+        self._changes.clear()
+        self.detour = (best, ctx.now + self.LOOK_HOLD_S)
+        return "moving"
+
+    def _end_look(self) -> None:
+        self._look_seen, self._look_turns = [], []
+        self._look_still_since = None
+        self._look_goal = None
+
     def _next(self, ctx: Context) -> None:
         ctx.counters[f"unstick:{self.RUNGS[self.rung]}:no"] += 1
         self.rung += 1
         self.rung_at = ctx.now
+        self._entered = False
 
     def _finish(self) -> None:
         self.rung = None
         self.detour = None
+        self._end_look()
         self._changes.clear()
 
 
@@ -291,6 +379,7 @@ class Level(Skill):
             return Status.RUNNING
         if self.in_phase(ctx) >= self.up and not motor.controller.turning:
             ctx.counters["levelled"] += 1
+            motor.levelled_at = ctx.now
             return Status.SUCCESS
         return Status.RUNNING
 

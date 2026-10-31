@@ -35,7 +35,7 @@ HUD_LOST_S = 1.5
 EVERY = {"knocked": 0.5, "ring": 1.0, "center": 2.0, "heading": 0.25, "minimap": 0.3, "detect": 0.5}
 # Read only while a skill asks, and no more often than this (the depth model is the
 # slowest read: a few hundred ms on a Runner CPU).
-ON_DEMAND = {"space": 0.8}
+ON_DEMAND = {"space": 1.2}
 
 
 class AgentSession:
@@ -96,6 +96,7 @@ class AgentSession:
         self._first_armed: float | None = None
         self._last_tick = None
         self.motor.pitch = None
+        self.motor.levelled_at = None
         self.motor.fire_s = self.motor.aim_s = 0.0
         self.motor.aim_since = None
 
