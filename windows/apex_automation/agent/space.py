@@ -116,7 +116,10 @@ class FreeSpace:
 
     def disparity(self, frame: np.ndarray) -> np.ndarray:
         height, width = self.size
-        img = cv2.resize(frame[..., :3], (width, height), interpolation=cv2.INTER_AREA)[..., ::-1]
+        # Every few pixels first: an area resize of the whole 2560x1440 frame
+        # costs more than the model on a Runner CPU, and the model sees ~1/8 of it anyway.
+        step = max(1, frame.shape[1] // (width * 2))
+        img = cv2.resize(frame[::step, ::step, :3], (width, height), interpolation=cv2.INTER_AREA)[..., ::-1]
         blob = ((img.astype(np.float32) / 255.0 - MEAN) / STD).transpose(2, 0, 1)[None]
         return self.session.run(None, {self.input: np.ascontiguousarray(blob)})[0][0]
 
