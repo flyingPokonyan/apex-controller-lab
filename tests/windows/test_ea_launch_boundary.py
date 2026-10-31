@@ -131,6 +131,29 @@ class LaunchCleanupTest(unittest.TestCase):
         self.assertEqual(records.count("apex-play-again"), 1)
         self.assertLess(now[0], 60 + APEX_LAUNCH_TIMEOUT_S + 10)
 
+    def test_a_stalled_launch_records_what_the_desktop_held(self):
+        from apex_automation.ea_app import EaApexLaunchStalled
+        driver, now, clicks, records = self.launch(game_starts_at=float("inf"))
+        driver.evidence = Mock()
+        facts = {"processes": {}, "crashes": {}, "probeOk": True}
+        with patch("apex_automation.ea_app_win32.launch_probe.probe", return_value=facts) as probe:
+            with self.assertRaises(EaApexLaunchStalled):
+                driver.start_apex()
+        probe.assert_called_once()
+        kind, = driver.evidence.timing.call_args.args
+        self.assertEqual(kind, "APEX_LAUNCH_STALL")
+        self.assertTrue(driver.evidence.timing.call_args.kwargs["relaunched"])
+        self.assertGreaterEqual(driver.evidence.timing.call_args.kwargs["waitedMs"], APEX_LAUNCH_TIMEOUT_S * 1000)
+
+    def test_a_broken_probe_never_changes_the_launch_outcome(self):
+        from apex_automation.ea_app import EaApexLaunchStalled
+        driver, now, clicks, records = self.launch(game_starts_at=float("inf"))
+        driver.evidence = Mock()
+        with patch("apex_automation.ea_app_win32.launch_probe.probe", side_effect=RuntimeError("boom")):
+            with self.assertRaisesRegex(EaApexLaunchStalled, "未发现 Apex 进程"):
+                driver.start_apex()
+        driver.evidence.timing.assert_not_called()
+
     def test_unreadable_process_list_cannot_prove_no_game(self):
         for failure in (Mock(returncode=1, stdout=""), subprocess.TimeoutExpired("tasklist", 10)):
             with self.subTest(failure=type(failure).__name__):

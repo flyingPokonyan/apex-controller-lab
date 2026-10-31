@@ -121,6 +121,9 @@ EA_STEPS = frozenset(['OTHER',
  'signout-not-signed-in',
  'signout-timeout'])
 EA_PAGES = frozenset(['BANNED', 'CAPTCHA', 'EMAIL', 'EXPIRED_SESSION', 'NONE', 'OTP', 'OTP_METHOD', 'PASSWORD', 'RECOVERY_ACCOUNT', 'RESET_PASSWORD', 'RESET_SUCCESS', 'SIGNED_IN', 'UNKNOWN'])
+# APEX_LAUNCH_STALL (launch_probe.py): fixed labels only.
+LAUNCH_PROCESSES = frozenset(["game", "antiCheatLauncher", "antiCheatService", "eaDesktop", "eaBackground"])
+LAUNCH_CRASHES = frozenset(["game", "antiCheat", "eaDesktop"])
 PHASES = frozenset(['CLAIMING', 'EA_STARTING', 'EA_SIGNING_IN', 'EA_IDENTITY_VERIFYING', 'APEX_STARTING', 'APEX_PLAYING', 'APEX_STOPPING', 'EA_SIGNING_OUT', 'LEASE_COMPLETING'])
 
 
@@ -197,6 +200,21 @@ def validate_event(event):
             number(sample["count"], integer=True, minimum=1)
             for name in ("totalMs", "meanMs", "maxMs", "recentP95Ms"):
                 number(sample[name])
+    elif kind == "APEX_LAUNCH_STALL":
+        keys(payload, {"relaunched", "waitedMs", "processes", "crashes", "probeOk"})
+        flag(payload["relaunched"])
+        number(payload["waitedMs"])
+        flag(payload["probeOk"])
+        keys(payload["processes"], LAUNCH_PROCESSES)
+        for sample in payload["processes"].values():
+            keys(sample, {"count", "ageS", "memMb"})
+            number(sample["count"], integer=True, maximum=64)
+            for name in ("ageS", "memMb"):
+                if sample[name] is not None:
+                    number(sample[name])
+        keys(payload["crashes"], LAUNCH_CRASHES)
+        for count in payload["crashes"].values():
+            number(count, integer=True, maximum=1000)
     elif kind == "WORKFLOW_PHASE":
         keys(payload, {"previousPhase", "phase", "durationMs"})
         label(payload["previousPhase"], PHASES)

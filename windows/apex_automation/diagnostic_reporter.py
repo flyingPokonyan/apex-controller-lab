@@ -105,6 +105,8 @@ class DiagnosticReporter:
                         payload[key] = "OTHER"
             elif kind == "WORKFLOW_PHASE":
                 payload = {k: record[k] for k in ("previousPhase", "phase", "durationMs")}
+            elif kind == "APEX_LAUNCH_STALL":
+                payload = {k: record[k] for k in ("relaunched", "waitedMs", "processes", "crashes", "probeOk")}
             elif kind == "PERFORMANCE_SUMMARY":
                 kind = "EA_PERFORMANCE"
                 payload = {"windowMs": record["windowMs"], "metrics": {
